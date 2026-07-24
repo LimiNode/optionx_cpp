@@ -43,3 +43,6 @@
 [submodule "external/uni-algo"]
 	path = external/uni-algo
 	url = https://github.com/uni-algo/uni-algo.git
+[submodule "external/tg-client-stdio"]
+	path = external/tg-client-stdio
+	url = https://github.com/NewYaroslav/tg-client-stdio.git
