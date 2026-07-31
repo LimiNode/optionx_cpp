@@ -45,4 +45,4 @@
 	url = https://github.com/uni-algo/uni-algo.git
 [submodule "external/tg-client-stdio"]
 	path = external/tg-client-stdio
-	url = https://github.com/NewYaroslav/tg-client-stdio.git
+	url = https://github.com/LimiNode/tg-client-stdio.git
