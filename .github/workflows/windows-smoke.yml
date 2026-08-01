@@ -16,6 +16,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set up Python for tg-client-stdio
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tg-client-stdio worker
+        run: python -m pip install -e "external/tg-client-stdio[telegram]"
+
       - name: Configure
         run: >
           cmake -S . -B build-windows
@@ -99,3 +107,18 @@ jobs:
         shell: pwsh
         timeout-minutes: 3
         run: .\scripts\compile-metatrader-mql.ps1 -OutputDir build-windows\metaeditor-smoke -TimeoutSeconds 60
+
+      - name: Run tg-client-stdio Python tests
+        run: python -m unittest discover -s external/tg-client-stdio/tests/python
+
+      - name: Run tg-client-stdio OptionX consumer smoke
+        run: python tests/tg_client_stdio_consumer_smoke.py
+
+      - name: Configure tg-client-stdio C++ tests
+        run: cmake -S external/tg-client-stdio -B build-tg-client-stdio -DTG_CLIENT_STDIO_BUILD_TESTS=ON
+
+      - name: Build tg-client-stdio C++ tests
+        run: cmake --build build-tg-client-stdio --config Debug --parallel 2
+
+      - name: Run tg-client-stdio C++ tests
+        run: ctest --test-dir build-tg-client-stdio -C Debug --output-on-failure
