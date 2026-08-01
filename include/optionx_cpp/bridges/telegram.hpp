@@ -7,5 +7,6 @@
 
 #include "bridges/telegram/TelegramParsedMessage.hpp"
 #include "bridges/telegram/TelegramRawMessage.hpp"
+#include "bridges/telegram/TelegramSignalParser.hpp"
 
 #endif // OPTIONX_HEADER_BRIDGES_TELEGRAM_HPP_INCLUDED
