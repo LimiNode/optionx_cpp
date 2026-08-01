@@ -28,10 +28,17 @@ OptionX protocol together.
 | TradingView extension | `optionx_cpp/bridges/trading_view.hpp` | Adapter for payloads emitted by `browser_extensions/tradingview-alert-extension`. | HTTP. |
 | BinaryBot/BotBinary | `optionx_cpp/bridges/bot_binary.hpp` | Compatibility bridge and formatter/parser helpers for observed BinaryBot-compatible command strings. | HTTP `request=...`, file-signal name. |
 | Legacy trading pipe | `optionx_cpp/bridges/legacy_trading.hpp` | Compatibility bridge for the older named-pipe JSON trading protocol. | Named pipe. |
+| Telegram signal bridge | `optionx_cpp/bridges/telegram.hpp` | User-client message parser and live signal adapter. The Telegram worker/session remains an external source boundary. | stdio worker source, with source adapters kept outside the parser. |
 
 All families converge internally on OptionX DTOs such as `TradeSignal`,
 `TradeRequest`, account snapshots and bridge callbacks. The public wire format
 does not need to be the same for every family.
+
+Telegram is a source adapter family rather than a transport-only family. The
+public bridge consumes `TelegramMessageSource` callbacks, while authorization,
+proxy handling, dialog discovery and historical export belong to the
+`tg-client-stdio` worker/supervisor layer. Historical export remains a separate
+archive capability and is not added to `BaseBridge`.
 
 For practical embedding of the native HTTP/WebSocket server bridge, see
 `guides/protocol-v1-bridge-runtime.md`. For runnable bridge entry points, see
