@@ -889,6 +889,7 @@ if(OPTIONX_BUILD_TESTS)
         metatrader_paths_test
         telegram_dto_test
         telegram_signal_parser_test
+        telegram_signal_bridge_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS

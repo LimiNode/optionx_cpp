@@ -73,7 +73,6 @@ namespace optionx::bridges::telegram {
 
         /// \brief Serializes the DTO using worker-compatible field names.
         nlohmann::json to_json() const {
-            validate();
             return nlohmann::json{
                 {"chat_id", chat_id},
                 {"chat_title", chat_title},
