@@ -59,6 +59,10 @@ Currently maintained examples:
   bridge lifecycle with a deterministic in-memory source. The production
   source boundary can be backed by `tg-client-stdio`; this example needs no
   Telegram credentials.
+- `telegram_archive_parser_smoke.cpp` replays exported Telegram raw-message
+  records through the parser and keeps executable signals, outcomes and
+  diagnostics separate. It uses deterministic fixtures and needs no Telegram
+  credentials.
 - `metatrader_file_bridge_smoke.cpp` runs the C++ side of the MetaTrader
   Common\Files bridge against a temporary command/event layout.
 - `metatrader_file_command_writer_smoke.cpp` demonstrates the C++ command-writer
