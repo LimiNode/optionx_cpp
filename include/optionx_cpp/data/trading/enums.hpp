@@ -100,7 +100,8 @@ namespace optionx {
         METATRADER_FILE_TRANSPORT,      ///< MetaTrader common-files JSON-RPC bridge transport.
         BRIDGE_PROTOCOL_V1_HTTP_WEBSOCKET, ///< Bridge Protocol v1 HTTP/WebSocket server.
         BRIDGE_PROTOCOL_V1_NAMED_PIPE,  ///< Bridge Protocol v1 named-pipe server.
-        BOT_BINARY                       ///< BotBinary/BinaryBot compatibility bridge.
+        BOT_BINARY,                      ///< BotBinary/BinaryBot compatibility bridge.
+        TELEGRAM_SIGNAL                  ///< Telegram user-client signal bridge.
     };
 
     /// \brief Converts BridgeType to its string representation.
@@ -115,7 +116,8 @@ namespace optionx {
             "METATRADER_FILE_TRANSPORT",
             "BRIDGE_PROTOCOL_V1_HTTP_WEBSOCKET",
             "BRIDGE_PROTOCOL_V1_NAMED_PIPE",
-            "BOT_BINARY"
+            "BOT_BINARY",
+            "TELEGRAM_SIGNAL"
         };
         return utils::enum_string_or_unknown(str_data, static_cast<size_t>(value));
     }
@@ -133,6 +135,7 @@ namespace optionx {
             {"BRIDGE_PROTOCOL_V1_HTTP_WEBSOCKET", BridgeType::BRIDGE_PROTOCOL_V1_HTTP_WEBSOCKET},
             {"BRIDGE_PROTOCOL_V1_NAMED_PIPE", BridgeType::BRIDGE_PROTOCOL_V1_NAMED_PIPE},
             {"BOT_BINARY", BridgeType::BOT_BINARY},
+            {"TELEGRAM_SIGNAL", BridgeType::TELEGRAM_SIGNAL},
             {"BINARYBOT", BridgeType::BOT_BINARY},
             {"BOTBINARY", BridgeType::BOT_BINARY}
         };
