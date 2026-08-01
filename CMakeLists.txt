@@ -909,6 +909,7 @@ if(OPTIONX_BUILD_TESTS)
         telegram_dto_test
         telegram_signal_parser_test
         telegram_signal_bridge_test
+        telegram_worker_source_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS

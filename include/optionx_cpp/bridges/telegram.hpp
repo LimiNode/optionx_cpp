@@ -10,5 +10,6 @@
 #include "bridges/telegram/TelegramSignalParser.hpp"
 #include "bridges/telegram/TelegramSignalBridgeConfig.hpp"
 #include "bridges/telegram/TelegramSignalBridge.hpp"
+#include "bridges/telegram/TelegramWorkerMessageSource.hpp"
 
 #endif // OPTIONX_HEADER_BRIDGES_TELEGRAM_HPP_INCLUDED

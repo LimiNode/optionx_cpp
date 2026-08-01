@@ -335,7 +335,7 @@ Completed without an authorized Telegram session:
 Next steps:
 
 1. Merge and pin the worker repository's supervisor/archive PRs.
-2. Add `TelegramMessageSource` adapter code around `WorkerClient` and test it
+2. Pin the merged worker repository in an OptionX consumer and run the adapter
    against the mock worker process.
 3. Add a historical archive/parser fixture example.
 4. Perform the first real authorization, proxy and live-channel check with an
