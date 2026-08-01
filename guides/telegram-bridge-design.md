@@ -1,7 +1,8 @@
 # Telegram Bridge Design
 
-This document captures the intended direction for a future Telegram signal
-bridge. It is a design note, not a committed public API.
+This document captures the architecture and current boundaries of the Telegram
+signal bridge. The public C++ DTO/parser/bridge layer is implemented, while
+the authorized Telegram worker adapter remains a separate integration step.
 
 ## Problem Shape
 
@@ -52,6 +53,13 @@ Telegram payloads are JSON and do not need binary audio framing. Start with
 newline-delimited JSON over stdin/stdout. Keep the protocol versioned so a
 framed transport can replace JSONL later if media bytes ever need to cross the
 stdio boundary.
+
+The current OptionX bridge does not own a Telethon process. It consumes the
+`TelegramMessageSource` interface, so fake sources can exercise parsing and
+lifecycle without credentials. `TelegramWorkerMessageSource` now binds that
+interface to a WorkerClient-shaped process adapter; the parent repository will
+pin the concrete `tg-client-stdio::WorkerClient` only after its stacked worker
+PRs are merged.
 
 ## Stdio Protocol Envelope
 
@@ -107,7 +115,7 @@ Keep the live bridge, archive export, and parsing separate.
 
 ### Worker Client
 
-`TelegramWorkerClient` owns the process/session protocol. It should expose
+`tg-client-stdio::WorkerClient` owns the process/session protocol. It exposes
 operations such as:
 
 - `auth.status`;
@@ -130,6 +138,11 @@ message events into `TradeSignal` callbacks and signal reports.
 
 It should not expose historical export through `BaseBridge::run()` or
 `process()`. Bridge lifecycle remains live-intake lifecycle.
+
+The current bridge also applies a bounded identity-based dedupe cache. Parser
+diagnostics, duplicate messages, allocator failures and callback failures are
+reported through `BridgeSignalReport`; they do not silently become accepted
+signals.
 
 ### Archive Source
 
@@ -308,17 +321,30 @@ Proxy config should support at least SOCKS5 and HTTP where the underlying
 Telegram client library supports them. Proxy failures must be distinct from
 authorization failures.
 
-## First PR Sequence
+## Implementation Status And Next Steps
 
-1. Refactor `telegram-monitoring-tool` into a non-interactive worker command
-   with the JSONL envelope above, preserving the current interactive CLI as a
-   thin wrapper if needed.
-2. Add worker operations for `dialogs.list`, `messages.export` and
-   `messages.listen`.
-3. Add C++ protocol DTOs and a small worker client/supervisor in OptionX.
-4. Add `TelegramSignalParser` with pure text fixture tests.
-5. Add `TelegramSignalBridge` live intake using the parser.
-6. Add archive/parser example for historical backtest fixture generation.
+Completed without an authorized Telegram session:
 
-Keep the first OptionX PR focused on DTOs, parser and docs if the worker is not
-ready yet.
+1. `tg-client-stdio` worker protocol for dialogs, streaming export,
+   live listen/stop, auth status/code/2FA and HTTP/SOCKS proxy configuration.
+2. C++ worker supervisor and typed raw-message export DTOs in the standalone
+   worker repository.
+3. OptionX raw/parsed Telegram DTOs, deterministic regex parser and
+   source-independent `TelegramSignalBridge`.
+4. Fake-source unit coverage and a runnable no-credentials bridge example.
+
+Current no-credentials examples include a live fake-source bridge smoke and a
+deterministic archive/parser replay. The latter uses the same raw-message shape
+that `messages.export` streams, while keeping parser outcomes separate from
+executable signals.
+
+Next steps:
+
+1. Merge and pin the worker repository's supervisor/archive PRs.
+2. Pin the merged worker repository in an OptionX consumer and run the adapter
+   against the mock worker process.
+3. Perform the first real authorization, proxy and live-channel check with an
+   operator-provided Telegram session.
+
+OCR/vision remains a separate optional provider and should not block the text
+parser or the first authorized-session test.

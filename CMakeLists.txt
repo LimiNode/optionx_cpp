@@ -738,6 +738,44 @@ if(OPTIONX_BUILD_EXAMPLES)
         )
     endif()
 
+    add_executable(telegram_signal_bridge_smoke examples/telegram_signal_bridge_smoke.cpp)
+    target_compile_features(telegram_signal_bridge_smoke PRIVATE cxx_std_17)
+    target_include_directories(telegram_signal_bridge_smoke PRIVATE
+        ${EXAMPLE_INCLUDE_DIRS}
+        ${EXAMPLE_DEPS_INCLUDE_DIRS}
+    )
+    target_link_directories(telegram_signal_bridge_smoke PRIVATE ${EXAMPLE_LIBRARY_DIRS})
+    target_compile_definitions(
+        telegram_signal_bridge_smoke PRIVATE
+        ${EXAMPLE_DEFINES}
+        LOGIT_BASE_PATH="${LOGIT_BASE_PATH_FWD}"
+    )
+    if(MINGW)
+        target_compile_options(telegram_signal_bridge_smoke PRIVATE -Wa,-mbig-obj)
+    elseif(MSVC)
+        target_compile_options(telegram_signal_bridge_smoke PRIVATE /bigobj)
+    endif()
+    target_link_libraries(telegram_signal_bridge_smoke PRIVATE ${EXAMPLE_LIBS} optionx_cpp)
+
+    add_executable(telegram_archive_parser_smoke examples/telegram_archive_parser_smoke.cpp)
+    target_compile_features(telegram_archive_parser_smoke PRIVATE cxx_std_17)
+    target_include_directories(telegram_archive_parser_smoke PRIVATE
+        ${EXAMPLE_INCLUDE_DIRS}
+        ${EXAMPLE_DEPS_INCLUDE_DIRS}
+    )
+    target_link_directories(telegram_archive_parser_smoke PRIVATE ${EXAMPLE_LIBRARY_DIRS})
+    target_compile_definitions(
+        telegram_archive_parser_smoke PRIVATE
+        ${EXAMPLE_DEFINES}
+        LOGIT_BASE_PATH="${LOGIT_BASE_PATH_FWD}"
+    )
+    if(MINGW)
+        target_compile_options(telegram_archive_parser_smoke PRIVATE -Wa,-mbig-obj)
+    elseif(MSVC)
+        target_compile_options(telegram_archive_parser_smoke PRIVATE /bigobj)
+    endif()
+    target_link_libraries(telegram_archive_parser_smoke PRIVATE ${EXAMPLE_LIBS} optionx_cpp)
+
     add_executable(protocol_v1_bridge_smoke examples/protocol_v1_bridge_smoke.cpp)
     target_compile_features(protocol_v1_bridge_smoke PRIVATE cxx_std_17)
 
@@ -888,6 +926,9 @@ if(OPTIONX_BUILD_TESTS)
         bridge_host_test
         metatrader_paths_test
         telegram_dto_test
+        telegram_signal_parser_test
+        telegram_signal_bridge_test
+        telegram_worker_source_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS

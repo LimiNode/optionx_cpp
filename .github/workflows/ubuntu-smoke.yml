@@ -140,6 +140,12 @@ jobs:
       - name: Run protocol_v1_named_pipe_bridge_smoke
         run: ./build-linux/protocol_v1_named_pipe_bridge_smoke --self-test
 
+      - name: Build telegram_archive_parser_smoke
+        run: cmake --build build-linux --target telegram_archive_parser_smoke -j
+
+      - name: Run telegram_archive_parser_smoke
+        run: ./build-linux/telegram_archive_parser_smoke
+
       - name: Build market_data_subscription_contract_test
         run: cmake --build build-linux --target market_data_subscription_contract_test -j
 

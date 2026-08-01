@@ -55,6 +55,14 @@ Currently maintained examples:
 - `protocol_v1_named_pipe_bridge_smoke.cpp` starts Bridge Protocol v1 over a
   local named pipe and, on Windows, can run `--self-test` with a local pipe
   client.
+- `telegram_signal_bridge_smoke.cpp` demonstrates the Telegram parser and live
+  bridge lifecycle with a deterministic in-memory source. The production
+  source boundary can be backed by `tg-client-stdio`; this example needs no
+  Telegram credentials.
+- `telegram_archive_parser_smoke.cpp` replays exported Telegram raw-message
+  records through the parser and keeps executable signals, outcomes and
+  diagnostics separate. It uses deterministic fixtures and needs no Telegram
+  credentials.
 - `metatrader_file_bridge_smoke.cpp` runs the C++ side of the MetaTrader
   Common\Files bridge against a temporary command/event layout.
 - `metatrader_file_command_writer_smoke.cpp` demonstrates the C++ command-writer

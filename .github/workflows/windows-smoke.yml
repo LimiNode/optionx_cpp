@@ -71,6 +71,9 @@ jobs:
       - name: Build Bridge Protocol v1 named-pipe smoke example
         run: cmake --build build-windows --config Debug --target protocol_v1_named_pipe_bridge_smoke
 
+      - name: Build Telegram archive parser smoke example
+        run: cmake --build build-windows --config Debug --target telegram_archive_parser_smoke
+
       - name: Run MetaTrader file tests
         shell: pwsh
         run: |
@@ -92,6 +95,7 @@ jobs:
           .\build-windows\Debug\named_pipe_bridge_smoke.exe --self-test
           .\build-windows\Debug\protocol_v1_bridge_smoke.exe --self-test
           .\build-windows\Debug\protocol_v1_named_pipe_bridge_smoke.exe --self-test
+          .\build-windows\Debug\telegram_archive_parser_smoke.exe
 
       - name: Test MetaEditor compile smoke script
         shell: pwsh
