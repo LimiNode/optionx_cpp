@@ -887,6 +887,7 @@ if(OPTIONX_BUILD_TESTS)
     set(OPTIONX_LIGHTWEIGHT_TESTS
         bridge_host_test
         metatrader_paths_test
+        telegram_dto_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
