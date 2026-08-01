@@ -15,6 +15,7 @@ families are grouped by external protocol or adapter contract, not by transport.
 | BotBinary/BinaryBot | `optionx_cpp/bridges/bot_binary.hpp` | `BotBinaryBridgeConfig` | `examples/bot_binary_bridge_smoke.cpp` | Compatibility intake for BotBinary `request=...` HTTP URLs and file-signal filenames. |
 | BotBinary command helper | `optionx_cpp/bridges/bot_binary.hpp` | none | `examples/bot_binary_command_builder_smoke.cpp` | Formatter/parser helper for legacy BotBinary command strings. |
 | Legacy trading pipe | `optionx_cpp/bridges/legacy_trading.hpp` | `LegacyTradingBridgeConfig` | `examples/named_pipe_bridge_smoke.cpp` | Compatibility bridge for the older named-pipe JSON trading protocol. |
+| Telegram signal bridge | `optionx_cpp/bridges/telegram.hpp` | `TelegramSignalBridgeConfig` | `examples/telegram_signal_bridge_smoke.cpp` | Deterministic parser, source boundary, signal callback, duplicate report, and shutdown lifecycle without Telegram credentials. |
 
 ## Choosing A Bridge
 
@@ -29,6 +30,10 @@ families are grouped by external protocol or adapter contract, not by transport.
   BotBinary command string or file-signal filename.
 - Use the legacy trading pipe only for old clients that already speak that
   named-pipe JSON format.
+- Use the Telegram signal bridge when a user-client source must turn channel
+  messages into normalized signals. The production source is expected to be a
+  `tg-client-stdio` adapter; the parser and bridge can be tested independently
+  with a fake source.
 
 Compatibility bridges should convert their external payload into `TradeSignal`
 callbacks and reports. They do not need to expose Bridge Protocol v1 endpoints
