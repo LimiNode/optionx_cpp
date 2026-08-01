@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install tg-client-stdio worker
-        run: python -m pip install -e external/tg-client-stdio
+        run: python -m pip install -e "external/tg-client-stdio[telegram]"
 
       - name: Install system dependencies
         run: |
