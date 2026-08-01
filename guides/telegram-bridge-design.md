@@ -56,9 +56,10 @@ stdio boundary.
 
 The current OptionX bridge does not own a Telethon process. It consumes the
 `TelegramMessageSource` interface, so fake sources can exercise parsing and
-lifecycle without credentials. The concrete source adapter will bind that
-interface to `tg-client-stdio::WorkerClient` after the worker repository's
-supervisor and typed archive API are merged and pinned by OptionX.
+lifecycle without credentials. `TelegramWorkerMessageSource` now binds that
+interface to a WorkerClient-shaped process adapter; the parent repository will
+pin the concrete `tg-client-stdio::WorkerClient` only after its stacked worker
+PRs are merged.
 
 ## Stdio Protocol Envelope
 
@@ -332,13 +333,17 @@ Completed without an authorized Telegram session:
    source-independent `TelegramSignalBridge`.
 4. Fake-source unit coverage and a runnable no-credentials bridge example.
 
+Current no-credentials examples include a live fake-source bridge smoke and a
+deterministic archive/parser replay. The latter uses the same raw-message shape
+that `messages.export` streams, while keeping parser outcomes separate from
+executable signals.
+
 Next steps:
 
 1. Merge and pin the worker repository's supervisor/archive PRs.
 2. Pin the merged worker repository in an OptionX consumer and run the adapter
    against the mock worker process.
-3. Add a historical archive/parser fixture example.
-4. Perform the first real authorization, proxy and live-channel check with an
+3. Perform the first real authorization, proxy and live-channel check with an
    operator-provided Telegram session.
 
 OCR/vision remains a separate optional provider and should not block the text
