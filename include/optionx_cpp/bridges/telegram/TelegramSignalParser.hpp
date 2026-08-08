@@ -184,6 +184,19 @@ namespace optionx::bridges::telegram {
                 2,
             });
             config.outcome_rules.push_back({
+                "pair-otc-outcome",
+                "\\b" + symbol + R"([ \t]+OTC[ \t]+(WIN|LOSS|REFUND|DRAW)\b)",
+                1,
+                2,
+            });
+            config.outcome_rules.push_back({
+                "otc-pair-outcome",
+                R"(\bOTC[ \t]+)" + symbol +
+                    R"([ \t]+(WIN|LOSS|REFUND|DRAW)\b)",
+                1,
+                2,
+            });
+            config.outcome_rules.push_back({
                 "pair-profit",
                 "\\b" + symbol + R"([^\r\n]{0,40}\bPROFIT\b)",
                 1,
@@ -278,6 +291,12 @@ namespace optionx::bridges::telegram {
             std::size_t begin = 0;
             std::size_t end = 0;
             TelegramParsedSignal signal;
+        };
+
+        struct OutcomeCandidate {
+            std::size_t begin = 0;
+            std::size_t end = 0;
+            TelegramParsedOutcome outcome;
         };
 
         using TextSpan = std::pair<std::size_t, std::size_t>;
@@ -533,6 +552,15 @@ namespace optionx::bridges::telegram {
                 left.signal_name == right.signal_name;
         }
 
+        static bool same_outcome(
+                const TelegramParsedOutcome& left,
+                const TelegramParsedOutcome& right) {
+            return left.symbol == right.symbol &&
+                left.order_type == right.order_type &&
+                left.result == right.result &&
+                left.market == right.market;
+        }
+
         void parse_signals(
                 const TelegramRawMessage& raw,
                 TelegramParsedMessage& result,
@@ -669,10 +697,21 @@ namespace optionx::bridges::telegram {
             return TelegramOutcomeResult::UNKNOWN;
         }
 
+        static bool has_otc_prefix(
+                const std::string& text,
+                const std::size_t begin) {
+            const auto line_begin = text.rfind('\n', begin == 0 ? 0 : begin - 1);
+            const auto first = line_begin == std::string::npos ? 0 : line_begin + 1;
+            auto prefix = trim_ascii(text.substr(first, begin - first));
+            const auto separator = prefix.find_last_of(" \t");
+            prefix = prefix.substr(separator == std::string::npos ? 0 : separator + 1);
+            return upper(std::move(prefix)) == "OTC";
+        }
+
         std::vector<TextSpan> parse_outcomes(
                 const TelegramRawMessage& raw,
                 TelegramParsedMessage& result) const {
-            std::vector<TextSpan> spans;
+            std::vector<OutcomeCandidate> candidates;
             for (const auto& compiled : m_outcome_rules) {
                 for (std::sregex_iterator it(raw.text.begin(), raw.text.end(), compiled.expression);
                      it != std::sregex_iterator(); ++it) {
@@ -686,11 +725,22 @@ namespace optionx::bridges::telegram {
                         outcome.source_message_identity = raw.message_identity();
                         outcome.reply_to_message_identity = raw.reply_to_message_identity();
                         if (has_group(match, compiled.spec.symbol_group)) {
+                            const auto normalized_symbol = normalize_symbol(
+                                match[compiled.spec.symbol_group].str());
                             outcome.market = classify_market(
                                 match[compiled.spec.symbol_group].str(), match.str());
                             outcome.symbol = canonical_symbol(
-                                normalize_symbol(match[compiled.spec.symbol_group].str()),
+                                normalized_symbol,
                                 outcome.market);
+                            if (outcome.market == TelegramAssetMarket::UNKNOWN &&
+                                has_otc_prefix(
+                                    raw.text,
+                                    static_cast<std::size_t>(match.position()))) {
+                                outcome.market = TelegramAssetMarket::OTC;
+                                outcome.symbol = canonical_symbol(
+                                    normalized_symbol,
+                                    outcome.market);
+                            }
                         }
                         outcome.result = compiled.spec.fixed_result;
                         if (has_group(match, compiled.spec.result_group)) {
@@ -712,18 +762,11 @@ namespace optionx::bridges::telegram {
                         }
                         outcome.signal_name = raw.chat_title;
                         outcome.raw_text = match.str();
-                        const TextSpan span{
+                        candidates.push_back({
                             static_cast<std::size_t>(match.position()),
-                            static_cast<std::size_t>(match.position() + match.length())};
-                        const auto duplicate = std::find_if(
-                            spans.begin(), spans.end(), [&](const auto& existing) {
-                                return existing == span;
-                            });
-                        if (duplicate != spans.end()) {
-                            continue;
-                        }
-                        spans.push_back(span);
-                        result.outcomes.push_back(std::move(outcome));
+                            static_cast<std::size_t>(match.position() + match.length()),
+                            std::move(outcome),
+                        });
                     }
                     catch (const std::exception& error) {
                         result.diagnostics.push_back({
@@ -734,6 +777,53 @@ namespace optionx::bridges::telegram {
                         });
                     }
                 }
+            }
+
+            std::sort(candidates.begin(), candidates.end(), [](
+                    const auto& left,
+                    const auto& right) {
+                if (left.begin != right.begin) {
+                    return left.begin < right.begin;
+                }
+                return left.end < right.end;
+            });
+
+            std::vector<bool> rejected(candidates.size(), false);
+            bool ambiguous = false;
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                for (std::size_t j = i + 1; j < candidates.size(); ++j) {
+                    if (candidates[j].begin >= candidates[i].end) {
+                        break;
+                    }
+                    if (same_outcome(
+                            candidates[i].outcome,
+                            candidates[j].outcome)) {
+                        rejected[j] = true;
+                    }
+                    else {
+                        rejected[i] = true;
+                        rejected[j] = true;
+                        ambiguous = true;
+                    }
+                }
+            }
+
+            if (ambiguous) {
+                result.diagnostics.push_back({
+                    "ambiguous_overlapping_outcome",
+                    "overlapping outcome rules produced different meanings",
+                    0,
+                    raw.text.size(),
+                });
+            }
+
+            std::vector<TextSpan> spans;
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                if (rejected[i]) {
+                    continue;
+                }
+                spans.emplace_back(candidates[i].begin, candidates[i].end);
+                result.outcomes.push_back(std::move(candidates[i].outcome));
             }
             return spans;
         }

@@ -165,6 +165,40 @@ TEST(TelegramSignalParser, CanonicalizesOtcOutcomeSymbol) {
               optionx::bridges::telegram::TelegramAssetMarket::OTC);
 }
 
+TEST(TelegramSignalParser, ParsesSeparatedOtcOutcomeSpellings) {
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
+        message_with_text(
+            "EURUSD OTC WIN\n"
+            "EUR/USD OTC LOSS\n"
+            "OTC EURUSD REFUND"));
+
+    ASSERT_EQ(parsed.outcomes.size(), 3u);
+    EXPECT_EQ(parsed.outcomes[0].symbol, "EURUSD_OTC");
+    EXPECT_EQ(parsed.outcomes[0].result,
+              optionx::bridges::telegram::TelegramOutcomeResult::WIN);
+    EXPECT_EQ(parsed.outcomes[1].symbol, "EURUSD_OTC");
+    EXPECT_EQ(parsed.outcomes[1].result,
+              optionx::bridges::telegram::TelegramOutcomeResult::LOSS);
+    EXPECT_EQ(parsed.outcomes[2].symbol, "EURUSD_OTC");
+    EXPECT_EQ(parsed.outcomes[2].result,
+              optionx::bridges::telegram::TelegramOutcomeResult::REFUND);
+    for (const auto& outcome : parsed.outcomes) {
+        EXPECT_EQ(outcome.market,
+                  optionx::bridges::telegram::TelegramAssetMarket::OTC);
+    }
+}
+
+TEST(TelegramSignalParser, DeduplicatesOverlappingOutcomeMatches) {
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
+        message_with_text(std::string("EURUSD WIN ") + "\xE2\x9C\x85"));
+
+    EXPECT_TRUE(parsed.signals.empty());
+    ASSERT_EQ(parsed.outcomes.size(), 1u);
+    EXPECT_EQ(parsed.outcomes[0].symbol, "EURUSD");
+    EXPECT_EQ(parsed.outcomes[0].result,
+              optionx::bridges::telegram::TelegramOutcomeResult::WIN);
+}
+
 TEST(TelegramSignalParser, KeepsSignalsAndOutcomesSeparateInLiveSmokeBatch) {
     const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
         message_with_text(
