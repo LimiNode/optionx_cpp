@@ -256,16 +256,36 @@ empty successful exports.
 The first parser should be deterministic and testable:
 
 - per-source regex rules;
-- symbol normalization;
+- a universal symbol pattern with source-specific overrides, preserving broker
+  prefixes and suffixes such as `xEURUSD-OTC`;
+- symbol normalization that removes presentation whitespace but does not
+  silently strip execution-symbol affixes;
+- explicit OTC market classification; an unqualified symbol is never assumed
+  to be a regular-market asset. Common OTC spellings (`EURUSD_OTC`,
+  `EURUSD-OTC`, `EURUSDOTC`, `EURUSD OTC`) are canonicalized to
+  `EURUSD_OTC` before execution. The suffix remains configurable for a
+  source-specific execution alias;
 - direction aliases (`BUY`, `SELL`, `CALL`, `PUT`, arrows);
+- separate direction-token rules so a source can map custom words or emoji;
 - expiry parsing (`5m`, `M5`, `00:05`, local broker wording);
 - optional signal name from message, chat title or rule name;
 - optional amount/sizing only when explicitly configured;
 - diagnostics for ambiguous or missing fields.
 
+Raw Telegram text remains UTF-8. The parser treats known emoji sequences as
+semantic tokens and accepts common variation-selector forms; it does not
+require a second UTF-32 parser or normalize away the original text. A result
+marker such as `✅`, `❌` or `Profit` has precedence over an overlapping signal
+candidate, while a signal on another line of the same message remains
+parseable. Result details such as payout, amount and statistics are optional;
+missing details must not turn a recognizable result into a new executable
+signal.
+
 Martingale parsing should be deferred until the base signal/outcome model is
 stable. The parser may preserve raw martingale hints in diagnostics or metadata
-without turning them into executable sizing decisions.
+without turning them into executable sizing decisions. Any future policy that
+keeps only the first step or emits martingale steps must be an explicit
+opt-in execution policy, not an implicit parser side effect.
 
 ## Outcomes
 

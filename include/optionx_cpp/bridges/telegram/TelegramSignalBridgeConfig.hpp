@@ -14,6 +14,35 @@
 
 namespace optionx::bridges::telegram {
 
+    inline const char* telegram_outcome_result_name(
+            const TelegramOutcomeResult result) {
+        switch (result) {
+        case TelegramOutcomeResult::WIN:
+            return "WIN";
+        case TelegramOutcomeResult::LOSS:
+            return "LOSS";
+        case TelegramOutcomeResult::REFUND:
+            return "REFUND";
+        case TelegramOutcomeResult::UNKNOWN:
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    inline TelegramOutcomeResult telegram_outcome_result_from_name(
+            const std::string& value) {
+        if (value == "WIN") {
+            return TelegramOutcomeResult::WIN;
+        }
+        if (value == "LOSS") {
+            return TelegramOutcomeResult::LOSS;
+        }
+        if (value == "REFUND") {
+            return TelegramOutcomeResult::REFUND;
+        }
+        return TelegramOutcomeResult::UNKNOWN;
+    }
+
     /// \class TelegramSignalBridgeConfig
     /// \brief Parser and dispatch settings for Telegram live signal intake.
     class TelegramSignalBridgeConfig final : public IBridgeConfig {
@@ -28,8 +57,11 @@ namespace optionx::bridges::telegram {
                 {"bridge_id", bridge_id},
                 {"fixed_amount", fixed_amount},
                 {"dedupe_cache_size", dedupe_cache_size},
+                {"symbol_pattern", parser.symbol_pattern},
+                {"otc_symbol_suffix", parser.otc_symbol_suffix},
                 {"use_chat_title_as_signal_name", parser.use_chat_title_as_signal_name},
                 {"signal_rules", nlohmann::json::array()},
+                {"direction_rules", nlohmann::json::array()},
                 {"outcome_rules", nlohmann::json::array()},
             };
             for (const auto& rule : parser.signal_rules) {
@@ -43,12 +75,21 @@ namespace optionx::bridges::telegram {
                     {"option_type", rule.option_type},
                 });
             }
+            for (const auto& rule : parser.direction_rules) {
+                j["direction_rules"].push_back({
+                    {"name", rule.name},
+                    {"pattern", rule.pattern},
+                    {"order_type", rule.order_type},
+                });
+            }
             for (const auto& rule : parser.outcome_rules) {
                 j["outcome_rules"].push_back({
                     {"name", rule.name},
                     {"pattern", rule.pattern},
                     {"symbol_group", rule.symbol_group},
                     {"result_group", rule.result_group},
+                    {"fixed_result", telegram_outcome_result_name(rule.fixed_result)},
+                    {"direction_group", rule.direction_group},
                 });
             }
         }
@@ -57,6 +98,8 @@ namespace optionx::bridges::telegram {
             bridge_id = j.value("bridge_id", bridge_id);
             fixed_amount = j.value("fixed_amount", fixed_amount);
             dedupe_cache_size = j.value("dedupe_cache_size", dedupe_cache_size);
+            parser.symbol_pattern = j.value("symbol_pattern", parser.symbol_pattern);
+            parser.otc_symbol_suffix = j.value("otc_symbol_suffix", parser.otc_symbol_suffix);
             parser.use_chat_title_as_signal_name = j.value(
                 "use_chat_title_as_signal_name",
                 parser.use_chat_title_as_signal_name);
@@ -75,6 +118,16 @@ namespace optionx::bridges::telegram {
                     parser.signal_rules.push_back(std::move(rule));
                 }
             }
+            if (j.contains("direction_rules")) {
+                parser.direction_rules.clear();
+                for (const auto& item : j.at("direction_rules")) {
+                    TelegramDirectionRule rule;
+                    rule.name = item.value("name", "");
+                    rule.pattern = item.at("pattern").get<std::string>();
+                    rule.order_type = item.value("order_type", OrderType::UNKNOWN);
+                    parser.direction_rules.push_back(std::move(rule));
+                }
+            }
             if (j.contains("outcome_rules")) {
                 parser.outcome_rules.clear();
                 for (const auto& item : j.at("outcome_rules")) {
@@ -83,6 +136,9 @@ namespace optionx::bridges::telegram {
                     rule.pattern = item.at("pattern").get<std::string>();
                     rule.symbol_group = item.value("symbol_group", 1u);
                     rule.result_group = item.value("result_group", 2u);
+                    rule.fixed_result = telegram_outcome_result_from_name(
+                        item.value("fixed_result", std::string("UNKNOWN")));
+                    rule.direction_group = item.value("direction_group", 0u);
                     parser.outcome_rules.push_back(std::move(rule));
                 }
             }
