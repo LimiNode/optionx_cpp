@@ -788,6 +788,12 @@ namespace optionx::bridges::telegram {
                 return left.end < right.end;
             });
 
+            std::vector<TextSpan> blocking_spans;
+            blocking_spans.reserve(candidates.size());
+            for (const auto& candidate : candidates) {
+                blocking_spans.emplace_back(candidate.begin, candidate.end);
+            }
+
             std::vector<bool> rejected(candidates.size(), false);
             bool ambiguous = false;
             for (std::size_t i = 0; i < candidates.size(); ++i) {
@@ -817,15 +823,13 @@ namespace optionx::bridges::telegram {
                 });
             }
 
-            std::vector<TextSpan> spans;
             for (std::size_t i = 0; i < candidates.size(); ++i) {
                 if (rejected[i]) {
                     continue;
                 }
-                spans.emplace_back(candidates[i].begin, candidates[i].end);
                 result.outcomes.push_back(std::move(candidates[i].outcome));
             }
-            return spans;
+            return blocking_spans;
         }
 
         TelegramParserConfig m_config;

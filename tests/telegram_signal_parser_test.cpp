@@ -199,6 +199,17 @@ TEST(TelegramSignalParser, DeduplicatesOverlappingOutcomeMatches) {
               optionx::bridges::telegram::TelegramOutcomeResult::WIN);
 }
 
+TEST(TelegramSignalParser, BlocksSignalsWhenOutcomeMeaningIsAmbiguous) {
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
+        message_with_text(std::string("EURUSD BUY 5m ") + "\xE2\x9C\x85 \xE2\x9D\x8C"));
+
+    EXPECT_TRUE(parsed.signals.empty());
+    EXPECT_TRUE(parsed.outcomes.empty());
+    ASSERT_EQ(parsed.diagnostics.size(), 1u);
+    EXPECT_EQ(parsed.diagnostics.front().code,
+              "ambiguous_overlapping_outcome");
+}
+
 TEST(TelegramSignalParser, KeepsSignalsAndOutcomesSeparateInLiveSmokeBatch) {
     const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
         message_with_text(
