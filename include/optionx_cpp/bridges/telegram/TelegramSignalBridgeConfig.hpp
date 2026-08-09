@@ -6,7 +6,7 @@
 /// \brief Configuration for the Telegram signal bridge.
 
 #include "data/bridge.hpp"
-#include "bridges/telegram/TelegramSignalParser.hpp"
+#include "bridges/telegram/detail/TelegramSignalParser.hpp"
 
 #include <cmath>
 #include <memory>

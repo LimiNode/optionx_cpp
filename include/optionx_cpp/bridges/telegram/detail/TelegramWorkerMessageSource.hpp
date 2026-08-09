@@ -1,8 +1,8 @@
 #pragma once
-#ifndef OPTIONX_HEADER_BRIDGES_TELEGRAM_TELEGRAM_WORKER_MESSAGE_SOURCE_HPP_INCLUDED
-#define OPTIONX_HEADER_BRIDGES_TELEGRAM_TELEGRAM_WORKER_MESSAGE_SOURCE_HPP_INCLUDED
+#ifndef OPTIONX_HEADER_BRIDGES_TELEGRAM_DETAIL_TELEGRAM_WORKER_MESSAGE_SOURCE_HPP_INCLUDED
+#define OPTIONX_HEADER_BRIDGES_TELEGRAM_DETAIL_TELEGRAM_WORKER_MESSAGE_SOURCE_HPP_INCLUDED
 
-/// \file TelegramWorkerMessageSource.hpp
+/// \file bridges/telegram/detail/TelegramWorkerMessageSource.hpp
 /// \brief Adapter from a tg-client-stdio-style worker client to Telegram bridge input.
 
 #include "bridges/telegram/TelegramSignalBridge.hpp"
@@ -134,4 +134,4 @@ namespace optionx::bridges::telegram {
 
 } // namespace optionx::bridges::telegram
 
-#endif // OPTIONX_HEADER_BRIDGES_TELEGRAM_TELEGRAM_WORKER_MESSAGE_SOURCE_HPP_INCLUDED
+#endif // OPTIONX_HEADER_BRIDGES_TELEGRAM_DETAIL_TELEGRAM_WORKER_MESSAGE_SOURCE_HPP_INCLUDED
