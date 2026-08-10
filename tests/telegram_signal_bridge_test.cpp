@@ -102,6 +102,28 @@ TEST(TelegramSignalBridge, RejectsInvalidConfigurationBeforeStartingSource) {
     EXPECT_FALSE(source->started);
 }
 
+TEST(TelegramSignalBridgeConfig, RoundTripsParserRecognitionSettings) {
+    auto original = config();
+    nlohmann::json serialized;
+    original->to_json(serialized);
+
+    optionx::bridges::telegram::TelegramSignalBridgeConfig restored;
+    restored.from_json(serialized);
+
+    EXPECT_EQ(restored.parser.symbol_pattern, original->parser.symbol_pattern);
+    EXPECT_EQ(restored.parser.otc_symbol_suffix, original->parser.otc_symbol_suffix);
+    ASSERT_EQ(restored.parser.direction_rules.size(),
+              original->parser.direction_rules.size());
+    ASSERT_EQ(restored.parser.outcome_rules.size(),
+              original->parser.outcome_rules.size());
+    EXPECT_EQ(restored.parser.direction_rules.front().pattern,
+              original->parser.direction_rules.front().pattern);
+    EXPECT_EQ(restored.parser.outcome_rules.back().fixed_result,
+              optionx::bridges::telegram::TelegramOutcomeResult::LOSS);
+    EXPECT_EQ(restored.parser.outcome_rules.back().direction_group,
+              original->parser.outcome_rules.back().direction_group);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

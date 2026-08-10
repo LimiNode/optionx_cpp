@@ -14,6 +14,13 @@
 
 namespace optionx::bridges::telegram {
 
+    /// \enum TelegramAssetMarket
+    /// \brief Market qualifier carried by a Telegram asset symbol.
+    enum class TelegramAssetMarket {
+        UNKNOWN,
+        OTC
+    };
+
     /// \struct TelegramParsedSignal
     /// \brief One normalized executable signal extracted from a raw message.
     struct TelegramParsedSignal {
@@ -25,6 +32,7 @@ namespace optionx::bridges::telegram {
         std::int64_t expiry_time = 0;
         std::string signal_name;
         std::string raw_text;
+        TelegramAssetMarket market = TelegramAssetMarket::UNKNOWN;
     };
 
     /// \enum TelegramOutcomeResult
@@ -47,6 +55,7 @@ namespace optionx::bridges::telegram {
         std::int32_t step = 0;
         std::string signal_name;
         std::string raw_text;
+        TelegramAssetMarket market = TelegramAssetMarket::UNKNOWN;
     };
 
     /// \struct TelegramParseDiagnostic
