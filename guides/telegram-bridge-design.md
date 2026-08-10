@@ -319,10 +319,28 @@ The planned boundary is:
 Telegram worker downloads media
   -> raw message contains a controlled local media path and metadata
   -> optional image provider receives the path
-  -> provider returns OCR text and/or visual hints
-  -> C++ normalizes, validates, and passes extracted fields to the
+  -> provider returns canonical extracted text for the MVP
+  -> C++ normalizes, validates, and passes that text to the existing
      deterministic Telegram signal/outcome parser
 ```
+
+The MVP image-provider contract is text-only: it must return extracted text,
+not a synthetic `TradeSignal` and not a second parser result. This keeps image
+messages on the same semantic path as ordinary Telegram text. Future
+structured observations, such as `direction=BUY` from an arrow template or
+`result=WIN` from an icon, are a different contract:
+
+```text
+structured visual observations
+  -> ImageObservationValidator
+  -> ImageObservationFusion
+  -> TelegramParsedSignal / TelegramParsedOutcome
+```
+
+They must not be passed through `TelegramSignalParser` as fake text. The
+fusion layer must apply the same symbol, OTC, ambiguity, identity, and
+signal/outcome rules as the text parser. It remains deferred together with
+the structured-vision provider.
 
 The first provider should target compact, recurring signal layouts rather than
 perform general document understanding. A source-specific image profile may
@@ -359,20 +377,46 @@ Direction detection by color, icon, or template matching is source-specific.
 The parser must not assume that green always means BUY or red always means
 SELL without an explicit source profile. Signal and result regions are also
 separate: an image containing a WIN/LOSS marker must produce an outcome, not a
-new executable signal.
+new executable signal. Such structured observations belong to the deferred
+fusion layer described above.
 
-When a Telegram message has both a caption and an image, the text parser gets
-first pass. OCR is only used when configured or when the caption does not yield
-an accepted result. Caption and OCR results share the Telegram message
-identity and must be deduplicated before execution.
+Caption and image handling must use an explicit source policy:
+
+- `disabled`: ignore image content and parse only the caption/text;
+- `fallback`: invoke the text-only OCR provider when the caption yields no
+  accepted semantic result; this mode is unsuitable when the image may contain
+  an independent outcome after a valid caption signal;
+- `fuse`: inspect both caption and image, then merge accepted signals and
+  outcomes by message identity and semantic identity. Duplicate observations
+  collapse, while conflicting observations produce a diagnostic and are not
+  executable.
+
+The text parser always handles caption text as text. OCR output is handled by
+the same parser in the MVP, while future structured image observations go
+through the separate fusion layer. Caption and image results share the
+Telegram message identity and must be deduplicated before execution.
 
 Before implementing an OCR provider, the worker media contract must support:
 
 - opt-in media download for both history export and live messages;
 - a bounded, controlled download directory;
-- MIME type, byte size, stable file path, and content hash metadata;
+- MIME type, byte size, stable root-relative path, and content hash metadata;
 - explicit download, timeout, and size-limit errors;
 - no credentials or unrestricted filesystem paths in JSONL payloads.
+
+Media lifetime and ownership are part of the contract. The worker must write
+to a temporary file and publish the media record only after the download is
+complete and atomically renamed. A published path must resolve inside the
+configured media root; `..` traversal, symlink escape, and arbitrary absolute
+paths are invalid.
+
+Each published media item has a lease. The worker must keep the file available
+until the consumer sends `media.release`, the owning export operation reaches
+its terminal record, or the explicit lease TTL expires. Eviction must never
+remove a leased file. A missing or expired lease is an explicit media error,
+not an invitation for the provider to read an untrusted path. Bounded storage
+may reject new media or fail the operation when consumers do not release
+items quickly enough.
 
 Core parser tests should use fixed image fixtures and mocked provider results.
 Real samples should be benchmarked for symbol/direction accuracy, rejection
