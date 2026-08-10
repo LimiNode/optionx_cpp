@@ -56,10 +56,10 @@ stdio boundary.
 
 The current OptionX bridge does not own a Telethon process. It consumes the
 `TelegramMessageSource` interface, so fake sources can exercise parsing and
-lifecycle without credentials. `TelegramWorkerMessageSource` now binds that
-interface to a WorkerClient-shaped process adapter; the parent repository will
-pin the concrete `tg-client-stdio::WorkerClient` only after its stacked worker
-PRs are merged.
+lifecycle without credentials. `TelegramWorkerMessageSource` binds that
+interface to a `WorkerClient`-shaped process adapter. The parent repository
+pins the merged production worker; the authorized-session smoke remains
+opt-in and must never require credentials in normal CI.
 
 ## Stdio Protocol Envelope
 
@@ -311,17 +311,72 @@ correlation.
 
 ## OCR / Vision
 
-Image parsing should be optional and external:
+Image parsing is deliberately deferred. It must remain an optional provider
+outside the core Telegram parser and outside the normal worker installation.
+The planned boundary is:
 
 ```text
 Telegram worker downloads media
-  -> parser sees media metadata/path
-  -> optional localhost OCR/vision provider returns extracted text
-  -> deterministic text parser processes extracted text
+  -> raw message contains a controlled local media path and metadata
+  -> optional image provider receives the path
+  -> provider returns OCR text and/or visual hints
+  -> C++ normalizes, validates, and passes extracted fields to the
+     deterministic Telegram signal/outcome parser
 ```
 
-The OCR provider can be a local service, a remote API router, or disabled. Core
-tests should mock it with fixed text fixtures.
+The first provider should target compact, recurring signal layouts rather than
+perform general document understanding. A source-specific image profile may
+define normalized regions of interest (ROI), for example:
+
+- symbol ROI for `EUR/USD`;
+- direction ROI for text, an arrow, an icon, or a color marker;
+- optional result/status ROI.
+
+The provider should crop and preprocess those regions with OpenCV before OCR.
+Running text detection over a full 1080x1920 screenshot is not the default
+path when the source layout is stable.
+
+The initial recognizer should be CPU-first:
+
+1. Tesseract with a narrow whitelist for symbol characters;
+2. constrained symbol normalization and vocabulary matching;
+3. RapidOCR with ONNX Runtime as a replacement or fallback if real samples
+   show that Tesseract is not reliable enough.
+
+GPU support is not a requirement for the first version. It becomes relevant
+only for high-volume image streams or full-image text detection. The OCR
+engine must not make a final execution decision. Its output is untrusted input
+and must pass the same validation boundary as text messages:
+
+- normalize separators and presentation whitespace;
+- preserve broker affixes and canonicalize OTC to `BASE_OTC`;
+- accept a fuzzy symbol correction only when it produces one unambiguous
+  known instrument;
+- reject low-confidence or ambiguous symbol/direction results;
+- record the source image and diagnostics for manual review when available.
+
+Direction detection by color, icon, or template matching is source-specific.
+The parser must not assume that green always means BUY or red always means
+SELL without an explicit source profile. Signal and result regions are also
+separate: an image containing a WIN/LOSS marker must produce an outcome, not a
+new executable signal.
+
+When a Telegram message has both a caption and an image, the text parser gets
+first pass. OCR is only used when configured or when the caption does not yield
+an accepted result. Caption and OCR results share the Telegram message
+identity and must be deduplicated before execution.
+
+Before implementing an OCR provider, the worker media contract must support:
+
+- opt-in media download for both history export and live messages;
+- a bounded, controlled download directory;
+- MIME type, byte size, stable file path, and content hash metadata;
+- explicit download, timeout, and size-limit errors;
+- no credentials or unrestricted filesystem paths in JSONL payloads.
+
+Core parser tests should use fixed image fixtures and mocked provider results.
+Real samples should be benchmarked for symbol/direction accuracy, rejection
+rate, and CPU latency before choosing a heavier OCR stack.
 
 ## Authentication And Proxy
 
@@ -343,7 +398,7 @@ authorization failures.
 
 ## Implementation Status And Next Steps
 
-Completed without an authorized Telegram session:
+Completed in the current Telegram stack:
 
 1. `tg-client-stdio` worker protocol for dialogs, streaming export,
    live listen/stop, auth status/code/2FA and HTTP/SOCKS proxy configuration.
@@ -352,6 +407,8 @@ Completed without an authorized Telegram session:
 3. OptionX raw/parsed Telegram DTOs, deterministic regex parser and
    source-independent `TelegramSignalBridge`.
 4. Fake-source unit coverage and a runnable no-credentials bridge example.
+5. Opt-in authorized-session smoke covering auth status, dialog discovery,
+   bounded history export, proxy use, and live message listening.
 
 Current no-credentials examples include a live fake-source bridge smoke and a
 deterministic archive/parser replay. The latter uses the same raw-message shape
@@ -360,11 +417,11 @@ executable signals.
 
 Next steps:
 
-1. Merge and pin the worker repository's supervisor/archive PRs.
-2. Pin the merged worker repository in an OptionX consumer and run the adapter
-   against the mock worker process.
-3. Perform the first real authorization, proxy and live-channel check with an
-   operator-provided Telegram session.
-
-OCR/vision remains a separate optional provider and should not block the text
-parser or the first authorized-session test.
+1. Pin the authorized-session smoke in the OptionX consumer and rerun the
+   integration CI.
+2. Add operator-facing dialog listing and full JSONL history export tooling
+   with date filters, then replay a real test channel through the C++ parser.
+3. Implement the bounded worker media contract before starting OCR work.
+4. Revisit the deferred OCR provider after collecting representative image
+   fixtures. OCR/vision must remain optional and must not block the text
+   parser, live bridge, or archive replay.
