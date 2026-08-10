@@ -1,8 +1,8 @@
 #pragma once
-#ifndef OPTIONX_HEADER_BRIDGES_TELEGRAM_TELEGRAM_SIGNAL_PARSER_HPP_INCLUDED
-#define OPTIONX_HEADER_BRIDGES_TELEGRAM_TELEGRAM_SIGNAL_PARSER_HPP_INCLUDED
+#ifndef OPTIONX_HEADER_BRIDGES_TELEGRAM_DETAIL_TELEGRAM_SIGNAL_PARSER_HPP_INCLUDED
+#define OPTIONX_HEADER_BRIDGES_TELEGRAM_DETAIL_TELEGRAM_SIGNAL_PARSER_HPP_INCLUDED
 
-/// \file TelegramSignalParser.hpp
+/// \file bridges/telegram/detail/TelegramSignalParser.hpp
 /// \brief Deterministic regex parser for Telegram signal and outcome messages.
 
 #include "bridges/telegram/TelegramParsedMessage.hpp"
@@ -840,4 +840,4 @@ namespace optionx::bridges::telegram {
 
 } // namespace optionx::bridges::telegram
 
-#endif // OPTIONX_HEADER_BRIDGES_TELEGRAM_TELEGRAM_SIGNAL_PARSER_HPP_INCLUDED
+#endif // OPTIONX_HEADER_BRIDGES_TELEGRAM_DETAIL_TELEGRAM_SIGNAL_PARSER_HPP_INCLUDED
