@@ -268,6 +268,9 @@ The first parser should be deterministic and testable:
 - direction aliases (`BUY`, `SELL`, `CALL`, `PUT`, arrows);
 - separate direction-token rules so a source can map custom words or emoji;
 - expiry parsing (`5m`, `M5`, `00:05`, local broker wording);
+- configurable timeframe semantics: `TIMEFRAME_DURATION` for SPRINT,
+  `BAR_END` for an absolute CLASSIC expiry at the next UTC bar boundary, or
+  `CUSTOM_DURATION` for a source-configured duration in seconds;
 - optional signal name from message, chat title or rule name;
 - optional amount/sizing only when explicitly configured;
 - diagnostics for ambiguous or missing fields.
@@ -280,6 +283,12 @@ candidate, while a signal on another line of the same message remains
 parseable. Result details such as payout, amount and statistics are optional;
 missing details must not turn a recognizable result into a new executable
 signal.
+
+Statistics printed by a Telegram source, such as `9 | 1 =90.0` or
+`251 | 17`, are source-reported metadata and are not authoritative for
+OptionX performance statistics. The parser may preserve them in raw text, but
+the local backtest/statistics layer must calculate its own values from parsed
+signals, outcomes, and their raw message timestamps.
 
 Martingale parsing should be deferred until the base signal/outcome model is
 stable. The parser may preserve raw martingale hints in diagnostics or metadata
@@ -307,7 +316,11 @@ TelegramParsedOutcome
 Backtesting can later correlate parsed signals and outcomes by source, time
 window, symbol, direction and optional signal name. When
 `reply_to_message_id` is available, it should be preferred over heuristic
-correlation.
+correlation. The signal message `raw.date_ms` is the observed publication time;
+the outcome message `raw.date_ms` is the observed result time. A scheduled
+entry time embedded in text is a separate semantic field and must not silently
+replace the publication timestamp until a source-specific time-zone policy is
+configured.
 
 ## OCR / Vision
 

@@ -46,6 +46,8 @@ jobs:
           protocol_v1_bridge_test
           bridge_umbrella_include_test
           bridge_host_test
+          telegram_signal_parser_test
+          telegram_signal_bridge_test
 
       - name: Build MetaTrader file smoke example
         run: cmake --build build-windows --config Debug --target metatrader_file_bridge_smoke
@@ -87,6 +89,8 @@ jobs:
           .\build-windows\Debug\protocol_v1_bridge_test.exe --gtest_brief=1
           .\build-windows\Debug\bridge_umbrella_include_test.exe --gtest_brief=1
           .\build-windows\Debug\bridge_host_test.exe --gtest_brief=1
+          .\build-windows\Debug\telegram_signal_parser_test.exe --gtest_brief=1
+          .\build-windows\Debug\telegram_signal_bridge_test.exe --gtest_brief=1
           .\build-windows\Debug\metatrader_file_bridge_smoke.exe --self-test
           .\build-windows\Debug\metatrader_file_command_writer_smoke.exe --self-test
           .\build-windows\Debug\metatrader_file_end_to_end_smoke.exe --self-test

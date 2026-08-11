@@ -112,6 +112,10 @@ TEST(TelegramSignalBridgeConfig, RoundTripsParserRecognitionSettings) {
 
     EXPECT_EQ(restored.parser.symbol_pattern, original->parser.symbol_pattern);
     EXPECT_EQ(restored.parser.otc_symbol_suffix, original->parser.otc_symbol_suffix);
+    EXPECT_EQ(restored.parser.expiry_policy.mode,
+              original->parser.expiry_policy.mode);
+    EXPECT_EQ(restored.parser.expiry_policy.custom_duration_seconds,
+              original->parser.expiry_policy.custom_duration_seconds);
     ASSERT_EQ(restored.parser.direction_rules.size(),
               original->parser.direction_rules.size());
     ASSERT_EQ(restored.parser.outcome_rules.size(),

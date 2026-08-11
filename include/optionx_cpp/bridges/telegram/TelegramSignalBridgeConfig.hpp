@@ -43,6 +43,35 @@ namespace optionx::bridges::telegram {
         return TelegramOutcomeResult::UNKNOWN;
     }
 
+    inline const char* telegram_expiry_mode_name(
+            const TelegramExpiryMode mode) {
+        switch (mode) {
+        case TelegramExpiryMode::TIMEFRAME_DURATION:
+            return "TIMEFRAME_DURATION";
+        case TelegramExpiryMode::BAR_END:
+            return "BAR_END";
+        case TelegramExpiryMode::CUSTOM_DURATION:
+            return "CUSTOM_DURATION";
+        case TelegramExpiryMode::UNKNOWN:
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    inline TelegramExpiryMode telegram_expiry_mode_from_name(
+            const std::string& value) {
+        if (value == "TIMEFRAME_DURATION") {
+            return TelegramExpiryMode::TIMEFRAME_DURATION;
+        }
+        if (value == "BAR_END") {
+            return TelegramExpiryMode::BAR_END;
+        }
+        if (value == "CUSTOM_DURATION") {
+            return TelegramExpiryMode::CUSTOM_DURATION;
+        }
+        return TelegramExpiryMode::UNKNOWN;
+    }
+
     /// \class TelegramSignalBridgeConfig
     /// \brief Parser and dispatch settings for Telegram live signal intake.
     class TelegramSignalBridgeConfig final : public IBridgeConfig {
@@ -59,6 +88,8 @@ namespace optionx::bridges::telegram {
                 {"dedupe_cache_size", dedupe_cache_size},
                 {"symbol_pattern", parser.symbol_pattern},
                 {"otc_symbol_suffix", parser.otc_symbol_suffix},
+                {"expiry_mode", telegram_expiry_mode_name(parser.expiry_policy.mode)},
+                {"custom_expiry_seconds", parser.expiry_policy.custom_duration_seconds},
                 {"use_chat_title_as_signal_name", parser.use_chat_title_as_signal_name},
                 {"signal_rules", nlohmann::json::array()},
                 {"direction_rules", nlohmann::json::array()},
@@ -100,6 +131,13 @@ namespace optionx::bridges::telegram {
             dedupe_cache_size = j.value("dedupe_cache_size", dedupe_cache_size);
             parser.symbol_pattern = j.value("symbol_pattern", parser.symbol_pattern);
             parser.otc_symbol_suffix = j.value("otc_symbol_suffix", parser.otc_symbol_suffix);
+            if (j.contains("expiry_mode")) {
+                parser.expiry_policy.mode = telegram_expiry_mode_from_name(
+                    j.at("expiry_mode").get<std::string>());
+            }
+            parser.expiry_policy.custom_duration_seconds = j.value(
+                "custom_expiry_seconds",
+                parser.expiry_policy.custom_duration_seconds);
             parser.use_chat_title_as_signal_name = j.value(
                 "use_chat_title_as_signal_name",
                 parser.use_chat_title_as_signal_name);
@@ -150,6 +188,13 @@ namespace optionx::bridges::telegram {
             }
             if (dedupe_cache_size == 0) {
                 return {false, "Telegram dedupe_cache_size must be positive."};
+            }
+            if (parser.expiry_policy.mode == TelegramExpiryMode::UNKNOWN) {
+                return {false, "Telegram expiry_mode is unsupported."};
+            }
+            if (parser.expiry_policy.mode == TelegramExpiryMode::CUSTOM_DURATION &&
+                parser.expiry_policy.custom_duration_seconds == 0) {
+                return {false, "Telegram custom_expiry_seconds must be positive."};
             }
             try {
                 (void)TelegramSignalParser(parser);

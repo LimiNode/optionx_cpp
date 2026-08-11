@@ -56,6 +56,14 @@ jobs:
       - name: Run bridge_host_test
         run: ./build-linux/bridge_host_test --gtest_brief=1
 
+      - name: Build Telegram parser and bridge tests
+        run: cmake --build build-linux --target telegram_signal_parser_test telegram_signal_bridge_test -j
+
+      - name: Run Telegram parser and bridge tests
+        run: |
+          ./build-linux/telegram_signal_parser_test --gtest_brief=1
+          ./build-linux/telegram_signal_bridge_test --gtest_brief=1
+
       - name: Build bot_binary_protocol_test
         run: cmake --build build-linux --target bot_binary_protocol_test -j
 
