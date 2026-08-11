@@ -411,14 +411,19 @@ configured media root; `..` traversal, symlink escape, and arbitrary absolute
 paths are invalid.
 
 Each published media item has a lease. The worker must keep the file available
-until the consumer sends `media.release`, the owning export operation reaches
-its terminal record, or the explicit lease TTL expires. Eviction must never
-remove a leased file. A missing or expired lease is an explicit media error,
-not an invitation for the provider to read an untrusted path. Bounded storage
-may reject new media or fail the operation when consumers do not release
-items quickly enough.
+until the consumer sends `media.release` or the explicit lease TTL expires.
+The terminal record for an export operation stops publication of new media for
+that operation but does not invalidate leases that were already published.
+Eviction must never remove a leased file. A missing or expired lease is an
+explicit media error, not an invitation for the provider to read an untrusted
+path. Bounded storage may reject new media or fail the operation when
+consumers do not release items quickly enough.
 
-Core parser tests should use fixed image fixtures and mocked provider results.
+- image-provider tests should use fixed image fixtures;
+- core `TelegramSignalParser` tests should remain text-only;
+- integration tests should use mocked provider text/results and verify fusion,
+  identity deduplication, and fail-closed conflicts.
+
 Real samples should be benchmarked for symbol/direction accuracy, rejection
 rate, and CPU latency before choosing a heavier OCR stack.
 
