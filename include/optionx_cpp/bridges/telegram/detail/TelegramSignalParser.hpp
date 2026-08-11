@@ -54,15 +54,32 @@ namespace optionx::bridges::telegram {
         std::size_t direction_group = 0;
     };
 
+    /// \enum TelegramExpiryMode
+    /// \brief Defines how a parsed timeframe becomes an executable expiry.
+    enum class TelegramExpiryMode {
+        UNKNOWN,
+        TIMEFRAME_DURATION, ///< SPRINT duration equal to the parsed timeframe.
+        BAR_END,            ///< Absolute CLASSIC expiry at the next bar boundary.
+        CUSTOM_DURATION     ///< SPRINT duration from custom_duration_seconds.
+    };
+
+    /// \struct TelegramExpiryPolicy
+    /// \brief Source-level interpretation of timeframe tokens.
+    struct TelegramExpiryPolicy {
+        TelegramExpiryMode mode = TelegramExpiryMode::TIMEFRAME_DURATION;
+        std::uint32_t custom_duration_seconds = 0;
+    };
+
     /// \struct TelegramParserConfig
     /// \brief Source-independent deterministic parser configuration.
     struct TelegramParserConfig {
         // Inserted as one capture group wherever a rule contains {{SYMBOL}}.
         std::string symbol_pattern =
-            R"((?!(?:BUY|SELL|CALL|PUT|WIN|LOSS|REFUND|DRAW|PROFIT|OTC)\b)[A-Z][A-Z0-9]{2,11}(?:\s*[/_-]\s*[A-Z][A-Z0-9]{1,11})?)";
+            R"((?!(?:BUY|SELL|CALL|PUT|WIN|LOSS|REFUND|DRAW|PROFIT|OTC)\b)(?!(?:S|M|H)\d{1,5}\b)[A-Z][A-Z0-9]{2,11}(?:\s*[/_-]\s*[A-Z][A-Z0-9]{1,11})?)";
         // Canonical OTC symbols use the same suffix as UTE and the rest of
         // the trading stack. A source-specific alias may override it.
         std::string otc_symbol_suffix = "_OTC";
+        TelegramExpiryPolicy expiry_policy;
         std::vector<TelegramSignalRule> signal_rules;
         std::vector<TelegramDirectionRule> direction_rules;
         std::vector<TelegramOutcomeRule> outcome_rules;
@@ -239,6 +256,14 @@ namespace optionx::bridges::telegram {
         explicit TelegramSignalParser(
                 TelegramParserConfig config = default_config())
             : m_config(std::move(config)) {
+            if (m_config.expiry_policy.mode == TelegramExpiryMode::UNKNOWN) {
+                throw std::invalid_argument("Telegram expiry mode is unsupported");
+            }
+            if (m_config.expiry_policy.mode == TelegramExpiryMode::CUSTOM_DURATION &&
+                m_config.expiry_policy.custom_duration_seconds == 0) {
+                throw std::invalid_argument(
+                    "Telegram custom expiry duration must be positive");
+            }
             for (const auto& rule : m_config.signal_rules) {
                 m_signal_rules.push_back({
                     rule,
@@ -394,6 +419,28 @@ namespace optionx::bridges::telegram {
             }
             const auto line_end = raw.text.find_first_of("\r\n", begin);
             auto tail = trim_ascii(raw.text.substr(begin, line_end - begin));
+            static constexpr const char* decorations[] = {
+                "\xF0\x9F\x93\xA3",             // megaphone
+                "\xF0\x9F\x94\x8A",             // speaker
+                "\xE2\xAC\x86\xEF\xB8\x8F",   // up arrow + variation selector
+                "\xE2\xAC\x86",
+                "\xE2\xAC\x87\xEF\xB8\x8F",   // down arrow + variation selector
+                "\xE2\xAC\x87",
+                "\xE2\x9E\xA1\xEF\xB8\x8F",   // right arrow + variation selector
+                "\xE2\x9E\xA1",
+            };
+            bool removed_decoration = true;
+            while (removed_decoration) {
+                removed_decoration = false;
+                for (const auto* decoration : decorations) {
+                    const auto length = std::char_traits<char>::length(decoration);
+                    if (tail.size() >= length && tail.compare(0, length, decoration) == 0) {
+                        tail = trim_ascii(tail.substr(length));
+                        removed_decoration = true;
+                        break;
+                    }
+                }
+            }
             static const std::regex step_suffix(
                 R"(\s+-\s*\d+\s*$)",
                 std::regex::ECMAScript);
@@ -447,6 +494,54 @@ namespace optionx::bridges::telegram {
                 throw std::invalid_argument("expiry duration is too large");
             }
             return static_cast<std::uint32_t>(amount * multiplier);
+        }
+
+        static std::int64_t bar_end_expiry_time(
+                const std::int64_t timestamp_ms,
+                const std::uint32_t timeframe_seconds) {
+            if (timestamp_ms <= 0 || timeframe_seconds == 0) {
+                throw std::invalid_argument(
+                    "Telegram bar-end expiry requires a positive message time and timeframe");
+            }
+            const auto period_ms = static_cast<std::uint64_t>(timeframe_seconds) * 1000u;
+            const auto timestamp = static_cast<std::uint64_t>(timestamp_ms);
+            const auto bar_index = timestamp / period_ms;
+            if (bar_index >=
+                (std::numeric_limits<std::uint64_t>::max)() / period_ms) {
+                throw std::invalid_argument("Telegram bar-end expiry is too large");
+            }
+            const auto end_ms = (bar_index + 1) * period_ms;
+            if (end_ms > static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::int64_t>::max)())) {
+                throw std::invalid_argument("Telegram bar-end expiry is too large");
+            }
+            return static_cast<std::int64_t>(end_ms / 1000u);
+        }
+
+        void apply_expiry_policy(
+                TelegramParsedSignal& signal,
+                const TelegramRawMessage& raw,
+                const std::uint32_t timeframe_seconds) const {
+            switch (m_config.expiry_policy.mode) {
+            case TelegramExpiryMode::TIMEFRAME_DURATION:
+                signal.duration = timeframe_seconds;
+                signal.expiry_time = 0;
+                return;
+            case TelegramExpiryMode::BAR_END:
+                signal.option_type = OptionType::CLASSIC;
+                signal.duration = 0;
+                signal.expiry_time = bar_end_expiry_time(
+                    raw.date_ms,
+                    timeframe_seconds);
+                return;
+            case TelegramExpiryMode::CUSTOM_DURATION:
+                signal.duration = m_config.expiry_policy.custom_duration_seconds;
+                signal.expiry_time = 0;
+                return;
+            case TelegramExpiryMode::UNKNOWN:
+            default:
+                throw std::invalid_argument("Telegram expiry mode is unsupported");
+            }
         }
 
         static std::string line_text(
@@ -534,9 +629,10 @@ namespace optionx::bridges::telegram {
                 if (!has_group(match, rule.unit_group)) {
                     throw std::invalid_argument("signal expiry has no unit");
                 }
-                signal.duration = parse_duration(
+                const auto timeframe_seconds = parse_duration(
                     match[rule.expiry_group].str(),
                     match[rule.unit_group].str());
+                apply_expiry_policy(signal, raw, timeframe_seconds);
             }
             return signal;
         }

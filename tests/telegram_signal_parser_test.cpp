@@ -29,6 +29,54 @@ TEST(TelegramSignalParser, ParsesExecutableSignalAndNormalizesExpiry) {
     EXPECT_TRUE(parsed.outcomes.empty());
 }
 
+TEST(TelegramSignalParser, AppliesCustomExpiryDurationPolicy) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.expiry_policy.mode =
+        optionx::bridges::telegram::TelegramExpiryMode::CUSTOM_DURATION;
+    config.expiry_policy.custom_duration_seconds = 180;
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text("EURUSD BUY 5m"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_EQ(parsed.signals[0].duration, 180u);
+    EXPECT_EQ(parsed.signals[0].expiry_time, 0);
+}
+
+TEST(TelegramSignalParser, CalculatesClassicExpiryAtNextBarEnd) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.expiry_policy.mode = optionx::bridges::telegram::TelegramExpiryMode::BAR_END;
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text("EURUSD BUY 5m"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_EQ(parsed.signals[0].option_type, optionx::OptionType::CLASSIC);
+    EXPECT_EQ(parsed.signals[0].duration, 0u);
+    EXPECT_EQ(parsed.signals[0].expiry_time, 1800000300);
+}
+
+TEST(TelegramSignalParser, ParsesMoneyBotSignalNamesAndSeparatesReportedStats) {
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
+        message_with_text(
+            "\xF0\x9F\x93\xA3 BTC / USD m15 SELL \xE2\xAC\x87\xEF\xB8\x8F BRO-15-RF\n"
+            "\xF0\x9F\x93\xA3 USD / CAD m15 SELL Pulse Zone new\n"
+            "\xF0\x9F\x93\xA3 BTC / USD m5 BUY \xE2\xAC\x86\xEF\xB8\x8F BRO-5-RF\n"
+            "\xE2\x9E\xA1 AUD / USD m5 BUY AP-5 \xE2\x9C\x85 9 | 1 =90.0\n"
+            "\xE2\x9E\xA1 EUR / USD m5 BUY AP-5 \xE2\x9C\x85 3 | 1 =75.0"));
+
+    ASSERT_EQ(parsed.signals.size(), 3u);
+    EXPECT_EQ(parsed.signals[0].signal_name, "BRO-15-RF");
+    EXPECT_EQ(parsed.signals[1].signal_name, "Pulse Zone new");
+    EXPECT_EQ(parsed.signals[2].signal_name, "BRO-5-RF");
+
+    ASSERT_EQ(parsed.outcomes.size(), 2u);
+    EXPECT_EQ(parsed.outcomes[0].result,
+              optionx::bridges::telegram::TelegramOutcomeResult::WIN);
+    EXPECT_EQ(parsed.outcomes[1].result,
+              optionx::bridges::telegram::TelegramOutcomeResult::WIN);
+}
+
 TEST(TelegramSignalParser, ParsesRealWorldPairFormatsAndStrategyName) {
     const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
         message_with_text(
