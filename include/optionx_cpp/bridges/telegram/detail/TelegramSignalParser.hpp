@@ -452,6 +452,32 @@ namespace optionx::bridges::telegram {
             return tail;
         }
 
+        static std::string outcome_signal_name_from_match(
+                const std::string& matched_text) {
+            static const std::regex direction(
+                R"(\b(?:BUY|SELL|CALL|PUT)\b)",
+                std::regex::ECMAScript | std::regex::icase);
+            std::smatch direction_match;
+            if (!std::regex_search(matched_text, direction_match, direction)) {
+                return {};
+            }
+
+            auto name = trim_ascii(matched_text.substr(
+                static_cast<std::size_t>(direction_match.position() + direction_match.length())));
+            static const std::regex textual_result(
+                R"(\s+(?:WIN|LOSS|REFUND|DRAW|PROFIT|STATS|PAY|PING|DELAY)\b)",
+                std::regex::ECMAScript | std::regex::icase);
+            std::smatch textual_result_match;
+            if (std::regex_search(name, textual_result_match, textual_result)) {
+                name.resize(static_cast<std::size_t>(textual_result_match.position()));
+            }
+            const auto emoji = name.find("\xE2");
+            if (emoji != std::string::npos) {
+                name.resize(emoji);
+            }
+            return trim_ascii(std::move(name));
+        }
+
         static bool has_group(
                 const std::smatch& match,
                 const std::size_t group) {
@@ -524,6 +550,7 @@ namespace optionx::bridges::telegram {
                 const std::uint32_t timeframe_seconds) const {
             switch (m_config.expiry_policy.mode) {
             case TelegramExpiryMode::TIMEFRAME_DURATION:
+                signal.option_type = OptionType::SPRINT;
                 signal.duration = timeframe_seconds;
                 signal.expiry_time = 0;
                 return;
@@ -535,6 +562,7 @@ namespace optionx::bridges::telegram {
                     timeframe_seconds);
                 return;
             case TelegramExpiryMode::CUSTOM_DURATION:
+                signal.option_type = OptionType::SPRINT;
                 signal.duration = m_config.expiry_policy.custom_duration_seconds;
                 signal.expiry_time = 0;
                 return;
@@ -633,6 +661,9 @@ namespace optionx::bridges::telegram {
                     match[rule.expiry_group].str(),
                     match[rule.unit_group].str());
                 apply_expiry_policy(signal, raw, timeframe_seconds);
+            }
+            else if (m_config.expiry_policy.mode == TelegramExpiryMode::CUSTOM_DURATION) {
+                apply_expiry_policy(signal, raw, 0);
             }
             return signal;
         }
@@ -856,7 +887,10 @@ namespace optionx::bridges::telegram {
                                 static_cast<std::size_t>(match.position() + match.length()))) {
                             outcome.order_type = *direction;
                         }
-                        outcome.signal_name = raw.chat_title;
+                        outcome.signal_name = outcome_signal_name_from_match(match.str());
+                        if (outcome.signal_name.empty()) {
+                            outcome.signal_name = raw.chat_title;
+                        }
                         outcome.raw_text = match.str();
                         candidates.push_back({
                             static_cast<std::size_t>(match.position()),

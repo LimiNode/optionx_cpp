@@ -39,6 +39,42 @@ TEST(TelegramSignalParser, AppliesCustomExpiryDurationPolicy) {
         std::move(config)).parse(message_with_text("EURUSD BUY 5m"));
 
     ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_EQ(parsed.signals[0].option_type, optionx::OptionType::SPRINT);
+    EXPECT_EQ(parsed.signals[0].duration, 180u);
+    EXPECT_EQ(parsed.signals[0].expiry_time, 0);
+}
+
+TEST(TelegramSignalParser, ExpiryPolicyOverridesConflictingRuleOptionType) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.signal_rules = {
+        {"classic-rule", R"((EURUSD)\s+(BUY)\s+(\d+)(m)\b)",
+         1, 2, 3, 4, optionx::OptionType::CLASSIC},
+    };
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text("EURUSD BUY 5m"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_EQ(parsed.signals[0].option_type, optionx::OptionType::SPRINT);
+    EXPECT_EQ(parsed.signals[0].duration, 300u);
+    EXPECT_EQ(parsed.signals[0].expiry_time, 0);
+}
+
+TEST(TelegramSignalParser, CustomExpiryAppliesWithoutMessageTimeframe) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.expiry_policy.mode =
+        optionx::bridges::telegram::TelegramExpiryMode::CUSTOM_DURATION;
+    config.expiry_policy.custom_duration_seconds = 180;
+    config.signal_rules = {
+        {"fixed-duration", R"((EURUSD)\s+(BUY)\b)",
+         1, 2, 0, 0, optionx::OptionType::CLASSIC},
+    };
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text("EURUSD BUY"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_EQ(parsed.signals[0].option_type, optionx::OptionType::SPRINT);
     EXPECT_EQ(parsed.signals[0].duration, 180u);
     EXPECT_EQ(parsed.signals[0].expiry_time, 0);
 }
@@ -73,8 +109,10 @@ TEST(TelegramSignalParser, ParsesMoneyBotSignalNamesAndSeparatesReportedStats) {
     ASSERT_EQ(parsed.outcomes.size(), 2u);
     EXPECT_EQ(parsed.outcomes[0].result,
               optionx::bridges::telegram::TelegramOutcomeResult::WIN);
+    EXPECT_EQ(parsed.outcomes[0].signal_name, "AP-5");
     EXPECT_EQ(parsed.outcomes[1].result,
               optionx::bridges::telegram::TelegramOutcomeResult::WIN);
+    EXPECT_EQ(parsed.outcomes[1].signal_name, "AP-5");
 }
 
 TEST(TelegramSignalParser, ParsesRealWorldPairFormatsAndStrategyName) {
