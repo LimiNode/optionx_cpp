@@ -15,7 +15,14 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+extern char** environ;
+#endif
 
 namespace {
 
@@ -40,6 +47,7 @@ bool wait_for_signal(
         bool& failed,
         std::chrono::seconds timeout);
 std::string required_setting(const std::string& value, const char* name);
+std::unordered_map<std::string, std::string> current_environment();
 
 } // namespace
 
@@ -75,20 +83,21 @@ int main(int argc, char** argv) {
             "tg_client_stdio_worker",
             "--backend",
             "telethon",
-            "--api-id",
-            api_id,
-            "--api-hash",
-            api_hash,
-            "--session",
-            session,
         };
-        if (!options.proxy.empty()) {
-            command.insert(command.end(), {"--proxy", options.proxy});
-        }
 
         tg_client_stdio::WorkerProcessConfig worker_config;
         worker_config.command = std::move(command);
         worker_config.working_directory = worker_root;
+        worker_config.environment = current_environment();
+        worker_config.environment["TG_CLIENT_STDIO_API_ID"] = api_id;
+        worker_config.environment["TG_CLIENT_STDIO_API_HASH"] = api_hash;
+        worker_config.environment["TG_CLIENT_STDIO_SESSION"] = session;
+        if (options.proxy.empty()) {
+            worker_config.environment.erase("TG_CLIENT_STDIO_PROXY");
+        }
+        else {
+            worker_config.environment["TG_CLIENT_STDIO_PROXY"] = options.proxy;
+        }
         worker_config.on_stderr = [](const std::string& text) {
             std::cerr << "[tg-worker] " << text;
         };
@@ -295,6 +304,34 @@ std::string required_setting(
         throw std::invalid_argument(std::string(name) + " is required");
     }
     return value;
+}
+
+std::unordered_map<std::string, std::string> current_environment() {
+    std::unordered_map<std::string, std::string> environment;
+#ifdef _WIN32
+    const auto block = GetEnvironmentStringsA();
+    if (block == nullptr) {
+        throw std::runtime_error("could not read process environment");
+    }
+    for (auto entry = block; *entry != '\0';) {
+        const std::string value(entry);
+        const auto separator = value.find('=');
+        if (separator != std::string::npos && separator != 0) {
+            environment.emplace(value.substr(0, separator), value.substr(separator + 1));
+        }
+        entry += value.size() + 1;
+    }
+    FreeEnvironmentStringsA(block);
+#else
+    for (auto entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+        const std::string value(*entry);
+        const auto separator = value.find('=');
+        if (separator != std::string::npos && separator != 0) {
+            environment.emplace(value.substr(0, separator), value.substr(separator + 1));
+        }
+    }
+#endif
+    return environment;
 }
 
 } // namespace
