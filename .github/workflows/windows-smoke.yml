@@ -76,6 +76,9 @@ jobs:
       - name: Build Telegram archive parser smoke example
         run: cmake --build build-windows --config Debug --target telegram_archive_parser_smoke
 
+      - name: Build Telegram live bridge smoke example
+        run: cmake --build build-windows --config Debug --target telegram_live_bridge_smoke
+
       - name: Run MetaTrader file tests
         shell: pwsh
         run: |
