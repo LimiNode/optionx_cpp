@@ -26,7 +26,16 @@ TEST(TelegramSignalParser, ParsesExecutableSignalAndNormalizesExpiry) {
     EXPECT_EQ(parsed.signals[0].option_type, optionx::OptionType::SPRINT);
     EXPECT_EQ(parsed.signals[0].duration, 300u);
     EXPECT_EQ(parsed.signals[0].source_message_identity, "telegram:-10042:0:123");
+    EXPECT_EQ(parsed.signals[0].source_date_ms, 1800000000000);
     EXPECT_TRUE(parsed.outcomes.empty());
+}
+
+TEST(TelegramSignalParser, PreservesSourceTimeForOutcomes) {
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
+        message_with_text("EURUSD WIN"));
+
+    ASSERT_EQ(parsed.outcomes.size(), 1u);
+    EXPECT_EQ(parsed.outcomes[0].source_date_ms, 1800000000000);
 }
 
 TEST(TelegramSignalParser, AppliesCustomExpiryDurationPolicy) {
@@ -132,6 +141,63 @@ TEST(TelegramSignalParser, ParsesRealWorldPairFormatsAndStrategyName) {
     EXPECT_EQ(parsed.signals[1].order_type, optionx::OrderType::SELL);
     EXPECT_EQ(parsed.signals[2].symbol, "EURCAD");
     EXPECT_EQ(parsed.signals[2].duration, 1800u);
+}
+
+TEST(TelegramSignalParser, DoesNotInferMartingaleStepFromStrategySuffix) {
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser().parse(
+        message_with_text("BTC / USD m5 BUY COBRA -5"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_FALSE(parsed.signals[0].martingale_step.has_value());
+}
+
+TEST(TelegramSignalParser, ExtractsConfiguredExplicitMartingaleStep) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text("EURUSD BUY 5m COBRA MG-2"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u)
+        << (parsed.diagnostics.empty() ? "no diagnostic" : parsed.diagnostics.front().message);
+    ASSERT_TRUE(parsed.signals[0].martingale_step.has_value());
+    EXPECT_EQ(*parsed.signals[0].martingale_step, 2);
+    EXPECT_EQ(parsed.signals[0].signal_name, "COBRA");
+}
+
+TEST(TelegramSignalParser, NormalizesConfiguredMartingaleMarkerForOutcomes) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text(
+            "EURUSD BUY 5m COBRA MG-2\n"
+            "EURUSD BUY COBRA MG-2 \xE2\x9C\x85"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_EQ(parsed.signals[0].signal_name, "COBRA");
+    ASSERT_EQ(parsed.outcomes.size(), 1u);
+    EXPECT_EQ(parsed.outcomes[0].signal_name, "COBRA");
+    ASSERT_TRUE(parsed.outcomes[0].martingale_step.has_value());
+    EXPECT_EQ(*parsed.outcomes[0].martingale_step, 2);
+}
+
+TEST(TelegramSignalParser, RejectsAmbiguousConfiguredMartingaleStep) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text("EURUSD BUY 5m MG-1 MG-2"));
+
+    EXPECT_TRUE(parsed.signals.empty());
+    ASSERT_EQ(parsed.diagnostics.size(), 1u);
+    EXPECT_EQ(parsed.diagnostics.front().code, "invalid_signal_match");
 }
 
 TEST(TelegramSignalParser, ParsesProfitOutcomeFromReplyText) {

@@ -61,8 +61,9 @@ Currently maintained examples:
   Telegram credentials.
 - `telegram_archive_parser_smoke.cpp` replays exported Telegram raw-message
   records through the parser and keeps executable signals, outcomes and
-  diagnostics separate. It uses deterministic fixtures and needs no Telegram
-  credentials.
+  diagnostics separate. With `--input <messages.jsonl>` it streams an exported
+  JSONL archive one record at a time and prints aggregate totals. It uses
+  deterministic fixtures by default and needs no Telegram credentials.
 - `telegram_live_bridge_smoke.cpp` starts tg-client-stdio, listens to a live
   Telegram chat, and feeds raw messages through the C++ Telegram signal bridge.
   It requires an authorized worker session and accepts settings from `.env` or

@@ -9,10 +9,49 @@
 #include "bridges/telegram/detail/TelegramSignalParser.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <string>
 
 namespace optionx::bridges::telegram {
+
+    /// \enum TelegramMartingalePolicy
+    /// \brief Selects how explicitly marked martingale steps are dispatched.
+    enum class TelegramMartingalePolicy {
+        UNKNOWN,
+        ALL_SIGNALS,
+        FIRST_SIGNAL_ONLY,
+        CONTIGUOUS_STEPS
+    };
+
+    inline const char* telegram_martingale_policy_name(
+            const TelegramMartingalePolicy policy) {
+        switch (policy) {
+        case TelegramMartingalePolicy::FIRST_SIGNAL_ONLY:
+            return "FIRST_SIGNAL_ONLY";
+        case TelegramMartingalePolicy::CONTIGUOUS_STEPS:
+            return "CONTIGUOUS_STEPS";
+        case TelegramMartingalePolicy::ALL_SIGNALS:
+            return "ALL_SIGNALS";
+        case TelegramMartingalePolicy::UNKNOWN:
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    inline TelegramMartingalePolicy telegram_martingale_policy_from_name(
+            const std::string& value) {
+        if (value == "FIRST_SIGNAL_ONLY") {
+            return TelegramMartingalePolicy::FIRST_SIGNAL_ONLY;
+        }
+        if (value == "CONTIGUOUS_STEPS") {
+            return TelegramMartingalePolicy::CONTIGUOUS_STEPS;
+        }
+        if (value == "ALL_SIGNALS") {
+            return TelegramMartingalePolicy::ALL_SIGNALS;
+        }
+        return TelegramMartingalePolicy::UNKNOWN;
+    }
 
     inline const char* telegram_outcome_result_name(
             const TelegramOutcomeResult result) {
@@ -79,6 +118,8 @@ namespace optionx::bridges::telegram {
         BridgeId bridge_id = 0;
         double fixed_amount = 0.0;
         std::size_t dedupe_cache_size = 4096;
+        std::uint32_t max_signal_age_seconds = 0;
+        TelegramMartingalePolicy martingale_policy = TelegramMartingalePolicy::ALL_SIGNALS;
         TelegramParserConfig parser = TelegramSignalParser::default_config();
 
         void to_json(nlohmann::json& j) const override {
@@ -86,6 +127,8 @@ namespace optionx::bridges::telegram {
                 {"bridge_id", bridge_id},
                 {"fixed_amount", fixed_amount},
                 {"dedupe_cache_size", dedupe_cache_size},
+                {"max_signal_age_seconds", max_signal_age_seconds},
+                {"martingale_policy", telegram_martingale_policy_name(martingale_policy)},
                 {"symbol_pattern", parser.symbol_pattern},
                 {"otc_symbol_suffix", parser.otc_symbol_suffix},
                 {"expiry_mode", telegram_expiry_mode_name(parser.expiry_policy.mode)},
@@ -94,6 +137,7 @@ namespace optionx::bridges::telegram {
                 {"signal_rules", nlohmann::json::array()},
                 {"direction_rules", nlohmann::json::array()},
                 {"outcome_rules", nlohmann::json::array()},
+                {"martingale_rules", nlohmann::json::array()},
             };
             for (const auto& rule : parser.signal_rules) {
                 j["signal_rules"].push_back({
@@ -123,12 +167,25 @@ namespace optionx::bridges::telegram {
                     {"direction_group", rule.direction_group},
                 });
             }
+            for (const auto& rule : parser.martingale_rules) {
+                j["martingale_rules"].push_back({
+                    {"name", rule.name},
+                    {"pattern", rule.pattern},
+                    {"step_group", rule.step_group},
+                });
+            }
         }
 
         void from_json(const nlohmann::json& j) override {
             bridge_id = j.value("bridge_id", bridge_id);
             fixed_amount = j.value("fixed_amount", fixed_amount);
             dedupe_cache_size = j.value("dedupe_cache_size", dedupe_cache_size);
+            max_signal_age_seconds = j.value(
+                "max_signal_age_seconds", max_signal_age_seconds);
+            if (j.contains("martingale_policy")) {
+                martingale_policy = telegram_martingale_policy_from_name(
+                    j.at("martingale_policy").get<std::string>());
+            }
             parser.symbol_pattern = j.value("symbol_pattern", parser.symbol_pattern);
             parser.otc_symbol_suffix = j.value("otc_symbol_suffix", parser.otc_symbol_suffix);
             if (j.contains("expiry_mode")) {
@@ -180,6 +237,16 @@ namespace optionx::bridges::telegram {
                     parser.outcome_rules.push_back(std::move(rule));
                 }
             }
+            if (j.contains("martingale_rules")) {
+                parser.martingale_rules.clear();
+                for (const auto& item : j.at("martingale_rules")) {
+                    TelegramMartingaleRule rule;
+                    rule.name = item.value("name", "");
+                    rule.pattern = item.at("pattern").get<std::string>();
+                    rule.step_group = item.value("step_group", 1u);
+                    parser.martingale_rules.push_back(std::move(rule));
+                }
+            }
         }
 
         std::pair<bool, std::string> validate() const override {
@@ -188,6 +255,9 @@ namespace optionx::bridges::telegram {
             }
             if (dedupe_cache_size == 0) {
                 return {false, "Telegram dedupe_cache_size must be positive."};
+            }
+            if (martingale_policy == TelegramMartingalePolicy::UNKNOWN) {
+                return {false, "Telegram martingale_policy is unsupported."};
             }
             if (parser.expiry_policy.mode == TelegramExpiryMode::UNKNOWN) {
                 return {false, "Telegram expiry_mode is unsupported."};
