@@ -26,6 +26,7 @@ namespace optionx {
         std::string signal_name;                            ///< Signal or strategy name.
         std::string user_data;                              ///< User-defined signal data.
         std::string comment;                                ///< Optional signal comment.
+        std::int64_t source_time_ms = 0;                    ///< Source publication timestamp in Unix milliseconds.
 
         // Suggested trade parameters
         OptionType option_type = OptionType::UNKNOWN;       ///< Suggested option type.
@@ -60,6 +61,7 @@ namespace optionx {
             request.signal_name = signal_name;
             request.user_data = user_data;
             request.comment = comment;
+            request.source_time_ms = source_time_ms;
             request.option_type = option_type;
             request.order_type = order_type;
             request.amount = amount;
@@ -111,6 +113,7 @@ namespace optionx {
             cloned->signal_name = signal_name;
             cloned->user_data = user_data;
             cloned->comment = comment;
+            cloned->source_time_ms = source_time_ms;
             cloned->option_type = option_type;
             cloned->order_type = order_type;
             cloned->amount = amount;
@@ -157,6 +160,7 @@ namespace nlohmann {
                 {"signal_name", signal.signal_name},
                 {"user_data", signal.user_data},
                 {"comment", signal.comment},
+                {"source_time_ms", signal.source_time_ms},
                 {"option_type", signal.option_type},
                 {"order_type", signal.order_type},
                 {"amount", signal.amount},
@@ -190,6 +194,7 @@ namespace nlohmann {
             signal.signal_name = j.value("signal_name", std::string());
             signal.user_data = j.value("user_data", std::string());
             signal.comment = j.value("comment", std::string());
+            signal.source_time_ms = j.value("source_time_ms", std::int64_t{0});
             signal.option_type = j.value("option_type", optionx::OptionType::UNKNOWN);
             signal.order_type = j.value("order_type", optionx::OrderType::UNKNOWN);
             signal.amount = j.value("amount", 0.0);

@@ -290,11 +290,37 @@ OptionX performance statistics. The parser may preserve them in raw text, but
 the local backtest/statistics layer must calculate its own values from parsed
 signals, outcomes, and their raw message timestamps.
 
-Martingale parsing should be deferred until the base signal/outcome model is
-stable. The parser may preserve raw martingale hints in diagnostics or metadata
-without turning them into executable sizing decisions. Any future policy that
-keeps only the first step or emits martingale steps must be an explicit
-opt-in execution policy, not an implicit parser side effect.
+`date_ms` is retained on every parsed signal and outcome and propagated to the
+executable `TradeSignal` as `source_time_ms`. It is the source publication time,
+not the local receive time. `TelegramSignalBridgeConfig::max_signal_age_seconds`
+is an optional live-intake guard: a positive value rejects a normally dispatched
+signal when it arrives after that age, while `0` disables the guard. Archive
+replay therefore preserves historical timing without accidentally executing
+historical signals.
+
+Martingale recognition is source-configured and explicit. A
+`TelegramMartingaleRule` supplies one regex capture group for a non-negative
+step number; strategy suffixes such as `COBRA -5` are never treated as a step
+by default. The parsed step is metadata only and does not infer an amount or a
+money-management multiplier. A configured step marker is removed from the
+display signal name so steps from the same named strategy retain a stable
+correlation key.
+
+The bridge offers opt-in dispatch policies:
+
+- `ALL_SIGNALS` keeps the normal behavior; recognized steps are only metadata
+  and the stale-signal guard applies;
+- `FIRST_SIGNAL_ONLY` accepts unmarked signals and explicit step `0`, while
+  ignoring later explicit steps; the stale-signal guard applies;
+- `CONTIGUOUS_STEPS` requires an explicit step, accepts `0`, then only `1`,
+  `2`, and so on for the same chat/topic/symbol/direction/strategy group. It
+  intentionally bypasses the stale-signal guard, because a source-side chain
+  must not silently skip a delayed step.
+
+The policies only decide whether a source signal reaches the trade pipeline.
+They do not implement stake sizing; a future execution policy may use
+`TradeSignal::mm_step` and the source group once its money-management contract
+is defined.
 
 ## Outcomes
 
@@ -475,15 +501,19 @@ Completed in the current Telegram stack:
 Current no-credentials examples include a live fake-source bridge smoke and a
 deterministic archive/parser replay. The latter uses the same raw-message shape
 that `messages.export` streams, while keeping parser outcomes separate from
-executable signals.
+executable signals. `telegram_archive_parser_smoke --input <messages.jsonl>`
+consumes that JSONL one record at a time and reports message, signal, outcome,
+diagnostic and unparsed totals.
 
 Next steps:
 
-1. Pin the authorized-session smoke in the OptionX consumer and rerun the
-   integration CI.
-2. Add operator-facing dialog listing and full JSONL history export tooling
-   with date filters, then replay a real test channel through the C++ parser.
-3. Implement the bounded worker media contract before starting OCR work.
-4. Revisit the deferred OCR provider after collecting representative image
+1. Replay representative real channels through the C++ parser and preserve only
+   anonymized or synthetic regression fixtures.
+2. Correlate source outcomes with signals for archive statistics and replay;
+   reported channel statistics remain non-authoritative.
+3. Define an execution-side money-management contract before adding automatic
+   stake sizing to the explicit martingale step metadata.
+4. Implement the bounded worker media contract before starting OCR work.
+5. Revisit the deferred OCR provider after collecting representative image
    fixtures. OCR/vision must remain optional and must not block the text
    parser, live bridge, or archive replay.
