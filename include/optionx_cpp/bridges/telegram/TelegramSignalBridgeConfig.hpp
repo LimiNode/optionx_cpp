@@ -18,6 +18,7 @@ namespace optionx::bridges::telegram {
     /// \enum TelegramMartingalePolicy
     /// \brief Selects how explicitly marked martingale steps are dispatched.
     enum class TelegramMartingalePolicy {
+        UNKNOWN,
         ALL_SIGNALS,
         FIRST_SIGNAL_ONLY,
         CONTIGUOUS_STEPS
@@ -31,8 +32,10 @@ namespace optionx::bridges::telegram {
         case TelegramMartingalePolicy::CONTIGUOUS_STEPS:
             return "CONTIGUOUS_STEPS";
         case TelegramMartingalePolicy::ALL_SIGNALS:
-        default:
             return "ALL_SIGNALS";
+        case TelegramMartingalePolicy::UNKNOWN:
+        default:
+            return "UNKNOWN";
         }
     }
 
@@ -44,7 +47,10 @@ namespace optionx::bridges::telegram {
         if (value == "CONTIGUOUS_STEPS") {
             return TelegramMartingalePolicy::CONTIGUOUS_STEPS;
         }
-        return TelegramMartingalePolicy::ALL_SIGNALS;
+        if (value == "ALL_SIGNALS") {
+            return TelegramMartingalePolicy::ALL_SIGNALS;
+        }
+        return TelegramMartingalePolicy::UNKNOWN;
     }
 
     inline const char* telegram_outcome_result_name(
@@ -249,6 +255,9 @@ namespace optionx::bridges::telegram {
             }
             if (dedupe_cache_size == 0) {
                 return {false, "Telegram dedupe_cache_size must be positive."};
+            }
+            if (martingale_policy == TelegramMartingalePolicy::UNKNOWN) {
+                return {false, "Telegram martingale_policy is unsupported."};
             }
             if (parser.expiry_policy.mode == TelegramExpiryMode::UNKNOWN) {
                 return {false, "Telegram expiry_mode is unsupported."};

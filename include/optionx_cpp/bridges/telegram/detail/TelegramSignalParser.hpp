@@ -430,6 +430,17 @@ namespace optionx::bridges::telegram {
             return value.substr(first, last - first + 1);
         }
 
+        std::string normalize_strategy_name(std::string value) const {
+            static const std::regex step_suffix(
+                R"(\s+-\s*\d+\s*$)",
+                std::regex::ECMAScript);
+            value = std::regex_replace(value, step_suffix, "");
+            for (const auto& martingale_rule : m_martingale_rules) {
+                value = std::regex_replace(value, martingale_rule.expression, "");
+            }
+            return trim_ascii(std::move(value));
+        }
+
         std::string signal_name_from_tail(
                 const TelegramRawMessage& raw,
                 const std::smatch& match) const {
@@ -461,22 +472,15 @@ namespace optionx::bridges::telegram {
                     }
                 }
             }
-            static const std::regex step_suffix(
-                R"(\s+-\s*\d+\s*$)",
-                std::regex::ECMAScript);
-            tail = std::regex_replace(tail, step_suffix, "");
-            for (const auto& martingale_rule : m_martingale_rules) {
-                tail = std::regex_replace(tail, martingale_rule.expression, "");
-            }
-            tail = trim_ascii(std::move(tail));
+            tail = normalize_strategy_name(std::move(tail));
             if (tail.empty() || !std::isalpha(static_cast<unsigned char>(tail.front()))) {
                 return {};
             }
             return tail;
         }
 
-        static std::string outcome_signal_name_from_match(
-                const std::string& matched_text) {
+        std::string outcome_signal_name_from_match(
+                const std::string& matched_text) const {
             static const std::regex direction(
                 R"(\b(?:BUY|SELL|CALL|PUT)\b)",
                 std::regex::ECMAScript | std::regex::icase);
@@ -498,7 +502,7 @@ namespace optionx::bridges::telegram {
             if (emoji != std::string::npos) {
                 name.resize(emoji);
             }
-            return trim_ascii(std::move(name));
+            return normalize_strategy_name(std::move(name));
         }
 
         std::optional<std::int32_t> martingale_step_from_line(

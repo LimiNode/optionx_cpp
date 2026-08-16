@@ -2,10 +2,13 @@
 
 #include "optionx_cpp/bridges/telegram.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -216,6 +219,132 @@ TEST(TelegramSignalBridge, RequiresContiguousExplicitMartingaleSteps) {
     bridge.shutdown();
 }
 
+TEST(TelegramSignalBridge, RequiresFreshInitialContiguousMartingaleStep) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->max_signal_age_seconds = 1;
+    bridge_config->martingale_policy =
+        optionx::bridges::telegram::TelegramMartingalePolicy::CONTIGUOUS_STEPS;
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::vector<std::unique_ptr<optionx::TradeSignal>> signals;
+    std::vector<optionx::BridgeSignalReport> reports;
+    bridge.on_signal_id() = [] { return 101; };
+    bridge.on_trade_signal() = [&](std::unique_ptr<optionx::TradeSignal> signal) {
+        signals.push_back(std::move(signal));
+    };
+    bridge.on_signal_report() = [&](const auto& report) {
+        reports.push_back(report);
+    };
+
+    bridge.run();
+    auto stale_initial = make_message(124, "EURUSD BUY 5m COBRA MG-0");
+    stale_initial.date_ms = current_time_ms() - 2000;
+    source->emit(stale_initial);
+
+    auto fresh_initial = make_message(125, "EURUSD BUY 5m COBRA MG-0");
+    fresh_initial.date_ms = current_time_ms();
+    source->emit(fresh_initial);
+
+    auto delayed_next = make_message(126, "EURUSD BUY 5m COBRA MG-1");
+    delayed_next.date_ms = current_time_ms() - 2000;
+    source->emit(delayed_next);
+
+    ASSERT_EQ(signals.size(), 2u);
+    EXPECT_EQ(signals[0]->mm_step, 0);
+    EXPECT_EQ(signals[1]->mm_step, 1);
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports.front().reason_code, "stale_signal");
+
+    bridge.shutdown();
+}
+
+TEST(TelegramSignalBridge, SerializesConcurrentContiguousMartingaleDispatch) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->martingale_policy =
+        optionx::bridges::telegram::TelegramMartingalePolicy::CONTIGUOUS_STEPS;
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::promise<void> first_callback_started;
+    const auto release_first_callback = std::make_shared<std::promise<void>>();
+    const auto release_future = release_first_callback->get_future().share();
+    std::atomic<int> later_steps_dispatched{0};
+    bridge.on_signal_id() = [] { return 101; };
+    bridge.on_trade_signal() = [&](std::unique_ptr<optionx::TradeSignal> signal) {
+        if (signal->mm_step == 0) {
+            first_callback_started.set_value();
+            release_future.wait();
+            throw std::runtime_error("expected test failure");
+        }
+        ++later_steps_dispatched;
+    };
+
+    bridge.run();
+    std::thread first([&] {
+        source->emit(make_message(124, "EURUSD BUY 5m COBRA MG-0"));
+    });
+    first_callback_started.get_future().wait();
+    std::thread second([&] {
+        source->emit(make_message(125, "EURUSD BUY 5m COBRA MG-1"));
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(later_steps_dispatched.load(), 0);
+    release_first_callback->set_value();
+    first.join();
+    second.join();
+    EXPECT_EQ(later_steps_dispatched.load(), 0);
+
+    bridge.shutdown();
+}
+
+TEST(TelegramSignalBridge, RejectsReentrantMartingaleStepUntilPredecessorCommits) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->martingale_policy =
+        optionx::bridges::telegram::TelegramMartingalePolicy::CONTIGUOUS_STEPS;
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::vector<std::unique_ptr<optionx::TradeSignal>> signals;
+    std::vector<optionx::BridgeSignalReport> reports;
+    bridge.on_signal_id() = [] { return 101; };
+    bridge.on_trade_signal() = [&](std::unique_ptr<optionx::TradeSignal> signal) {
+        if (signal->mm_step == 0) {
+            source->emit(make_message(125, "EURUSD BUY 5m COBRA MG-1"));
+        }
+        signals.push_back(std::move(signal));
+    };
+    bridge.on_signal_report() = [&](const auto& report) {
+        reports.push_back(report);
+    };
+
+    bridge.run();
+    source->emit(make_message(124, "EURUSD BUY 5m COBRA MG-0"));
+
+    ASSERT_EQ(signals.size(), 1u);
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports.front().reason_code, "martingale_step_pending");
+
+    source->emit(make_message(126, "EURUSD BUY 5m COBRA MG-1"));
+    ASSERT_EQ(signals.size(), 2u);
+    EXPECT_EQ(signals.back()->mm_step, 1);
+
+    bridge.shutdown();
+}
+
 TEST(TelegramSignalBridge, RollsBackMartingaleStepWhenSignalIdAllocationFails) {
     auto source = std::make_shared<FakeMessageSource>();
     optionx::bridges::telegram::TelegramSignalBridge bridge(source);
@@ -315,6 +444,22 @@ TEST(TelegramSignalBridgeConfig, RoundTripsTimingAndMartingaleSettings) {
     ASSERT_EQ(restored.parser.martingale_rules.size(), 1u);
     EXPECT_EQ(restored.parser.martingale_rules[0].pattern, R"(\bMG[ -]?(\d+)\b)");
     EXPECT_EQ(restored.parser.martingale_rules[0].step_group, 1u);
+}
+
+TEST(TelegramSignalBridgeConfig, RejectsUnknownMartingalePolicy) {
+    auto original = config();
+    nlohmann::json serialized;
+    original->to_json(serialized);
+    serialized["martingale_policy"] = "FIRST_SIGNAL_ONY";
+
+    optionx::bridges::telegram::TelegramSignalBridgeConfig restored;
+    restored.from_json(serialized);
+
+    EXPECT_EQ(restored.martingale_policy,
+              optionx::bridges::telegram::TelegramMartingalePolicy::UNKNOWN);
+    const auto validation = restored.validate();
+    EXPECT_FALSE(validation.first);
+    EXPECT_EQ(validation.second, "Telegram martingale_policy is unsupported.");
 }
 
 int main(int argc, char** argv) {

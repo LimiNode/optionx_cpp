@@ -45,6 +45,10 @@ namespace optionx::bridges::telegram {
     class TelegramSignalBridge final : public BaseBridge {
     private:
         struct RuntimeState {
+            // Source adapters may invoke messages concurrently. Serialize the
+            // full intake path and hold contiguous sequence steps as pending
+            // until their allocator and callback complete.
+            std::recursive_mutex intake_mutex;
             std::mutex mutex;
             bridge_status_callback_t status_callback;
             BaseBridge::trade_signal_callback_t trade_signal_callback;
@@ -54,6 +58,7 @@ namespace optionx::bridges::telegram {
             std::deque<std::string> dedupe_order;
             std::unordered_set<std::string> dedupe_keys;
             std::unordered_map<std::string, std::int32_t> martingale_steps;
+            std::unordered_set<std::string> pending_martingale_sequences;
             bool running = false;
         };
 
@@ -146,6 +151,7 @@ namespace optionx::bridges::telegram {
                 m_state->dedupe_keys.clear();
                 m_state->dedupe_order.clear();
                 m_state->martingale_steps.clear();
+                m_state->pending_martingale_sequences.clear();
             }
 
             try {
@@ -291,8 +297,7 @@ namespace optionx::bridges::telegram {
                 const TelegramRawMessage& raw,
                 const std::int64_t received_time_ms) {
             if (config.max_signal_age_seconds == 0 || raw.date_ms <= 0 ||
-                received_time_ms <= raw.date_ms ||
-                config.martingale_policy == TelegramMartingalePolicy::CONTIGUOUS_STEPS) {
+                received_time_ms <= raw.date_ms) {
                 return false;
             }
             const auto max_age_ms = static_cast<std::int64_t>(
@@ -325,6 +330,24 @@ namespace optionx::bridges::telegram {
             return report;
         }
 
+        static BridgeSignalReport make_stale_signal_report(
+                const TelegramSignalBridgeConfig& config,
+                const TelegramRawMessage& raw,
+                const TelegramParsedSignal& parsed,
+                const std::string& dedupe_key,
+                const std::int64_t received_time_ms) {
+            auto report = make_signal_report(
+                config, raw, parsed, dedupe_key, received_time_ms,
+                BridgeSignalReportStatus::REJECTED,
+                "stale_signal", "Telegram signal exceeded the configured maximum age.");
+            report.context = {
+                {"age_ms", received_time_ms - raw.date_ms},
+                {"max_age_ms", static_cast<std::int64_t>(
+                    config.max_signal_age_seconds) * 1000},
+            };
+            return report;
+        }
+
         static void rollback_dispatch_state(
                 const std::shared_ptr<RuntimeState>& state,
                 const std::string& dedupe_key,
@@ -347,6 +370,18 @@ namespace optionx::bridges::telegram {
             else {
                 state->martingale_steps.erase(sequence_key);
             }
+            state->pending_martingale_sequences.erase(sequence_key);
+        }
+
+        static void commit_dispatch_state(
+                const std::shared_ptr<RuntimeState>& state,
+                const std::string& sequence_key,
+                const bool martingale_step_recorded) {
+            if (!martingale_step_recorded) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->pending_martingale_sequences.erase(sequence_key);
         }
 
         static void process_message(
@@ -354,6 +389,7 @@ namespace optionx::bridges::telegram {
                 const TelegramSignalBridgeConfig& config,
                 const TelegramSignalParser& parser,
                 const TelegramRawMessage& raw) {
+            std::lock_guard<std::recursive_mutex> intake_lock(state->intake_mutex);
             try {
                 raw.validate();
                 const auto received_time_ms = current_time_ms();
@@ -395,26 +431,10 @@ namespace optionx::bridges::telegram {
                     const auto dedupe_key = make_dedupe_key(raw, parsed_signal, index);
                     signal->unique_hash = dedupe_key;
 
-                    if (is_stale(config, raw, received_time_ms)) {
-                        BridgeSignalReport report;
-                        report.bridge_id = config.bridge_id;
-                        report.bridge_type = BridgeType::TELEGRAM_SIGNAL;
-                        report.status = BridgeSignalReportStatus::REJECTED;
-                        report.reason_code = "stale_signal";
-                        report.message = "Telegram signal exceeded the configured maximum age.";
-                        report.event_id = raw.message_identity();
-                        report.dedupe_key = dedupe_key;
-                        report.symbol = parsed_signal.symbol;
-                        report.signal_name = parsed_signal.signal_name;
-                        report.raw_payload = raw.to_json();
-                        report.context = {
-                            {"age_ms", received_time_ms - raw.date_ms},
-                            {"max_age_ms", static_cast<std::int64_t>(
-                                config.max_signal_age_seconds) * 1000},
-                        };
-                        report.received_time_ms = received_time_ms;
-                        report.source_time_ms = raw.date_ms;
-                        emit_report(state, std::move(report));
+                    if (config.martingale_policy != TelegramMartingalePolicy::CONTIGUOUS_STEPS &&
+                        is_stale(config, raw, received_time_ms)) {
+                        emit_report(state, make_stale_signal_report(
+                            config, raw, parsed_signal, dedupe_key, received_time_ms));
                         continue;
                     }
 
@@ -448,38 +468,53 @@ namespace optionx::bridges::telegram {
                             policy_report->context = {{"martingale_step", *parsed_signal.martingale_step}};
                         }
                         else if (config.martingale_policy ==
-                                 TelegramMartingalePolicy::CONTIGUOUS_STEPS &&
-                                 !parsed_signal.martingale_step) {
-                            policy_report = make_signal_report(
-                                config, raw, parsed_signal, dedupe_key, received_time_ms,
-                                BridgeSignalReportStatus::REJECTED,
-                                "martingale_step_missing",
-                                "Telegram martingale policy requires an explicit step.");
-                        }
-                        else if (config.martingale_policy ==
                                  TelegramMartingalePolicy::CONTIGUOUS_STEPS) {
-                            sequence_key = martingale_key(raw, parsed_signal);
-                            const auto existing = state->martingale_steps.find(sequence_key);
-                            if (*parsed_signal.martingale_step != 0 &&
-                                (existing == state->martingale_steps.end() ||
-                                 *parsed_signal.martingale_step != existing->second + 1)) {
+                            if (!parsed_signal.martingale_step) {
                                 policy_report = make_signal_report(
                                     config, raw, parsed_signal, dedupe_key, received_time_ms,
                                     BridgeSignalReportStatus::REJECTED,
-                                    "martingale_step_out_of_sequence",
-                                    "Telegram martingale step is not contiguous.");
-                                policy_report->context = {
-                                    {"martingale_step", *parsed_signal.martingale_step},
-                                    {"previous_step", existing == state->martingale_steps.end()
-                                        ? -1 : existing->second},
-                                };
+                                    "martingale_step_missing",
+                                    "Telegram martingale policy requires an explicit step.");
                             }
                             else {
-                                if (existing != state->martingale_steps.end()) {
-                                    previous_martingale_step = existing->second;
+                                sequence_key = martingale_key(raw, parsed_signal);
+                                const auto existing = state->martingale_steps.find(sequence_key);
+                                if (state->pending_martingale_sequences.find(sequence_key) !=
+                                    state->pending_martingale_sequences.end()) {
+                                    policy_report = make_signal_report(
+                                        config, raw, parsed_signal, dedupe_key, received_time_ms,
+                                        BridgeSignalReportStatus::REJECTED,
+                                        "martingale_step_pending",
+                                        "Telegram martingale predecessor has not completed.");
                                 }
-                                state->martingale_steps[sequence_key] = *parsed_signal.martingale_step;
-                                martingale_step_recorded = true;
+                                else if (*parsed_signal.martingale_step == 0 &&
+                                         is_stale(config, raw, received_time_ms)) {
+                                    policy_report = make_stale_signal_report(
+                                        config, raw, parsed_signal, dedupe_key, received_time_ms);
+                                }
+                                else if (*parsed_signal.martingale_step != 0 &&
+                                (existing == state->martingale_steps.end() ||
+                                 *parsed_signal.martingale_step != existing->second + 1)) {
+                                    policy_report = make_signal_report(
+                                        config, raw, parsed_signal, dedupe_key, received_time_ms,
+                                        BridgeSignalReportStatus::REJECTED,
+                                        "martingale_step_out_of_sequence",
+                                        "Telegram martingale step is not contiguous.");
+                                    policy_report->context = {
+                                        {"martingale_step", *parsed_signal.martingale_step},
+                                        {"previous_step", existing == state->martingale_steps.end()
+                                            ? -1 : existing->second},
+                                    };
+                                }
+                                else {
+                                    if (existing != state->martingale_steps.end()) {
+                                        previous_martingale_step = existing->second;
+                                    }
+                                    state->martingale_steps[sequence_key] =
+                                        *parsed_signal.martingale_step;
+                                    state->pending_martingale_sequences.insert(sequence_key);
+                                    martingale_step_recorded = true;
+                                }
                             }
                         }
                         if (!duplicate && !policy_report) {
@@ -536,6 +571,8 @@ namespace optionx::bridges::telegram {
                                 "Telegram trade signal callback threw."));
                         }
                     }
+                    commit_dispatch_state(
+                        state, sequence_key, martingale_step_recorded);
                 }
             }
             catch (const std::exception& error) {

@@ -167,6 +167,25 @@ TEST(TelegramSignalParser, ExtractsConfiguredExplicitMartingaleStep) {
     EXPECT_EQ(parsed.signals[0].signal_name, "COBRA");
 }
 
+TEST(TelegramSignalParser, NormalizesConfiguredMartingaleMarkerForOutcomes) {
+    auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
+    config.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+
+    const auto parsed = optionx::bridges::telegram::TelegramSignalParser(
+        std::move(config)).parse(message_with_text(
+            "EURUSD BUY 5m COBRA MG-2\n"
+            "EURUSD BUY COBRA MG-2 \xE2\x9C\x85"));
+
+    ASSERT_EQ(parsed.signals.size(), 1u);
+    EXPECT_EQ(parsed.signals[0].signal_name, "COBRA");
+    ASSERT_EQ(parsed.outcomes.size(), 1u);
+    EXPECT_EQ(parsed.outcomes[0].signal_name, "COBRA");
+    ASSERT_TRUE(parsed.outcomes[0].martingale_step.has_value());
+    EXPECT_EQ(*parsed.outcomes[0].martingale_step, 2);
+}
+
 TEST(TelegramSignalParser, RejectsAmbiguousConfiguredMartingaleStep) {
     auto config = optionx::bridges::telegram::TelegramSignalParser::default_config();
     config.martingale_rules = {

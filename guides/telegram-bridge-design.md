@@ -312,10 +312,15 @@ The bridge offers opt-in dispatch policies:
   and the stale-signal guard applies;
 - `FIRST_SIGNAL_ONLY` accepts unmarked signals and explicit step `0`, while
   ignoring later explicit steps; the stale-signal guard applies;
-- `CONTIGUOUS_STEPS` requires an explicit step, accepts `0`, then only `1`,
-  `2`, and so on for the same chat/topic/symbol/direction/strategy group. It
-  intentionally bypasses the stale-signal guard, because a source-side chain
-  must not silently skip a delayed step.
+- `CONTIGUOUS_STEPS` requires an explicit step, accepts a fresh `0`, then only
+  `1`, `2`, and so on for the same chat/topic/symbol/direction/strategy group.
+  Later expected steps intentionally bypass the stale-signal guard, because a
+  source-side chain must not silently skip a delayed step. Intake is serialized
+  through allocator/callback completion, so a later step cannot pass while its
+  predecessor is still pending or rolls back.
+
+Unknown `martingale_policy` values are rejected during configuration validation;
+they never fall back to `ALL_SIGNALS`.
 
 The policies only decide whether a source signal reaches the trade pipeline.
 They do not implement stake sizing; a future execution policy may use
