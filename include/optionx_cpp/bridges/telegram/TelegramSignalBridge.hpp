@@ -8,6 +8,7 @@
 #include "bridges/BaseBridge.hpp"
 #include "bridges/detail/BridgeTradeSignalValidation.hpp"
 #include "bridges/telegram/TelegramSignalBridgeConfig.hpp"
+#include "data/trading/trade_state_traits.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -45,6 +46,12 @@ namespace optionx::bridges::telegram {
     class TelegramSignalBridge final : public BaseBridge {
     private:
         struct RuntimeState {
+            struct AntiMartingaleGroupState {
+                std::uint32_t next_step = 0;
+                bool pending_trade = false;
+                SignalId pending_signal_id = 0;
+            };
+
             // Source adapters may invoke messages concurrently. Serialize the
             // full intake path and hold contiguous sequence steps as pending
             // until their allocator and callback complete.
@@ -59,6 +66,10 @@ namespace optionx::bridges::telegram {
             std::unordered_set<std::string> dedupe_keys;
             std::unordered_map<std::string, std::int32_t> martingale_steps;
             std::unordered_set<std::string> pending_martingale_sequences;
+            std::unordered_map<std::string, AntiMartingaleGroupState>
+                anti_martingale_groups;
+            std::unordered_map<SignalId, std::string> anti_martingale_signal_groups;
+            std::shared_ptr<const TelegramSignalBridgeConfig> active_config;
             bool running = false;
         };
 
@@ -122,6 +133,43 @@ namespace optionx::bridges::telegram {
             (void)info;
         }
 
+        void update_trade_result(
+                const TradeRequest& request,
+                const TradeResult& result) override {
+            if (!is_terminal_trade_state(result.trade_state) || request.signal_id == 0) {
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(m_state->mutex);
+            const auto config = m_state->active_config;
+            if (!config || !config->anti_martingale_enabled) {
+                return;
+            }
+            const auto signal_group = m_state->anti_martingale_signal_groups.find(
+                request.signal_id);
+            if (signal_group == m_state->anti_martingale_signal_groups.end()) {
+                return;
+            }
+            const auto group = m_state->anti_martingale_groups.find(signal_group->second);
+            if (group == m_state->anti_martingale_groups.end() ||
+                !group->second.pending_trade ||
+                group->second.pending_signal_id != request.signal_id) {
+                return;
+            }
+
+            m_state->anti_martingale_signal_groups.erase(signal_group);
+            auto& state = group->second;
+            state.pending_trade = false;
+            state.pending_signal_id = 0;
+            if (is_win(result.trade_state) &&
+                state.next_step < config->anti_martingale_max_steps) {
+                ++state.next_step;
+            }
+            else {
+                state.next_step = 0;
+            }
+        }
+
         void run() override {
             const auto config = get_config();
             if (!config) {
@@ -152,6 +200,9 @@ namespace optionx::bridges::telegram {
                 m_state->dedupe_order.clear();
                 m_state->martingale_steps.clear();
                 m_state->pending_martingale_sequences.clear();
+                m_state->anti_martingale_groups.clear();
+                m_state->anti_martingale_signal_groups.clear();
+                m_state->active_config = config;
             }
 
             try {
@@ -191,6 +242,9 @@ namespace optionx::bridges::telegram {
                 m_state->running = false;
                 source = m_state->source;
                 m_state->source.reset();
+                m_state->anti_martingale_groups.clear();
+                m_state->anti_martingale_signal_groups.clear();
+                m_state->active_config.reset();
             }
             if (source) {
                 try {
@@ -227,6 +281,9 @@ namespace optionx::bridges::telegram {
             m_state->running = running;
             if (!running) {
                 m_state->source.reset();
+                m_state->anti_martingale_groups.clear();
+                m_state->anti_martingale_signal_groups.clear();
+                m_state->active_config.reset();
             }
         }
 
@@ -285,6 +342,22 @@ namespace optionx::bridges::telegram {
                 const TelegramParsedSignal& parsed) {
             return raw.chat_id + "|" + raw.topic_id + "|" + parsed.symbol + "|" +
                 optionx::to_str(parsed.order_type) + "|" + parsed.signal_name;
+        }
+
+        static double anti_martingale_amount(
+                const TelegramSignalBridgeConfig& config,
+                const std::uint32_t step) {
+            auto amount = config.fixed_amount;
+            for (std::uint32_t index = 0; index < step; ++index) {
+                const auto maximum_before_multiplier =
+                    config.anti_martingale_max_amount /
+                    config.anti_martingale_multiplier;
+                if (amount >= maximum_before_multiplier) {
+                    return config.anti_martingale_max_amount;
+                }
+                amount *= config.anti_martingale_multiplier;
+            }
+            return std::min(amount, config.anti_martingale_max_amount);
         }
 
         static std::int64_t current_time_ms() {
@@ -353,7 +426,9 @@ namespace optionx::bridges::telegram {
                 const std::string& dedupe_key,
                 const std::string& sequence_key,
                 const bool martingale_step_recorded,
-                const std::optional<std::int32_t>& previous_martingale_step) {
+                const std::optional<std::int32_t>& previous_martingale_step,
+                const std::string& anti_martingale_key,
+                const bool anti_martingale_pending) {
             std::lock_guard<std::mutex> lock(state->mutex);
             state->dedupe_keys.erase(dedupe_key);
             const auto dedupe = std::find(
@@ -361,27 +436,44 @@ namespace optionx::bridges::telegram {
             if (dedupe != state->dedupe_order.end()) {
                 state->dedupe_order.erase(dedupe);
             }
-            if (!martingale_step_recorded) {
-                return;
+            if (martingale_step_recorded) {
+                if (previous_martingale_step) {
+                    state->martingale_steps[sequence_key] = *previous_martingale_step;
+                }
+                else {
+                    state->martingale_steps.erase(sequence_key);
+                }
+                state->pending_martingale_sequences.erase(sequence_key);
             }
-            if (previous_martingale_step) {
-                state->martingale_steps[sequence_key] = *previous_martingale_step;
+            if (anti_martingale_pending) {
+                const auto group = state->anti_martingale_groups.find(anti_martingale_key);
+                if (group != state->anti_martingale_groups.end()) {
+                    group->second.pending_trade = false;
+                    group->second.pending_signal_id = 0;
+                }
             }
-            else {
-                state->martingale_steps.erase(sequence_key);
-            }
-            state->pending_martingale_sequences.erase(sequence_key);
         }
 
         static void commit_dispatch_state(
                 const std::shared_ptr<RuntimeState>& state,
                 const std::string& sequence_key,
-                const bool martingale_step_recorded) {
-            if (!martingale_step_recorded) {
-                return;
-            }
+                const bool martingale_step_recorded,
+                const std::string& anti_martingale_key,
+                const bool anti_martingale_pending,
+                const SignalId signal_id) {
             std::lock_guard<std::mutex> lock(state->mutex);
-            state->pending_martingale_sequences.erase(sequence_key);
+            if (martingale_step_recorded) {
+                state->pending_martingale_sequences.erase(sequence_key);
+            }
+            if (anti_martingale_pending) {
+                const auto group = state->anti_martingale_groups.find(anti_martingale_key);
+                if (group != state->anti_martingale_groups.end() &&
+                    group->second.pending_trade) {
+                    group->second.pending_signal_id = signal_id;
+                    state->anti_martingale_signal_groups.emplace(
+                        signal_id, anti_martingale_key);
+                }
+            }
         }
 
         static void process_message(
@@ -448,6 +540,8 @@ namespace optionx::bridges::telegram {
                     std::string sequence_key;
                     bool martingale_step_recorded = false;
                     std::optional<std::int32_t> previous_martingale_step;
+                    std::string anti_martingale_key;
+                    bool anti_martingale_pending = false;
                     {
                         std::lock_guard<std::mutex> lock(state->mutex);
                         if (!state->running) {
@@ -517,6 +611,29 @@ namespace optionx::bridges::telegram {
                                 }
                             }
                         }
+                        if (!duplicate && !policy_report && config.anti_martingale_enabled) {
+                            anti_martingale_key = martingale_key(raw, parsed_signal);
+                            auto& anti_martingale = state->anti_martingale_groups[
+                                anti_martingale_key];
+                            if (anti_martingale.pending_trade) {
+                                policy_report = make_signal_report(
+                                    config, raw, parsed_signal, dedupe_key, received_time_ms,
+                                    BridgeSignalReportStatus::REJECTED,
+                                    "anti_martingale_pending_result",
+                                    "Telegram anti-martingale awaits the broker result for this group.");
+                            }
+                            else {
+                                signal->amount = anti_martingale_amount(
+                                    config, anti_martingale.next_step);
+                                signal->mm_type = MmSystemType::ANTI_MARTINGALE_SIGNAL;
+                                signal->mm_step = static_cast<std::int32_t>(
+                                    anti_martingale.next_step);
+                                signal->mm_group_hash = anti_martingale_key;
+                                signal->mm_group_name = parsed_signal.signal_name;
+                                anti_martingale.pending_trade = true;
+                                anti_martingale_pending = true;
+                            }
+                        }
                         if (!duplicate && !policy_report) {
                             state->dedupe_keys.insert(dedupe_key);
                             state->dedupe_order.push_back(dedupe_key);
@@ -549,21 +666,59 @@ namespace optionx::bridges::telegram {
                     catch (const std::exception& error) {
                         rollback_dispatch_state(
                             state, dedupe_key, sequence_key, martingale_step_recorded,
-                            previous_martingale_step);
+                            previous_martingale_step, anti_martingale_key,
+                            anti_martingale_pending);
                         emit_report(state, make_signal_report(
                             config, raw, parsed_signal, dedupe_key, received_time_ms,
                             BridgeSignalReportStatus::INTAKE_ERROR,
                             "signal_id_allocation_failed", error.what()));
                         continue;
                     }
+                    if (anti_martingale_pending) {
+                        bool signal_id_collision = false;
+                        {
+                            std::lock_guard<std::mutex> lock(state->mutex);
+                            signal_id_collision = state->anti_martingale_signal_groups.find(
+                                signal->signal_id) !=
+                                state->anti_martingale_signal_groups.end();
+                        }
+                        if (signal_id_collision) {
+                            rollback_dispatch_state(
+                                state, dedupe_key, sequence_key, martingale_step_recorded,
+                                previous_martingale_step, anti_martingale_key,
+                                anti_martingale_pending);
+                            emit_report(state, make_signal_report(
+                                config, raw, parsed_signal, dedupe_key, received_time_ms,
+                                BridgeSignalReportStatus::INTAKE_ERROR,
+                                "signal_id_collision",
+                                "Telegram anti-martingale requires unique signal IDs."));
+                            continue;
+                        }
+                    }
+                    if (anti_martingale_pending && !callback) {
+                        rollback_dispatch_state(
+                            state, dedupe_key, sequence_key, martingale_step_recorded,
+                            previous_martingale_step, anti_martingale_key,
+                            anti_martingale_pending);
+                        emit_report(state, make_signal_report(
+                            config, raw, parsed_signal, dedupe_key, received_time_ms,
+                            BridgeSignalReportStatus::INTAKE_ERROR,
+                            "trade_signal_callback_missing",
+                            "Telegram anti-martingale requires a trade signal callback."));
+                        continue;
+                    }
+                    const auto signal_id = signal->signal_id;
+                    bool callback_succeeded = true;
                     if (callback) {
                         try {
                             callback(std::move(signal));
                         }
                         catch (...) {
+                            callback_succeeded = false;
                             rollback_dispatch_state(
                                 state, dedupe_key, sequence_key, martingale_step_recorded,
-                                previous_martingale_step);
+                                previous_martingale_step, anti_martingale_key,
+                                anti_martingale_pending);
                             emit_report(state, make_signal_report(
                                 config, raw, parsed_signal, dedupe_key, received_time_ms,
                                 BridgeSignalReportStatus::INTAKE_ERROR,
@@ -571,8 +726,11 @@ namespace optionx::bridges::telegram {
                                 "Telegram trade signal callback threw."));
                         }
                     }
-                    commit_dispatch_state(
-                        state, sequence_key, martingale_step_recorded);
+                    if (callback_succeeded) {
+                        commit_dispatch_state(
+                            state, sequence_key, martingale_step_recorded,
+                            anti_martingale_key, anti_martingale_pending, signal_id);
+                    }
                 }
             }
             catch (const std::exception& error) {

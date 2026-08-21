@@ -323,9 +323,43 @@ Unknown `martingale_policy` values are rejected during configuration validation;
 they never fall back to `ALL_SIGNALS`.
 
 The policies only decide whether a source signal reaches the trade pipeline.
-They do not implement stake sizing; a future execution policy may use
-`TradeSignal::mm_step` and the source group once its money-management contract
-is defined.
+They do not infer a source-side stake multiplier from channel text.
+
+The bridge also has a separate, opt-in local anti-martingale policy. It is an
+execution-side sizing policy, not a parser feature and not an interpretation of
+Telegram-reported statistics or outcomes. Its configuration is deliberately
+explicit:
+
+- `anti_martingale_enabled` is false by default;
+- `anti_martingale_multiplier` must be finite and greater than one;
+- `anti_martingale_max_steps` bounds consecutive winning increases;
+- `anti_martingale_max_amount` is a required absolute amount cap and must be
+  at least `fixed_amount`.
+
+Each Telegram bridge instance keeps an independent series for a
+chat/topic/symbol/direction/strategy group. The initial signal uses
+`fixed_amount` at anti-martingale step `0`. A confirmed broker `WIN` advances
+the next signal by one step and applies the multiplier, capped by
+`anti_martingale_max_amount`. A `WIN` at the configured maximum step resets the
+next signal to the base amount. Every other terminal broker result (`LOSS`,
+`REFUND`, `STANDOFF`, cancellation, or execution/check error) also resets the
+series to step `0`.
+
+At most one anti-martingale-managed signal may be outstanding in a group. The
+bridge marks a group pending while the signal callback is running and keeps it
+pending until the execution pipeline reports a terminal `TradeResult` for the
+same `signal_id`. A later source message for that group is rejected while the
+result is pending, avoiding two trades that both assume the same next stake.
+Repeated or non-terminal result updates do not advance the series.
+
+Only the actual broker/execution `TradeResult` delivered through
+`BaseBridge::update_trade_result()` changes local anti-martingale state.
+Telegram outcome messages remain parser/archive data and must not advance,
+reset, or otherwise size a live trade. The local anti-martingale policy cannot
+be combined with source-side `CONTIGUOUS_STEPS`, because that mode has a
+different requirement to dispatch every explicit source chain step. It may be
+used with `ALL_SIGNALS` or `FIRST_SIGNAL_ONLY` according to the desired source
+filtering behavior.
 
 ## Outcomes
 
@@ -516,8 +550,8 @@ Next steps:
    anonymized or synthetic regression fixtures.
 2. Correlate source outcomes with signals for archive statistics and replay;
    reported channel statistics remain non-authoritative.
-3. Define an execution-side money-management contract before adding automatic
-   stake sizing to the explicit martingale step metadata.
+3. Extend result-driven local money management only after replay statistics and
+   execution contracts establish the required grouping and risk semantics.
 4. Implement the bounded worker media contract before starting OCR work.
 5. Revisit the deferred OCR provider after collecting representative image
    fixtures. OCR/vision must remain optional and must not block the text
