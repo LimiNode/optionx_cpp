@@ -352,6 +352,15 @@ same `signal_id`. A later source message for that group is rejected while the
 result is pending, avoiding two trades that both assume the same next stake.
 Repeated or non-terminal result updates do not advance the series.
 
+The bridge reserves both its dedupe key and any source/local money-management
+state before it transfers the signal to the callback. This makes a terminal
+result delivered synchronously from inside the callback safe: its `signal_id`
+is already registered. An allocator failure rolls the reservation back. A
+callback exception is an ambiguous execution outcome, because the callback may
+already have queued or submitted the trade before throwing. The bridge reports
+`ambiguous_dispatch_failure` but deliberately keeps the dedupe and pending
+state fail-closed rather than risking a duplicate order.
+
 Only the actual broker/execution `TradeResult` delivered through
 `BaseBridge::update_trade_result()` changes local anti-martingale state.
 Telegram outcome messages remain parser/archive data and must not advance,
@@ -360,6 +369,15 @@ be combined with source-side `CONTIGUOUS_STEPS`, because that mode has a
 different requirement to dispatch every explicit source chain step. It may be
 used with `ALL_SIGNALS` or `FIRST_SIGNAL_ONLY` according to the desired source
 filtering behavior.
+
+A future optional source-chain watchdog may use correlated Telegram outcomes
+to report that an expected explicit source martingale step did not appear
+within a configured timeout (for example, 15 seconds), and may eventually
+offer a separately enabled assumed-signal action. It must first establish a
+source `signal -> outcome` correlation contract and an explicit synthetic
+signal identity/diagnostic model. Broker `TradeResult` alone is not evidence
+that the Telegram source intended another step, and the current bridge must
+not invent an executable source signal without that contract.
 
 ## Outcomes
 
