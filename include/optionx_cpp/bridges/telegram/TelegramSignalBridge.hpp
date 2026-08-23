@@ -82,6 +82,7 @@ namespace optionx::bridges::telegram {
             std::unordered_map<SignalId, std::string> anti_martingale_signal_groups;
             std::unordered_map<std::string, SourceChainState> source_chain_groups;
             std::unordered_map<std::string, std::string> source_chain_signal_groups;
+            std::unordered_map<std::string, std::int32_t> assumed_source_chain_steps;
             std::condition_variable source_chain_cv;
             std::thread source_chain_thread;
             bool source_chain_stop = false;
@@ -220,6 +221,7 @@ namespace optionx::bridges::telegram {
                 m_state->anti_martingale_signal_groups.clear();
                 m_state->source_chain_groups.clear();
                 m_state->source_chain_signal_groups.clear();
+                m_state->assumed_source_chain_steps.clear();
                 m_state->source_chain_stop = false;
                 m_state->active_config = config;
             }
@@ -264,6 +266,9 @@ namespace optionx::bridges::telegram {
                 m_state->source.reset();
                 m_state->anti_martingale_groups.clear();
                 m_state->anti_martingale_signal_groups.clear();
+                m_state->source_chain_groups.clear();
+                m_state->source_chain_signal_groups.clear();
+                m_state->assumed_source_chain_steps.clear();
                 m_state->source_chain_stop = true;
                 m_state->active_config.reset();
             }
@@ -307,6 +312,9 @@ namespace optionx::bridges::telegram {
                     m_state->source.reset();
                     m_state->anti_martingale_groups.clear();
                     m_state->anti_martingale_signal_groups.clear();
+                    m_state->source_chain_groups.clear();
+                    m_state->source_chain_signal_groups.clear();
+                    m_state->assumed_source_chain_steps.clear();
                     m_state->source_chain_stop = true;
                     m_state->active_config.reset();
                 }
@@ -484,6 +492,18 @@ namespace optionx::bridges::telegram {
             }
         }
 
+        static void rollback_assumed_source_chain_step(
+                const std::shared_ptr<RuntimeState>& state,
+                const std::string& source_chain_key,
+                const std::int32_t expected_step) {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            const auto assumed = state->assumed_source_chain_steps.find(source_chain_key);
+            if (assumed != state->assumed_source_chain_steps.end() &&
+                assumed->second == expected_step) {
+                state->assumed_source_chain_steps.erase(assumed);
+            }
+        }
+
         static bool register_anti_martingale_dispatch(
                 const std::shared_ptr<RuntimeState>& state,
                 const std::string& anti_martingale_key,
@@ -546,6 +566,11 @@ namespace optionx::bridges::telegram {
             const auto key = source_chain_key(raw, signal, *rule);
             std::lock_guard<std::mutex> lock(state->mutex);
             auto existing = state->source_chain_groups.find(key);
+            if (*signal.martingale_step == 0) {
+                // A successfully dispatched explicit first step is the only way to
+                // start a new source series after an assumed continuation.
+                state->assumed_source_chain_steps.erase(key);
+            }
             if (*signal.martingale_step != 0 &&
                 (existing == state->source_chain_groups.end() ||
                  existing->second.step + 1 != *signal.martingale_step)) {
@@ -665,6 +690,7 @@ namespace optionx::bridges::telegram {
                 std::to_string(expected_step);
             signal->unique_hash = dedupe_key;
             const auto sequence_key = martingale_key(chain.raw, chain.parsed);
+            const auto source_key = source_chain_key(chain.raw, chain.parsed, chain.rule);
 
             try {
                 detail::validate_executable_trade_signal(
@@ -727,6 +753,11 @@ namespace optionx::bridges::telegram {
                     }
                 }
                 if (!out_of_sequence) {
+                    // Preserve a fail-closed tombstone before invoking external
+                    // callbacks. A late Telegram step must not duplicate this
+                    // assumed execution or resume a source series we can no
+                    // longer reply-correlate.
+                    state->assumed_source_chain_steps[source_key] = expected_step;
                     state->dedupe_keys.insert(dedupe_key);
                     state->dedupe_order.push_back(dedupe_key);
                     while (state->dedupe_order.size() > config.dedupe_cache_size) {
@@ -754,6 +785,7 @@ namespace optionx::bridges::telegram {
                 rollback_dispatch_state(
                     state, dedupe_key, sequence_key, martingale_step_recorded, previous_step,
                     anti_martingale_key, anti_martingale_pending);
+                rollback_assumed_source_chain_step(state, source_key, expected_step);
                 auto report = make_source_chain_report(config, chain, current_time_ms());
                 report.status = BridgeSignalReportStatus::INTAKE_ERROR;
                 report.reason_code = "assumed_signal_id_allocation_failed";
@@ -765,6 +797,7 @@ namespace optionx::bridges::telegram {
                 rollback_dispatch_state(
                     state, dedupe_key, sequence_key, martingale_step_recorded, previous_step,
                     anti_martingale_key, anti_martingale_pending);
+                rollback_assumed_source_chain_step(state, source_key, expected_step);
                 auto report = make_source_chain_report(config, chain, current_time_ms());
                 report.status = BridgeSignalReportStatus::INTAKE_ERROR;
                 report.reason_code = "assumed_signal_callback_missing";
@@ -777,6 +810,7 @@ namespace optionx::bridges::telegram {
                 rollback_dispatch_state(
                     state, dedupe_key, sequence_key, martingale_step_recorded, previous_step,
                     anti_martingale_key, anti_martingale_pending);
+                rollback_assumed_source_chain_step(state, source_key, expected_step);
                 auto report = make_source_chain_report(config, chain, current_time_ms());
                 report.status = BridgeSignalReportStatus::INTAKE_ERROR;
                 report.reason_code = "assumed_signal_id_collision";
@@ -818,9 +852,8 @@ namespace optionx::bridges::telegram {
                     });
                     continue;
                 }
-                if (state->source_chain_cv.wait_until(lock, next, [&] {
-                        return state->source_chain_stop;
-                    })) {
+                if (state->source_chain_cv.wait_until(lock, next) !=
+                    std::cv_status::timeout) {
                     continue;
                 }
                 const auto now = std::chrono::steady_clock::now();
@@ -838,13 +871,19 @@ namespace optionx::bridges::telegram {
                     }
                 }
                 lock.unlock();
-                for (const auto& chain : expired) {
-                    if (chain.rule.action == TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL) {
-                        dispatch_assumed_source_chain_signal(state, *config, chain);
-                    }
-                    else {
-                        emit_report(state, make_source_chain_report(
-                            *config, chain, current_time_ms()));
+                {
+                    // Keep timer expiry ordered with source intake. In
+                    // particular, a fresh MG-0 cannot race an expired older
+                    // series while its assumed continuation is reserved.
+                    std::lock_guard<std::recursive_mutex> intake_lock(state->intake_mutex);
+                    for (const auto& chain : expired) {
+                        if (chain.rule.action == TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL) {
+                            dispatch_assumed_source_chain_signal(state, *config, chain);
+                        }
+                        else {
+                            emit_report(state, make_source_chain_report(
+                                *config, chain, current_time_ms()));
+                        }
                     }
                 }
                 lock.lock();
@@ -927,6 +966,10 @@ namespace optionx::bridges::telegram {
                     signal->amount = config.fixed_amount;
                     const auto dedupe_key = make_dedupe_key(raw, parsed_signal, index);
                     signal->unique_hash = dedupe_key;
+                    const auto* source_chain_rule = source_chain_rule_for(config, parsed_signal);
+                    const auto source_chain_key_value = source_chain_rule
+                        ? source_chain_key(raw, parsed_signal, *source_chain_rule)
+                        : std::string();
 
                     if (config.martingale_policy != TelegramMartingalePolicy::CONTIGUOUS_STEPS &&
                         is_stale(config, raw, received_time_ms)) {
@@ -954,6 +997,17 @@ namespace optionx::bridges::telegram {
                         }
                         if (state->dedupe_keys.find(dedupe_key) != state->dedupe_keys.end()) {
                             duplicate = true;
+                        }
+                        else if (source_chain_rule && parsed_signal.martingale_step &&
+                                 *parsed_signal.martingale_step > 0 &&
+                                 state->assumed_source_chain_steps.find(
+                                     source_chain_key_value) !=
+                                     state->assumed_source_chain_steps.end()) {
+                            policy_report = make_signal_report(
+                                config, raw, parsed_signal, dedupe_key, received_time_ms,
+                                BridgeSignalReportStatus::IGNORED,
+                                "source_chain_assumed_step",
+                                "Telegram source step follows an assumed continuation and is ignored.");
                         }
                         else if (config.martingale_policy ==
                                  TelegramMartingalePolicy::FIRST_SIGNAL_ONLY &&

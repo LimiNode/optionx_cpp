@@ -395,7 +395,10 @@ machine-readable provenance:
 The fallback is fail-closed when the template lacks a SPRINT duration, the
 source sequence changed, a callback is unavailable, or a previous ambiguous
 dispatch still owns the sequence. A synthetic step does not create another
-watch: Telegram cannot reply to a message that it never published.
+watch: Telegram cannot reply to a message that it never published. The bridge
+then ignores later nonzero explicit steps from that source key until a newly
+published and accepted explicit step `0` starts a fresh series; it never
+duplicates an assumed entry with a delayed original source message.
 
 For normal source martingale, assumed dispatch requires
 `CONTIGUOUS_STEPS`. For local anti-martingale, Telegram's correlated outcome
