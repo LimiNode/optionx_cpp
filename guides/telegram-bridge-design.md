@@ -370,14 +370,39 @@ different requirement to dispatch every explicit source chain step. It may be
 used with `ALL_SIGNALS` or `FIRST_SIGNAL_ONLY` according to the desired source
 filtering behavior.
 
-A future optional source-chain watchdog may use correlated Telegram outcomes
-to report that an expected explicit source martingale step did not appear
-within a configured timeout (for example, 15 seconds), and may eventually
-offer a separately enabled assumed-signal action. It must first establish a
-source `signal -> outcome` correlation contract and an explicit synthetic
-signal identity/diagnostic model. Broker `TradeResult` alone is not evidence
-that the Telegram source intended another step, and the current bridge must
-not invent an executable source signal without that contract.
+An optional source-chain continuation rule can monitor a deliberately narrow
+class of Telegram strategies. A rule names one strategy, its configured final
+source step, one exact continuation outcome, a timeout (15 seconds by default),
+and either `REPORT_ONLY` or `EMIT_ASSUMED_SIGNAL` action. The bridge starts a
+series only at explicit source step `0` and accepts later source steps only in
+strict contiguous order. It accepts an outcome only when Telegram provides an
+exact `reply_to_message_id` link to the latest accepted source signal; text,
+symbol, or timestamp heuristics never authorize a continuation.
+
+When the configured continuation outcome arrives before the configured final
+step, the bridge waits for exactly the next real source step. A real step
+cancels the wait. On timeout, `REPORT_ONLY` emits the suspicious diagnostic
+`expected_source_step_missing`. `EMIT_ASSUMED_SIGNAL` is separately opt-in and
+constructs the expected next signal only from the last accepted SPRINT template
+in that source chain. It has a synthetic dedupe identity and carries explicit
+machine-readable provenance:
+
+- `is_assumed = true`;
+- `assumed_reason = expected_source_step_missing`;
+- `assumed_source_identity` naming the original Telegram signal;
+- `assumed_source_step` naming the missing source step.
+
+The fallback is fail-closed when the template lacks a SPRINT duration, the
+source sequence changed, a callback is unavailable, or a previous ambiguous
+dispatch still owns the sequence. A synthetic step does not create another
+watch: Telegram cannot reply to a message that it never published.
+
+For normal source martingale, assumed dispatch requires
+`CONTIGUOUS_STEPS`. For local anti-martingale, Telegram's correlated outcome
+only authorizes the source continuation; the amount and local anti step still
+come solely from the application's terminal broker `TradeResult`. A pending
+local anti-martingale trade therefore blocks an assumed signal even if the
+Telegram outcome arrives first.
 
 ## Outcomes
 

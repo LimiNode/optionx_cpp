@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -19,6 +20,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -52,6 +54,15 @@ namespace optionx::bridges::telegram {
                 SignalId pending_signal_id = 0;
             };
 
+            struct SourceChainState {
+                TelegramRawMessage raw;
+                TelegramParsedSignal parsed;
+                TelegramSourceChainRule rule;
+                std::int32_t step = -1;
+                bool waiting = false;
+                std::chrono::steady_clock::time_point deadline;
+            };
+
             // Source adapters may invoke messages concurrently. Serialize the
             // full intake path and hold contiguous sequence steps as pending
             // until their allocator and callback complete.
@@ -69,6 +80,11 @@ namespace optionx::bridges::telegram {
             std::unordered_map<std::string, AntiMartingaleGroupState>
                 anti_martingale_groups;
             std::unordered_map<SignalId, std::string> anti_martingale_signal_groups;
+            std::unordered_map<std::string, SourceChainState> source_chain_groups;
+            std::unordered_map<std::string, std::string> source_chain_signal_groups;
+            std::condition_variable source_chain_cv;
+            std::thread source_chain_thread;
+            bool source_chain_stop = false;
             std::shared_ptr<const TelegramSignalBridgeConfig> active_config;
             bool running = false;
         };
@@ -202,6 +218,9 @@ namespace optionx::bridges::telegram {
                 m_state->pending_martingale_sequences.clear();
                 m_state->anti_martingale_groups.clear();
                 m_state->anti_martingale_signal_groups.clear();
+                m_state->source_chain_groups.clear();
+                m_state->source_chain_signal_groups.clear();
+                m_state->source_chain_stop = false;
                 m_state->active_config = config;
             }
 
@@ -220,6 +239,7 @@ namespace optionx::bridges::telegram {
                                   "Telegram message source failed to start.");
                     return;
                 }
+                start_source_chain_watchdog(m_state, config);
                 notify_status(BridgeStatus::SERVER_STARTED, {});
             }
             catch (const std::exception& error) {
@@ -244,8 +264,11 @@ namespace optionx::bridges::telegram {
                 m_state->source.reset();
                 m_state->anti_martingale_groups.clear();
                 m_state->anti_martingale_signal_groups.clear();
+                m_state->source_chain_stop = true;
                 m_state->active_config.reset();
             }
+            m_state->source_chain_cv.notify_all();
+            join_source_chain_watchdog(m_state);
             if (source) {
                 try {
                     source->stop();
@@ -277,13 +300,20 @@ namespace optionx::bridges::telegram {
         }
 
         void set_running(const bool running) {
-            std::lock_guard<std::mutex> lock(m_state->mutex);
-            m_state->running = running;
+            {
+                std::lock_guard<std::mutex> lock(m_state->mutex);
+                m_state->running = running;
+                if (!running) {
+                    m_state->source.reset();
+                    m_state->anti_martingale_groups.clear();
+                    m_state->anti_martingale_signal_groups.clear();
+                    m_state->source_chain_stop = true;
+                    m_state->active_config.reset();
+                }
+            }
+            m_state->source_chain_cv.notify_all();
             if (!running) {
-                m_state->source.reset();
-                m_state->anti_martingale_groups.clear();
-                m_state->anti_martingale_signal_groups.clear();
-                m_state->active_config.reset();
+                join_source_chain_watchdog(m_state);
             }
         }
 
@@ -482,6 +512,374 @@ namespace optionx::bridges::telegram {
             state->pending_martingale_sequences.erase(sequence_key);
         }
 
+        static const TelegramSourceChainRule* source_chain_rule_for(
+                const TelegramSignalBridgeConfig& config,
+                const TelegramParsedSignal& signal) {
+            if (!signal.martingale_step) {
+                return nullptr;
+            }
+            const auto rule = std::find_if(
+                config.source_chain_rules.begin(), config.source_chain_rules.end(),
+                [&](const auto& candidate) {
+                    return candidate.signal_name == signal.signal_name;
+                });
+            return rule == config.source_chain_rules.end() ? nullptr : &*rule;
+        }
+
+        static std::string source_chain_key(
+                const TelegramRawMessage& raw,
+                const TelegramParsedSignal& signal,
+                const TelegramSourceChainRule& rule) {
+            return martingale_key(raw, signal) + "|" + rule.name;
+        }
+
+        static void remember_source_chain_signal(
+                const std::shared_ptr<RuntimeState>& state,
+                const TelegramSignalBridgeConfig& config,
+                const TelegramRawMessage& raw,
+                const TelegramParsedSignal& signal) {
+            const auto* rule = source_chain_rule_for(config, signal);
+            if (!rule || *signal.martingale_step < 0 ||
+                static_cast<std::uint32_t>(*signal.martingale_step) > rule->max_step) {
+                return;
+            }
+            const auto key = source_chain_key(raw, signal, *rule);
+            std::lock_guard<std::mutex> lock(state->mutex);
+            auto existing = state->source_chain_groups.find(key);
+            if (*signal.martingale_step != 0 &&
+                (existing == state->source_chain_groups.end() ||
+                 existing->second.step + 1 != *signal.martingale_step)) {
+                return;
+            }
+            if (existing != state->source_chain_groups.end()) {
+                state->source_chain_signal_groups.erase(
+                    existing->second.parsed.source_message_identity);
+            }
+            RuntimeState::SourceChainState next;
+            next.raw = raw;
+            next.parsed = signal;
+            next.rule = *rule;
+            next.step = *signal.martingale_step;
+            state->source_chain_groups[key] = std::move(next);
+            state->source_chain_signal_groups[signal.source_message_identity] = key;
+        }
+
+        static void process_source_chain_outcomes(
+                const std::shared_ptr<RuntimeState>& state,
+                const TelegramParsedMessage& parsed) {
+            bool wake_watchdog = false;
+            for (const auto& outcome : parsed.outcomes) {
+                if (outcome.reply_to_message_identity.empty()) {
+                    continue;
+                }
+                std::lock_guard<std::mutex> lock(state->mutex);
+                const auto signal_group = state->source_chain_signal_groups.find(
+                    outcome.reply_to_message_identity);
+                if (signal_group == state->source_chain_signal_groups.end()) {
+                    continue;
+                }
+                const auto group = state->source_chain_groups.find(signal_group->second);
+                if (group == state->source_chain_groups.end() ||
+                    group->second.parsed.source_message_identity !=
+                        outcome.reply_to_message_identity) {
+                    continue;
+                }
+                const auto fields_match =
+                    (outcome.symbol.empty() || outcome.symbol == group->second.parsed.symbol) &&
+                    (outcome.order_type == OrderType::UNKNOWN ||
+                     outcome.order_type == group->second.parsed.order_type);
+                if (!fields_match || outcome.result != group->second.rule.continuation_result ||
+                    static_cast<std::uint32_t>(group->second.step) >=
+                        group->second.rule.max_step) {
+                    state->source_chain_signal_groups.erase(signal_group);
+                    state->source_chain_groups.erase(group);
+                    continue;
+                }
+                group->second.waiting = true;
+                group->second.deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(group->second.rule.timeout_seconds);
+                wake_watchdog = true;
+            }
+            if (wake_watchdog) {
+                state->source_chain_cv.notify_all();
+            }
+        }
+
+        static BridgeSignalReport make_source_chain_report(
+                const TelegramSignalBridgeConfig& config,
+                const RuntimeState::SourceChainState& chain,
+                const std::int64_t received_time_ms) {
+            BridgeSignalReport report;
+            report.bridge_id = config.bridge_id;
+            report.bridge_type = BridgeType::TELEGRAM_SIGNAL;
+            report.status = BridgeSignalReportStatus::SUSPICIOUS;
+            report.reason_code = "expected_source_step_missing";
+            report.message = "Telegram source did not publish the expected contiguous step in time.";
+            report.event_id = chain.parsed.source_message_identity;
+            report.symbol = chain.parsed.symbol;
+            report.signal_name = chain.parsed.signal_name;
+            report.raw_payload = chain.raw.to_json();
+            report.context = {
+                {"rule", chain.rule.name},
+                {"last_source_step", chain.step},
+                {"expected_source_step", chain.step + 1},
+                {"timeout_seconds", chain.rule.timeout_seconds},
+                {"action", telegram_source_chain_action_name(chain.rule.action)},
+            };
+            report.received_time_ms = received_time_ms;
+            report.source_time_ms = chain.parsed.source_date_ms;
+            return report;
+        }
+
+        static void dispatch_assumed_source_chain_signal(
+                const std::shared_ptr<RuntimeState>& state,
+                const TelegramSignalBridgeConfig& config,
+                const RuntimeState::SourceChainState& chain) {
+            const auto expected_step = chain.step + 1;
+            if (chain.parsed.option_type != OptionType::SPRINT ||
+                chain.parsed.duration == 0) {
+                auto report = make_source_chain_report(config, chain, current_time_ms());
+                report.reason_code = "assumed_signal_unsupported_expiry";
+                report.message = "Assumed source-chain signals require a SPRINT duration.";
+                emit_report(state, std::move(report));
+                return;
+            }
+
+            auto signal = std::make_unique<TradeSignal>();
+            signal->bridge_id = config.bridge_id;
+            signal->symbol = chain.parsed.symbol;
+            signal->order_type = chain.parsed.order_type;
+            signal->option_type = chain.parsed.option_type;
+            signal->duration = chain.parsed.duration;
+            signal->signal_name = chain.parsed.signal_name;
+            signal->comment = chain.raw.text;
+            signal->source_time_ms = current_time_ms();
+            signal->amount = config.fixed_amount;
+            signal->mm_step = expected_step;
+            signal->is_assumed = true;
+            signal->assumed_reason = "expected_source_step_missing";
+            signal->assumed_source_identity = chain.parsed.source_message_identity;
+            signal->assumed_source_step = expected_step;
+            const auto dedupe_key = "telegram:assumed:" +
+                chain.parsed.source_message_identity + ":" +
+                std::to_string(expected_step);
+            signal->unique_hash = dedupe_key;
+            const auto sequence_key = martingale_key(chain.raw, chain.parsed);
+
+            try {
+                detail::validate_executable_trade_signal(
+                    *signal, "Assumed Telegram source-chain signal", true);
+            }
+            catch (const std::exception& error) {
+                auto report = make_source_chain_report(config, chain, current_time_ms());
+                report.status = BridgeSignalReportStatus::INVALID;
+                report.reason_code = "assumed_signal_invalid";
+                report.message = error.what();
+                emit_report(state, std::move(report));
+                return;
+            }
+
+            BaseBridge::signal_id_allocator_t allocator;
+            BaseBridge::trade_signal_callback_t callback;
+            std::optional<std::int32_t> previous_step;
+            std::string anti_martingale_key;
+            bool anti_martingale_pending = false;
+            bool martingale_step_recorded = false;
+            bool out_of_sequence = false;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->running ||
+                    state->dedupe_keys.find(dedupe_key) != state->dedupe_keys.end()) {
+                    out_of_sequence = true;
+                }
+                else if (config.anti_martingale_enabled) {
+                    anti_martingale_key = sequence_key;
+                    auto& anti_martingale = state->anti_martingale_groups[
+                        anti_martingale_key];
+                    if (anti_martingale.pending_trade) {
+                        out_of_sequence = true;
+                    }
+                    else {
+                        signal->amount = anti_martingale_amount(
+                            config, anti_martingale.next_step);
+                        signal->mm_type = MmSystemType::ANTI_MARTINGALE_SIGNAL;
+                        signal->mm_step = static_cast<std::int32_t>(
+                            anti_martingale.next_step);
+                        signal->mm_group_hash = anti_martingale_key;
+                        signal->mm_group_name = chain.parsed.signal_name;
+                        anti_martingale.pending_trade = true;
+                        anti_martingale_pending = true;
+                    }
+                }
+                else {
+                    const auto existing = state->martingale_steps.find(sequence_key);
+                    if (state->pending_martingale_sequences.find(sequence_key) !=
+                            state->pending_martingale_sequences.end() ||
+                        existing == state->martingale_steps.end() ||
+                        existing->second + 1 != expected_step) {
+                        out_of_sequence = true;
+                    }
+                    else {
+                        previous_step = existing->second;
+                        state->martingale_steps[sequence_key] = expected_step;
+                        state->pending_martingale_sequences.insert(sequence_key);
+                        martingale_step_recorded = true;
+                    }
+                }
+                if (!out_of_sequence) {
+                    state->dedupe_keys.insert(dedupe_key);
+                    state->dedupe_order.push_back(dedupe_key);
+                    while (state->dedupe_order.size() > config.dedupe_cache_size) {
+                        state->dedupe_keys.erase(state->dedupe_order.front());
+                        state->dedupe_order.pop_front();
+                    }
+                    allocator = state->signal_id_allocator;
+                    callback = state->trade_signal_callback;
+                }
+            }
+            if (out_of_sequence) {
+                auto report = make_source_chain_report(config, chain, current_time_ms());
+                report.reason_code = "assumed_signal_out_of_sequence";
+                report.message = "Assumed source-chain signal no longer matches bridge state.";
+                emit_report(state, std::move(report));
+                return;
+            }
+            try {
+                signal->signal_id = allocator();
+                if (signal->signal_id == 0) {
+                    throw std::runtime_error("Telegram signal ID allocator returned zero.");
+                }
+            }
+            catch (const std::exception& error) {
+                rollback_dispatch_state(
+                    state, dedupe_key, sequence_key, martingale_step_recorded, previous_step,
+                    anti_martingale_key, anti_martingale_pending);
+                auto report = make_source_chain_report(config, chain, current_time_ms());
+                report.status = BridgeSignalReportStatus::INTAKE_ERROR;
+                report.reason_code = "assumed_signal_id_allocation_failed";
+                report.message = error.what();
+                emit_report(state, std::move(report));
+                return;
+            }
+            if (!callback) {
+                rollback_dispatch_state(
+                    state, dedupe_key, sequence_key, martingale_step_recorded, previous_step,
+                    anti_martingale_key, anti_martingale_pending);
+                auto report = make_source_chain_report(config, chain, current_time_ms());
+                report.status = BridgeSignalReportStatus::INTAKE_ERROR;
+                report.reason_code = "assumed_signal_callback_missing";
+                report.message = "Assumed source-chain signal requires a trade signal callback.";
+                emit_report(state, std::move(report));
+                return;
+            }
+            if (anti_martingale_pending && !register_anti_martingale_dispatch(
+                    state, anti_martingale_key, signal->signal_id)) {
+                rollback_dispatch_state(
+                    state, dedupe_key, sequence_key, martingale_step_recorded, previous_step,
+                    anti_martingale_key, anti_martingale_pending);
+                auto report = make_source_chain_report(config, chain, current_time_ms());
+                report.status = BridgeSignalReportStatus::INTAKE_ERROR;
+                report.reason_code = "assumed_signal_id_collision";
+                report.message = "Assumed source-chain signal requires a unique pending signal ID.";
+                emit_report(state, std::move(report));
+                return;
+            }
+            try {
+                callback(std::move(signal));
+            }
+            catch (...) {
+                auto report = make_source_chain_report(config, chain, current_time_ms());
+                report.status = BridgeSignalReportStatus::INTAKE_ERROR;
+                report.reason_code = "ambiguous_assumed_dispatch_failure";
+                report.message = "Assumed source-chain signal callback threw after dispatch reservation.";
+                emit_report(state, std::move(report));
+                return;
+            }
+            commit_martingale_dispatch_state(
+                state, sequence_key, martingale_step_recorded);
+        }
+
+        static void source_chain_watchdog_loop(
+                const std::shared_ptr<RuntimeState>& state,
+                const std::shared_ptr<const TelegramSignalBridgeConfig>& config) {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            while (!state->source_chain_stop) {
+                auto next = std::chrono::steady_clock::time_point::max();
+                for (const auto& item : state->source_chain_groups) {
+                    if (item.second.waiting && item.second.deadline < next) {
+                        next = item.second.deadline;
+                    }
+                }
+                if (next == std::chrono::steady_clock::time_point::max()) {
+                    state->source_chain_cv.wait(lock, [&] {
+                        return state->source_chain_stop || std::any_of(
+                            state->source_chain_groups.begin(), state->source_chain_groups.end(),
+                            [](const auto& item) { return item.second.waiting; });
+                    });
+                    continue;
+                }
+                if (state->source_chain_cv.wait_until(lock, next, [&] {
+                        return state->source_chain_stop;
+                    })) {
+                    continue;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                std::vector<RuntimeState::SourceChainState> expired;
+                for (auto it = state->source_chain_groups.begin();
+                     it != state->source_chain_groups.end();) {
+                    if (it->second.waiting && it->second.deadline <= now) {
+                        state->source_chain_signal_groups.erase(
+                            it->second.parsed.source_message_identity);
+                        expired.push_back(std::move(it->second));
+                        it = state->source_chain_groups.erase(it);
+                    }
+                    else {
+                        ++it;
+                    }
+                }
+                lock.unlock();
+                for (const auto& chain : expired) {
+                    if (chain.rule.action == TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL) {
+                        dispatch_assumed_source_chain_signal(state, *config, chain);
+                    }
+                    else {
+                        emit_report(state, make_source_chain_report(
+                            *config, chain, current_time_ms()));
+                    }
+                }
+                lock.lock();
+            }
+        }
+
+        static void start_source_chain_watchdog(
+                const std::shared_ptr<RuntimeState>& state,
+                const std::shared_ptr<const TelegramSignalBridgeConfig>& config) {
+            if (config->source_chain_rules.empty()) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->source_chain_thread.joinable() && !state->source_chain_stop) {
+                state->source_chain_thread = std::thread(
+                    [state, config] { source_chain_watchdog_loop(state, config); });
+            }
+        }
+
+        static void join_source_chain_watchdog(const std::shared_ptr<RuntimeState>& state) {
+            std::thread watchdog;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                watchdog = std::move(state->source_chain_thread);
+            }
+            if (watchdog.joinable()) {
+                if (watchdog.get_id() == std::this_thread::get_id()) {
+                    watchdog.detach();
+                }
+                else {
+                    watchdog.join();
+                }
+            }
+        }
+
         static void process_message(
                 const std::shared_ptr<RuntimeState>& state,
                 const TelegramSignalBridgeConfig& config,
@@ -492,6 +890,7 @@ namespace optionx::bridges::telegram {
                 raw.validate();
                 const auto received_time_ms = current_time_ms();
                 const auto parsed = parser.parse(raw);
+                process_source_chain_outcomes(state, parsed);
                 for (const auto& diagnostic : parsed.diagnostics) {
                     BridgeSignalReport report;
                     report.bridge_id = config.bridge_id;
@@ -720,6 +1119,7 @@ namespace optionx::bridges::telegram {
                     }
                     commit_martingale_dispatch_state(
                         state, sequence_key, martingale_step_recorded);
+                    remember_source_chain_signal(state, config, raw, parsed_signal);
                 }
             }
             catch (const std::exception& error) {
