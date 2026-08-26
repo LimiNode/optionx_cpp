@@ -120,6 +120,14 @@ namespace optionx::bridges::telegram {
         std::size_t dedupe_cache_size = 4096;
         std::uint32_t max_signal_age_seconds = 0;
         TelegramMartingalePolicy martingale_policy = TelegramMartingalePolicy::ALL_SIGNALS;
+        /// \brief Enables broker-result-driven anti-martingale stake sizing.
+        bool anti_martingale_enabled = false;
+        /// \brief Stake multiplier applied after each confirmed broker WIN.
+        double anti_martingale_multiplier = 2.0;
+        /// \brief Maximum number of consecutive winning step increases.
+        std::uint32_t anti_martingale_max_steps = 1;
+        /// \brief Absolute amount cap required when anti-martingale is enabled.
+        double anti_martingale_max_amount = 0.0;
         TelegramParserConfig parser = TelegramSignalParser::default_config();
 
         void to_json(nlohmann::json& j) const override {
@@ -129,6 +137,10 @@ namespace optionx::bridges::telegram {
                 {"dedupe_cache_size", dedupe_cache_size},
                 {"max_signal_age_seconds", max_signal_age_seconds},
                 {"martingale_policy", telegram_martingale_policy_name(martingale_policy)},
+                {"anti_martingale_enabled", anti_martingale_enabled},
+                {"anti_martingale_multiplier", anti_martingale_multiplier},
+                {"anti_martingale_max_steps", anti_martingale_max_steps},
+                {"anti_martingale_max_amount", anti_martingale_max_amount},
                 {"symbol_pattern", parser.symbol_pattern},
                 {"otc_symbol_suffix", parser.otc_symbol_suffix},
                 {"expiry_mode", telegram_expiry_mode_name(parser.expiry_policy.mode)},
@@ -186,6 +198,14 @@ namespace optionx::bridges::telegram {
                 martingale_policy = telegram_martingale_policy_from_name(
                     j.at("martingale_policy").get<std::string>());
             }
+            anti_martingale_enabled = j.value(
+                "anti_martingale_enabled", anti_martingale_enabled);
+            anti_martingale_multiplier = j.value(
+                "anti_martingale_multiplier", anti_martingale_multiplier);
+            anti_martingale_max_steps = j.value(
+                "anti_martingale_max_steps", anti_martingale_max_steps);
+            anti_martingale_max_amount = j.value(
+                "anti_martingale_max_amount", anti_martingale_max_amount);
             parser.symbol_pattern = j.value("symbol_pattern", parser.symbol_pattern);
             parser.otc_symbol_suffix = j.value("otc_symbol_suffix", parser.otc_symbol_suffix);
             if (j.contains("expiry_mode")) {
@@ -258,6 +278,26 @@ namespace optionx::bridges::telegram {
             }
             if (martingale_policy == TelegramMartingalePolicy::UNKNOWN) {
                 return {false, "Telegram martingale_policy is unsupported."};
+            }
+            if (anti_martingale_enabled &&
+                martingale_policy == TelegramMartingalePolicy::CONTIGUOUS_STEPS) {
+                return {false,
+                        "Telegram anti-martingale cannot use CONTIGUOUS_STEPS martingale_policy."};
+            }
+            if (anti_martingale_enabled &&
+                (!std::isfinite(anti_martingale_multiplier) ||
+                 anti_martingale_multiplier <= 1.0)) {
+                return {false,
+                        "Telegram anti_martingale_multiplier must be finite and greater than one."};
+            }
+            if (anti_martingale_enabled && anti_martingale_max_steps == 0) {
+                return {false, "Telegram anti_martingale_max_steps must be positive."};
+            }
+            if (anti_martingale_enabled &&
+                (!std::isfinite(anti_martingale_max_amount) ||
+                 anti_martingale_max_amount < fixed_amount)) {
+                return {false,
+                        "Telegram anti_martingale_max_amount must be finite and at least fixed_amount."};
             }
             if (parser.expiry_policy.mode == TelegramExpiryMode::UNKNOWN) {
                 return {false, "Telegram expiry_mode is unsupported."};
