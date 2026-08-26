@@ -567,6 +567,274 @@ TEST(TelegramSignalBridge, KeepsMartingaleReservationFailClosedWhenCallbackThrow
     bridge.shutdown();
 }
 
+TEST(TelegramSignalBridge, ReportsMissingReplyCorrelatedSourceStep) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    bridge_config->source_chain_rules = {
+        {"cobra", "COBRA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         2, 1, optionx::bridges::telegram::TelegramSourceChainAction::REPORT_ONLY},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::promise<optionx::BridgeSignalReport> missing_step;
+    bridge.on_signal_id() = [] { return 101; };
+    bridge.on_trade_signal() = [](std::unique_ptr<optionx::TradeSignal>) {};
+    bridge.on_signal_report() = [&](const auto& report) {
+        if (report.reason_code == "expected_source_step_missing") {
+            missing_step.set_value(report);
+        }
+    };
+
+    bridge.run();
+    source->emit(make_message(124, "EURUSD BUY 5m COBRA MG-0"));
+    auto outcome = make_message(125, "EURUSD LOSS");
+    outcome.reply_to_message_id = 124;
+    source->emit(outcome);
+
+    auto future = missing_step.get_future();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    const auto report = future.get();
+    EXPECT_EQ(report.status, optionx::BridgeSignalReportStatus::SUSPICIOUS);
+    EXPECT_EQ(report.context.at("expected_source_step"), 1);
+    EXPECT_EQ(report.context.at("timeout_seconds"), 1);
+
+    bridge.shutdown();
+}
+
+TEST(TelegramSignalBridge, EmitsAssumedContiguousSourceStepAfterTimeout) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->martingale_policy =
+        optionx::bridges::telegram::TelegramMartingalePolicy::CONTIGUOUS_STEPS;
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    bridge_config->source_chain_rules = {
+        {"cobra", "COBRA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         2, 1, optionx::bridges::telegram::TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::mutex signals_mutex;
+    std::vector<std::unique_ptr<optionx::TradeSignal>> signals;
+    std::promise<void> assumed_signal_ready;
+    std::int64_t next_signal_id = 100;
+    bridge.on_signal_id() = [&] { return ++next_signal_id; };
+    bridge.on_trade_signal() = [&](std::unique_ptr<optionx::TradeSignal> signal) {
+        const auto assumed = signal->is_assumed;
+        {
+            std::lock_guard<std::mutex> lock(signals_mutex);
+            signals.push_back(std::move(signal));
+        }
+        if (assumed) {
+            assumed_signal_ready.set_value();
+        }
+    };
+
+    bridge.run();
+    source->emit(make_message(124, "EURUSD BUY 5m COBRA MG-0"));
+    auto outcome = make_message(125, "EURUSD LOSS");
+    outcome.reply_to_message_id = 124;
+    source->emit(outcome);
+
+    const auto future = assumed_signal_ready.get_future();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    std::lock_guard<std::mutex> lock(signals_mutex);
+    ASSERT_EQ(signals.size(), 2u);
+    EXPECT_TRUE(signals[1]->is_assumed);
+    EXPECT_EQ(signals[1]->assumed_reason, "expected_source_step_missing");
+    EXPECT_EQ(signals[1]->assumed_source_identity, "telegram:-10042:0:124");
+    EXPECT_EQ(signals[1]->assumed_source_step, 1);
+    EXPECT_EQ(signals[1]->mm_step, 1);
+    const auto assumed_request = signals[1]->to_trade_request();
+    EXPECT_TRUE(assumed_request.is_assumed);
+    EXPECT_EQ(assumed_request.assumed_source_identity, "telegram:-10042:0:124");
+    EXPECT_EQ(assumed_request.assumed_source_step, 1);
+
+    bridge.shutdown();
+}
+
+TEST(TelegramSignalBridge, IgnoresLateSourceStepAfterAssumedContinuation) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->martingale_policy =
+        optionx::bridges::telegram::TelegramMartingalePolicy::CONTIGUOUS_STEPS;
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    bridge_config->source_chain_rules = {
+        {"cobra", "COBRA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         2, 1, optionx::bridges::telegram::TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::mutex signals_mutex;
+    std::vector<std::unique_ptr<optionx::TradeSignal>> signals;
+    std::promise<void> assumed_signal_ready;
+    std::promise<optionx::BridgeSignalReport> ignored_step;
+    bridge.on_signal_id() = [] { return 101; };
+    bridge.on_trade_signal() = [&](std::unique_ptr<optionx::TradeSignal> signal) {
+        const auto assumed = signal->is_assumed;
+        {
+            std::lock_guard<std::mutex> lock(signals_mutex);
+            signals.push_back(std::move(signal));
+        }
+        if (assumed) {
+            assumed_signal_ready.set_value();
+        }
+    };
+    bridge.on_signal_report() = [&](const auto& report) {
+        if (report.reason_code == "source_chain_assumed_step") {
+            ignored_step.set_value(report);
+        }
+    };
+
+    bridge.run();
+    source->emit(make_message(124, "EURUSD BUY 5m COBRA MG-0"));
+    auto outcome = make_message(125, "EURUSD LOSS");
+    outcome.reply_to_message_id = 124;
+    source->emit(outcome);
+
+    ASSERT_EQ(assumed_signal_ready.get_future().wait_for(std::chrono::seconds(3)),
+              std::future_status::ready);
+    source->emit(make_message(126, "EURUSD BUY 5m COBRA MG-1"));
+    auto future = ignored_step.get_future();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(future.get().status, optionx::BridgeSignalReportStatus::IGNORED);
+    std::lock_guard<std::mutex> lock(signals_mutex);
+    EXPECT_EQ(signals.size(), 2u);
+
+    bridge.shutdown();
+}
+
+TEST(TelegramSignalBridge, WakesForAnEarlierSourceChainDeadline) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    bridge_config->source_chain_rules = {
+        {"alpha", "ALPHA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         2, 3, optionx::bridges::telegram::TelegramSourceChainAction::REPORT_ONLY},
+        {"beta", "BETA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         2, 1, optionx::bridges::telegram::TelegramSourceChainAction::REPORT_ONLY},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::promise<optionx::BridgeSignalReport> beta_missing_step;
+    bridge.on_signal_id() = [] { return 101; };
+    bridge.on_trade_signal() = [](std::unique_ptr<optionx::TradeSignal>) {};
+    bridge.on_signal_report() = [&](const auto& report) {
+        if (report.reason_code == "expected_source_step_missing" &&
+            report.signal_name == "BETA") {
+            beta_missing_step.set_value(report);
+        }
+    };
+
+    bridge.run();
+    source->emit(make_message(124, "EURUSD BUY 5m ALPHA MG-0"));
+    auto alpha_outcome = make_message(125, "EURUSD LOSS");
+    alpha_outcome.reply_to_message_id = 124;
+    source->emit(alpha_outcome);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    source->emit(make_message(126, "EURUSD BUY 5m BETA MG-0"));
+    auto beta_outcome = make_message(127, "EURUSD LOSS");
+    beta_outcome.reply_to_message_id = 126;
+    source->emit(beta_outcome);
+
+    auto future = beta_missing_step.get_future();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(future.get().signal_name, "BETA");
+
+    bridge.shutdown();
+}
+
+TEST(TelegramSignalBridge, EmitsAssumedSourceStepWithLocalAntiMartingaleSizing) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->anti_martingale_enabled = true;
+    bridge_config->anti_martingale_max_amount = 2.0;
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    bridge_config->source_chain_rules = {
+        {"cobra", "COBRA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         2, 1, optionx::bridges::telegram::TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::mutex signals_mutex;
+    std::vector<std::unique_ptr<optionx::TradeSignal>> signals;
+    std::promise<void> assumed_signal_ready;
+    std::promise<optionx::BridgeSignalReport> ignored_late_source_step;
+    std::int64_t next_signal_id = 100;
+    bridge.on_signal_id() = [&] { return ++next_signal_id; };
+    bridge.on_trade_signal() = [&](std::unique_ptr<optionx::TradeSignal> signal) {
+        const auto assumed = signal->is_assumed;
+        {
+            std::lock_guard<std::mutex> lock(signals_mutex);
+            signals.push_back(std::move(signal));
+        }
+        if (assumed) {
+            assumed_signal_ready.set_value();
+        }
+    };
+    bridge.on_signal_report() = [&](const auto& report) {
+        if (report.reason_code == "source_chain_assumed_step") {
+            ignored_late_source_step.set_value(report);
+        }
+    };
+
+    bridge.run();
+    source->emit(make_message(124, "EURUSD BUY 5m COBRA MG-0"));
+    {
+        std::lock_guard<std::mutex> lock(signals_mutex);
+        ASSERT_EQ(signals.size(), 1u);
+        auto request = signals.front()->to_trade_request();
+        optionx::TradeResult result;
+        result.trade_state = optionx::TradeState::WIN;
+        bridge.update_trade_result(request, result);
+    }
+    auto outcome = make_message(125, "EURUSD LOSS");
+    outcome.reply_to_message_id = 124;
+    source->emit(outcome);
+
+    auto future = assumed_signal_ready.get_future();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    optionx::TradeRequest assumed_request;
+    {
+        std::lock_guard<std::mutex> lock(signals_mutex);
+        ASSERT_EQ(signals.size(), 2u);
+        EXPECT_TRUE(signals[1]->is_assumed);
+        EXPECT_EQ(signals[1]->assumed_source_step, 1);
+        EXPECT_EQ(signals[1]->mm_type, optionx::MmSystemType::ANTI_MARTINGALE_SIGNAL);
+        EXPECT_EQ(signals[1]->mm_step, 1);
+        EXPECT_EQ(signals[1]->amount, 2.0);
+        assumed_request = signals[1]->to_trade_request();
+    }
+    optionx::TradeResult assumed_result;
+    assumed_result.trade_state = optionx::TradeState::LOSS;
+    bridge.update_trade_result(assumed_request, assumed_result);
+    source->emit(make_message(126, "EURUSD BUY 5m COBRA MG-1"));
+    auto ignored_future = ignored_late_source_step.get_future();
+    ASSERT_EQ(ignored_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(ignored_future.get().status, optionx::BridgeSignalReportStatus::IGNORED);
+    {
+        std::lock_guard<std::mutex> lock(signals_mutex);
+        EXPECT_EQ(signals.size(), 2u);
+    }
+
+    bridge.shutdown();
+}
+
 TEST(TelegramSignalBridge, RejectsInvalidConfigurationBeforeStartingSource) {
     auto source = std::make_shared<FakeMessageSource>();
     optionx::bridges::telegram::TelegramSignalBridge bridge(source);
@@ -642,6 +910,26 @@ TEST(TelegramSignalBridgeConfig, RoundTripsAntiMartingaleSettings) {
     EXPECT_EQ(restored.anti_martingale_multiplier, 1.5);
     EXPECT_EQ(restored.anti_martingale_max_steps, 3u);
     EXPECT_EQ(restored.anti_martingale_max_amount, 12.0);
+    EXPECT_TRUE(restored.validate().first);
+}
+
+TEST(TelegramSignalBridgeConfig, RoundTripsSourceChainRules) {
+    auto original = config();
+    original->source_chain_rules = {
+        {"cobra", "COBRA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         7, 15, optionx::bridges::telegram::TelegramSourceChainAction::REPORT_ONLY},
+    };
+    nlohmann::json serialized;
+    original->to_json(serialized);
+
+    optionx::bridges::telegram::TelegramSignalBridgeConfig restored;
+    restored.from_json(serialized);
+
+    ASSERT_EQ(restored.source_chain_rules.size(), 1u);
+    EXPECT_EQ(restored.source_chain_rules[0].name, "cobra");
+    EXPECT_EQ(restored.source_chain_rules[0].signal_name, "COBRA");
+    EXPECT_EQ(restored.source_chain_rules[0].max_step, 7u);
+    EXPECT_EQ(restored.source_chain_rules[0].timeout_seconds, 15u);
     EXPECT_TRUE(restored.validate().first);
 }
 
