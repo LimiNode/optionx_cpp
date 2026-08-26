@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace optionx::bridges::telegram {
 
@@ -52,6 +54,49 @@ namespace optionx::bridges::telegram {
         }
         return TelegramMartingalePolicy::UNKNOWN;
     }
+
+    /// \enum TelegramSourceChainAction
+    /// \brief Selects the action after an expected source step times out.
+    enum class TelegramSourceChainAction {
+        UNKNOWN,
+        REPORT_ONLY,
+        EMIT_ASSUMED_SIGNAL
+    };
+
+    inline const char* telegram_source_chain_action_name(
+            const TelegramSourceChainAction action) {
+        switch (action) {
+        case TelegramSourceChainAction::REPORT_ONLY:
+            return "REPORT_ONLY";
+        case TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL:
+            return "EMIT_ASSUMED_SIGNAL";
+        case TelegramSourceChainAction::UNKNOWN:
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    inline TelegramSourceChainAction telegram_source_chain_action_from_name(
+            const std::string& value) {
+        if (value == "REPORT_ONLY") {
+            return TelegramSourceChainAction::REPORT_ONLY;
+        }
+        if (value == "EMIT_ASSUMED_SIGNAL") {
+            return TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL;
+        }
+        return TelegramSourceChainAction::UNKNOWN;
+    }
+
+    /// \struct TelegramSourceChainRule
+    /// \brief Explicit continuation contract for one named Telegram strategy.
+    struct TelegramSourceChainRule {
+        std::string name;
+        std::string signal_name;
+        TelegramOutcomeResult continuation_result = TelegramOutcomeResult::UNKNOWN;
+        std::uint32_t max_step = 0;
+        std::uint32_t timeout_seconds = 15;
+        TelegramSourceChainAction action = TelegramSourceChainAction::REPORT_ONLY;
+    };
 
     inline const char* telegram_outcome_result_name(
             const TelegramOutcomeResult result) {
@@ -120,6 +165,15 @@ namespace optionx::bridges::telegram {
         std::size_t dedupe_cache_size = 4096;
         std::uint32_t max_signal_age_seconds = 0;
         TelegramMartingalePolicy martingale_policy = TelegramMartingalePolicy::ALL_SIGNALS;
+        /// \brief Enables broker-result-driven anti-martingale stake sizing.
+        bool anti_martingale_enabled = false;
+        /// \brief Stake multiplier applied after each confirmed broker WIN.
+        double anti_martingale_multiplier = 2.0;
+        /// \brief Maximum number of consecutive winning step increases.
+        std::uint32_t anti_martingale_max_steps = 1;
+        /// \brief Absolute amount cap required when anti-martingale is enabled.
+        double anti_martingale_max_amount = 0.0;
+        std::vector<TelegramSourceChainRule> source_chain_rules;
         TelegramParserConfig parser = TelegramSignalParser::default_config();
 
         void to_json(nlohmann::json& j) const override {
@@ -129,6 +183,11 @@ namespace optionx::bridges::telegram {
                 {"dedupe_cache_size", dedupe_cache_size},
                 {"max_signal_age_seconds", max_signal_age_seconds},
                 {"martingale_policy", telegram_martingale_policy_name(martingale_policy)},
+                {"anti_martingale_enabled", anti_martingale_enabled},
+                {"anti_martingale_multiplier", anti_martingale_multiplier},
+                {"anti_martingale_max_steps", anti_martingale_max_steps},
+                {"anti_martingale_max_amount", anti_martingale_max_amount},
+                {"source_chain_rules", nlohmann::json::array()},
                 {"symbol_pattern", parser.symbol_pattern},
                 {"otc_symbol_suffix", parser.otc_symbol_suffix},
                 {"expiry_mode", telegram_expiry_mode_name(parser.expiry_policy.mode)},
@@ -148,6 +207,17 @@ namespace optionx::bridges::telegram {
                     {"expiry_group", rule.expiry_group},
                     {"unit_group", rule.unit_group},
                     {"option_type", rule.option_type},
+                });
+            }
+            for (const auto& rule : source_chain_rules) {
+                j["source_chain_rules"].push_back({
+                    {"name", rule.name},
+                    {"signal_name", rule.signal_name},
+                    {"continuation_result", telegram_outcome_result_name(
+                        rule.continuation_result)},
+                    {"max_step", rule.max_step},
+                    {"timeout_seconds", rule.timeout_seconds},
+                    {"action", telegram_source_chain_action_name(rule.action)},
                 });
             }
             for (const auto& rule : parser.direction_rules) {
@@ -185,6 +255,29 @@ namespace optionx::bridges::telegram {
             if (j.contains("martingale_policy")) {
                 martingale_policy = telegram_martingale_policy_from_name(
                     j.at("martingale_policy").get<std::string>());
+            }
+            anti_martingale_enabled = j.value(
+                "anti_martingale_enabled", anti_martingale_enabled);
+            anti_martingale_multiplier = j.value(
+                "anti_martingale_multiplier", anti_martingale_multiplier);
+            anti_martingale_max_steps = j.value(
+                "anti_martingale_max_steps", anti_martingale_max_steps);
+            anti_martingale_max_amount = j.value(
+                "anti_martingale_max_amount", anti_martingale_max_amount);
+            if (j.contains("source_chain_rules")) {
+                source_chain_rules.clear();
+                for (const auto& item : j.at("source_chain_rules")) {
+                    TelegramSourceChainRule rule;
+                    rule.name = item.value("name", "");
+                    rule.signal_name = item.value("signal_name", "");
+                    rule.continuation_result = telegram_outcome_result_from_name(
+                        item.value("continuation_result", std::string("UNKNOWN")));
+                    rule.max_step = item.value("max_step", 0u);
+                    rule.timeout_seconds = item.value("timeout_seconds", 15u);
+                    rule.action = telegram_source_chain_action_from_name(
+                        item.value("action", std::string("REPORT_ONLY")));
+                    source_chain_rules.push_back(std::move(rule));
+                }
             }
             parser.symbol_pattern = j.value("symbol_pattern", parser.symbol_pattern);
             parser.otc_symbol_suffix = j.value("otc_symbol_suffix", parser.otc_symbol_suffix);
@@ -258,6 +351,50 @@ namespace optionx::bridges::telegram {
             }
             if (martingale_policy == TelegramMartingalePolicy::UNKNOWN) {
                 return {false, "Telegram martingale_policy is unsupported."};
+            }
+            if (anti_martingale_enabled &&
+                martingale_policy == TelegramMartingalePolicy::CONTIGUOUS_STEPS) {
+                return {false,
+                        "Telegram anti-martingale cannot use CONTIGUOUS_STEPS martingale_policy."};
+            }
+            if (anti_martingale_enabled &&
+                (!std::isfinite(anti_martingale_multiplier) ||
+                 anti_martingale_multiplier <= 1.0)) {
+                return {false,
+                        "Telegram anti_martingale_multiplier must be finite and greater than one."};
+            }
+            if (anti_martingale_enabled && anti_martingale_max_steps == 0) {
+                return {false, "Telegram anti_martingale_max_steps must be positive."};
+            }
+            if (anti_martingale_enabled &&
+                (!std::isfinite(anti_martingale_max_amount) ||
+                 anti_martingale_max_amount < fixed_amount)) {
+                return {false,
+                        "Telegram anti_martingale_max_amount must be finite and at least fixed_amount."};
+            }
+            std::unordered_set<std::string> source_chain_names;
+            std::unordered_set<std::string> source_chain_signal_names;
+            for (const auto& rule : source_chain_rules) {
+                if (rule.name.empty() || rule.signal_name.empty()) {
+                    return {false, "Telegram source-chain rule requires name and signal_name."};
+                }
+                if (!source_chain_names.insert(rule.name).second) {
+                    return {false, "Telegram source-chain rule names must be unique."};
+                }
+                if (!source_chain_signal_names.insert(rule.signal_name).second) {
+                    return {false, "Telegram source-chain signal_name values must be unique."};
+                }
+                if (rule.continuation_result == TelegramOutcomeResult::UNKNOWN ||
+                    rule.max_step == 0 || rule.timeout_seconds == 0 ||
+                    rule.action == TelegramSourceChainAction::UNKNOWN) {
+                    return {false, "Telegram source-chain rule has unsupported continuation settings."};
+                }
+                if (rule.action == TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL &&
+                    martingale_policy != TelegramMartingalePolicy::CONTIGUOUS_STEPS &&
+                    !anti_martingale_enabled) {
+                    return {false,
+                            "Telegram assumed source-chain signals require CONTIGUOUS_STEPS or anti-martingale."};
+                }
             }
             if (parser.expiry_policy.mode == TelegramExpiryMode::UNKNOWN) {
                 return {false, "Telegram expiry_mode is unsupported."};
