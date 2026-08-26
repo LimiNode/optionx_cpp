@@ -17,6 +17,7 @@ namespace optionx {
         std::string user_data;       ///< User-defined metadata attached to the trade request.
         std::string comment;         ///< Optional comment for the trade.
         std::string unique_hash;     ///< Unique hash to prevent duplicate trade execution.
+        std::int64_t source_time_ms = 0; ///< Source publication timestamp in Unix milliseconds.
 
         // Identifiers
         std::uint32_t trade_id = 0; ///< Persistent trade record ID propagated into TradeResult::trade_id.
@@ -130,6 +131,7 @@ namespace optionx {
             user_data,
             comment,
             unique_hash,
+            source_time_ms,
             trade_id,
             signal_id,
             bridge_id,
@@ -155,6 +157,7 @@ namespace optionx {
             user_data = other.user_data;
             comment = other.comment;
             unique_hash = other.unique_hash;
+            source_time_ms = other.source_time_ms;
             trade_id = other.trade_id;
             signal_id = other.signal_id;
             bridge_id = other.bridge_id;

@@ -54,6 +54,14 @@ namespace optionx::bridges::telegram {
         std::size_t direction_group = 0;
     };
 
+    /// \struct TelegramMartingaleRule
+    /// \brief Extracts an explicit martingale step from a source message line.
+    struct TelegramMartingaleRule {
+        std::string name;
+        std::string pattern;
+        std::size_t step_group = 1;
+    };
+
     /// \enum TelegramExpiryMode
     /// \brief Defines how a parsed timeframe becomes an executable expiry.
     enum class TelegramExpiryMode {
@@ -83,6 +91,7 @@ namespace optionx::bridges::telegram {
         std::vector<TelegramSignalRule> signal_rules;
         std::vector<TelegramDirectionRule> direction_rules;
         std::vector<TelegramOutcomeRule> outcome_rules;
+        std::vector<TelegramMartingaleRule> martingale_rules;
         bool use_chat_title_as_signal_name = true;
     };
 
@@ -166,7 +175,7 @@ namespace optionx::bridges::telegram {
             });
             config.signal_rules.push_back({
                 "expiry-pair-scheduled-direction-fallback",
-                R"(\b(\d{1,5})[ \t]*(s|sec|secs|m|min|mins|h|hr|hour|hours)[ \t]+)" + symbol +
+                R"((?:^|[\r\n])(?:(?!\b(?:BUY|SELL|CALL|PUT)\b)[^\r\n])*?\b(\d{1,5})[ \t]*(s|sec|secs|m|min|mins|h|hr|hour|hours)[ \t]+)" + symbol +
                     R"((?:[ \t]+\d{1,2}:\d{2})?(?![ \t]+(?:BUY|SELL|CALL|PUT)\b))",
                 3,
                 0,
@@ -284,6 +293,12 @@ namespace optionx::bridges::telegram {
                                std::regex::ECMAScript | std::regex::icase),
                 });
             }
+            for (const auto& rule : m_config.martingale_rules) {
+                m_martingale_rules.push_back({
+                    rule,
+                    std::regex(rule.pattern, std::regex::ECMAScript | std::regex::icase),
+                });
+            }
         }
 
         /// \brief Parses one message into signals, outcomes and diagnostics.
@@ -309,6 +324,11 @@ namespace optionx::bridges::telegram {
 
         struct CompiledDirectionRule {
             TelegramDirectionRule spec;
+            std::regex expression;
+        };
+
+        struct CompiledMartingaleRule {
+            TelegramMartingaleRule spec;
             std::regex expression;
         };
 
@@ -410,9 +430,20 @@ namespace optionx::bridges::telegram {
             return value.substr(first, last - first + 1);
         }
 
-        static std::string signal_name_from_tail(
+        std::string normalize_strategy_name(std::string value) const {
+            static const std::regex step_suffix(
+                R"(\s+-\s*\d+\s*$)",
+                std::regex::ECMAScript);
+            value = std::regex_replace(value, step_suffix, "");
+            for (const auto& martingale_rule : m_martingale_rules) {
+                value = std::regex_replace(value, martingale_rule.expression, "");
+            }
+            return trim_ascii(std::move(value));
+        }
+
+        std::string signal_name_from_tail(
                 const TelegramRawMessage& raw,
-                const std::smatch& match) {
+                const std::smatch& match) const {
             const auto begin = static_cast<std::size_t>(match.position() + match.length());
             if (begin >= raw.text.size()) {
                 return {};
@@ -441,19 +472,15 @@ namespace optionx::bridges::telegram {
                     }
                 }
             }
-            static const std::regex step_suffix(
-                R"(\s+-\s*\d+\s*$)",
-                std::regex::ECMAScript);
-            tail = std::regex_replace(tail, step_suffix, "");
-            tail = trim_ascii(std::move(tail));
+            tail = normalize_strategy_name(std::move(tail));
             if (tail.empty() || !std::isalpha(static_cast<unsigned char>(tail.front()))) {
                 return {};
             }
             return tail;
         }
 
-        static std::string outcome_signal_name_from_match(
-                const std::string& matched_text) {
+        std::string outcome_signal_name_from_match(
+                const std::string& matched_text) const {
             static const std::regex direction(
                 R"(\b(?:BUY|SELL|CALL|PUT)\b)",
                 std::regex::ECMAScript | std::regex::icase);
@@ -475,7 +502,40 @@ namespace optionx::bridges::telegram {
             if (emoji != std::string::npos) {
                 name.resize(emoji);
             }
-            return trim_ascii(std::move(name));
+            return normalize_strategy_name(std::move(name));
+        }
+
+        std::optional<std::int32_t> martingale_step_from_line(
+                const std::string& line) const {
+            std::optional<std::int32_t> resolved;
+            for (const auto& compiled : m_martingale_rules) {
+                for (std::sregex_iterator it(line.begin(), line.end(), compiled.expression);
+                     it != std::sregex_iterator(); ++it) {
+                    const auto& match = *it;
+                    if (!has_group(match, compiled.spec.step_group)) {
+                        throw std::invalid_argument("martingale rule has no step");
+                    }
+                    const auto value = match[compiled.spec.step_group].str();
+                    std::size_t consumed = 0;
+                    long long parsed = 0;
+                    try {
+                        parsed = std::stoll(value, &consumed, 10);
+                    }
+                    catch (const std::exception&) {
+                        throw std::invalid_argument("martingale step is invalid");
+                    }
+                    if (consumed != value.size() || parsed < 0 ||
+                        parsed > (std::numeric_limits<std::int32_t>::max)()) {
+                        throw std::invalid_argument("martingale step is invalid");
+                    }
+                    const auto step = static_cast<std::int32_t>(parsed);
+                    if (resolved && *resolved != step) {
+                        throw std::invalid_argument("martingale step is ambiguous");
+                    }
+                    resolved = step;
+                }
+            }
+            return resolved;
         }
 
         static bool has_group(
@@ -623,6 +683,7 @@ namespace optionx::bridges::telegram {
 
             TelegramParsedSignal signal;
             signal.source_message_identity = raw.message_identity();
+            signal.source_date_ms = raw.date_ms;
             signal.market = classify_market(
                 match[rule.symbol_group].str(), match.str());
             signal.symbol = canonical_symbol(
@@ -652,6 +713,11 @@ namespace optionx::bridges::telegram {
                     : rule.name;
             }
             signal.raw_text = match.str();
+            signal.martingale_step = martingale_step_from_line(
+                line_text(
+                    raw,
+                    static_cast<std::size_t>(match.position()),
+                    static_cast<std::size_t>(match.position() + match.length())));
 
             if (has_group(match, rule.expiry_group)) {
                 if (!has_group(match, rule.unit_group)) {
@@ -676,7 +742,8 @@ namespace optionx::bridges::telegram {
                 left.option_type == right.option_type &&
                 left.duration == right.duration &&
                 left.expiry_time == right.expiry_time &&
-                left.signal_name == right.signal_name;
+                left.signal_name == right.signal_name &&
+                left.martingale_step == right.martingale_step;
         }
 
         static bool same_outcome(
@@ -685,7 +752,8 @@ namespace optionx::bridges::telegram {
             return left.symbol == right.symbol &&
                 left.order_type == right.order_type &&
                 left.result == right.result &&
-                left.market == right.market;
+                left.market == right.market &&
+                left.martingale_step == right.martingale_step;
         }
 
         void parse_signals(
@@ -850,6 +918,7 @@ namespace optionx::bridges::telegram {
                         }
                         TelegramParsedOutcome outcome;
                         outcome.source_message_identity = raw.message_identity();
+                        outcome.source_date_ms = raw.date_ms;
                         outcome.reply_to_message_identity = raw.reply_to_message_identity();
                         if (has_group(match, compiled.spec.symbol_group)) {
                             const auto normalized_symbol = normalize_symbol(
@@ -892,6 +961,11 @@ namespace optionx::bridges::telegram {
                             outcome.signal_name = raw.chat_title;
                         }
                         outcome.raw_text = match.str();
+                        outcome.martingale_step = martingale_step_from_line(
+                            line_text(
+                                raw,
+                                static_cast<std::size_t>(match.position()),
+                                static_cast<std::size_t>(match.position() + match.length())));
                         candidates.push_back({
                             static_cast<std::size_t>(match.position()),
                             static_cast<std::size_t>(match.position() + match.length()),
@@ -966,6 +1040,7 @@ namespace optionx::bridges::telegram {
         std::vector<CompiledSignalRule> m_signal_rules;
         std::vector<CompiledDirectionRule> m_direction_rules;
         std::vector<CompiledOutcomeRule> m_outcome_rules;
+        std::vector<CompiledMartingaleRule> m_martingale_rules;
     };
 
 } // namespace optionx::bridges::telegram
