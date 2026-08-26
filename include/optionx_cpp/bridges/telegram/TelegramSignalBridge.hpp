@@ -718,7 +718,15 @@ namespace optionx::bridges::telegram {
                     state->dedupe_keys.find(dedupe_key) != state->dedupe_keys.end()) {
                     out_of_sequence = true;
                 }
-                else if (config.anti_martingale_enabled) {
+                else {
+                    const auto current = state->source_chain_groups.find(source_key);
+                    if (current != state->source_chain_groups.end() &&
+                        current->second.parsed.source_message_identity !=
+                            chain.parsed.source_message_identity) {
+                        out_of_sequence = true;
+                    }
+                }
+                if (!out_of_sequence && config.anti_martingale_enabled) {
                     anti_martingale_key = sequence_key;
                     auto& anti_martingale = state->anti_martingale_groups[
                         anti_martingale_key];
@@ -737,7 +745,7 @@ namespace optionx::bridges::telegram {
                         anti_martingale_pending = true;
                     }
                 }
-                else {
+                else if (!out_of_sequence) {
                     const auto existing = state->martingale_steps.find(sequence_key);
                     if (state->pending_martingale_sequences.find(sequence_key) !=
                             state->pending_martingale_sequences.end() ||
@@ -871,19 +879,13 @@ namespace optionx::bridges::telegram {
                     }
                 }
                 lock.unlock();
-                {
-                    // Keep timer expiry ordered with source intake. In
-                    // particular, a fresh MG-0 cannot race an expired older
-                    // series while its assumed continuation is reserved.
-                    std::lock_guard<std::recursive_mutex> intake_lock(state->intake_mutex);
-                    for (const auto& chain : expired) {
-                        if (chain.rule.action == TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL) {
-                            dispatch_assumed_source_chain_signal(state, *config, chain);
-                        }
-                        else {
-                            emit_report(state, make_source_chain_report(
-                                *config, chain, current_time_ms()));
-                        }
+                for (const auto& chain : expired) {
+                    if (chain.rule.action == TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL) {
+                        dispatch_assumed_source_chain_signal(state, *config, chain);
+                    }
+                    else {
+                        emit_report(state, make_source_chain_report(
+                            *config, chain, current_time_ms()));
                     }
                 }
                 lock.lock();
@@ -1171,9 +1173,12 @@ namespace optionx::bridges::telegram {
                             continue;
                         }
                     }
+                    // Publish the source generation before releasing the
+                    // martingale reservation. An expired older generation can
+                    // then never reserve a synthetic continuation for this key.
+                    remember_source_chain_signal(state, config, raw, parsed_signal);
                     commit_martingale_dispatch_state(
                         state, sequence_key, martingale_step_recorded);
-                    remember_source_chain_signal(state, config, raw, parsed_signal);
                 }
             }
             catch (const std::exception& error) {
