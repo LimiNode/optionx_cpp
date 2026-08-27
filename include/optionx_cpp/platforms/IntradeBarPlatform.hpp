@@ -22,6 +22,7 @@
 #include "IntradeBarPlatform/TradeExecutionComponent.hpp"
 #include "IntradeBarPlatform/BalanceManager.hpp"
 #include "IntradeBarPlatform/ActiveTradesSyncManager.hpp"
+#include "IntradeBarPlatform/TradingConditionManager.hpp"
 #include "IntradeBarPlatform/PriceManager.hpp"
 #include "IntradeBarPlatform/BtcPriceManager.hpp"
 #include "IntradeBarPlatform/FxPriceWebSocketManager.hpp"
@@ -53,6 +54,7 @@ namespace optionx::platforms {
               m_auth_manager(*this, m_request_manager, m_account_info),
               m_balance_manager(*this, m_request_manager, m_account_info),
               m_active_trades_sync_manager(*this, m_request_manager, m_account_info),
+              m_trading_condition_manager(*this, m_account_info),
               m_price_manager(*this, m_request_manager),
               m_btc_price_manager(*this),
               m_fx_price_websocket_manager(*this),
@@ -233,6 +235,7 @@ namespace optionx::platforms {
         intrade_bar::AuthManager          m_auth_manager;     ///< Handles authentication processes.
         intrade_bar::BalanceManager       m_balance_manager;  ///< Tracks account balance.
         intrade_bar::ActiveTradesSyncManager m_active_trades_sync_manager; ///< Syncs broker active trade snapshots.
+        intrade_bar::TradingConditionManager m_trading_condition_manager; ///< Publishes current trading conditions.
         intrade_bar::PriceManager         m_price_manager;    ///< Retrieves and updates price data.
         intrade_bar::BtcPriceManager      m_btc_price_manager;///< Retrieves BTC/USDT quotes from the websocket stream.
         intrade_bar::FxPriceWebSocketManager m_fx_price_websocket_manager; ///< Retrieves FX quotes from websocket streams.

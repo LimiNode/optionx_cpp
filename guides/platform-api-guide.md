@@ -59,6 +59,13 @@
   Market-data callbacks (`on_tick_data`, `on_bar_data`, `on_market_data_status`)
   живут на `market_data::BaseMarketDataProvider`.
 
+### Intrade Bar Condition Updates
+
+`IntradeBarPlatform::on_trading_condition()` emits current supported-symbol
+snapshots after account context is known and whenever time-dependent limits
+change. Intrade payout remains absent because it depends on a concrete amount
+and duration; query that exact trade through `AccountInfoRequest`.
+
 ## `market_data::BaseMarketDataProvider`
 
 Файл: `include/optionx_cpp/market_data/BaseMarketDataProvider.hpp`.

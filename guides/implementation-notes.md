@@ -251,6 +251,23 @@ facade lifecycle или остаться probe/internal component.
 Не меняй account info напрямую из application code. Для user-facing чтения
 используй `BaseTradingPlatform::get_info<T>()`.
 
+### Intrade Bar Trading Conditions
+
+`platforms/IntradeBarPlatform/TradingConditionManager.hpp` converts the current
+Intrade account condition model into `TradingConditionUpdateEvent` snapshots.
+It reacts to account lifecycle/context/open-trade updates and re-evaluates
+time-dependent values from `BaseComponent::process()` once per Unix second.
+
+The manager emits only changed scopes. A scope contains the platform, account
+type, currency, option type and normalized symbol. When account identity changes,
+the previous scopes receive a final `tradable=false` patch before the new scopes
+are published.
+
+Do not fill `payout` from a made-up reference amount or duration. Current Intrade
+payout rules are trade-parameter dependent, while `TradingConditionUpdate` does
+not identify those parameters. Exact pre-trade payout checks remain queries to
+`AccountInfoData` through `AccountInfoRequest`.
+
 ## Session Storage
 
 Опорный файл: `storages/ServiceSessionDB.hpp`.

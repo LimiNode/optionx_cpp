@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,7 @@
 #include <server_http.hpp>
 #include <server_ws.hpp>
 
+#include <optionx_cpp/components.hpp>
 #include <optionx_cpp/platforms.hpp>
 
 using namespace optionx;
@@ -2007,6 +2009,116 @@ TEST(IntradeBarApiResponses, FxWebSocketSubscriptionSurvivesAccountDisconnect) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     platform.event_bus().drain();
     EXPECT_EQ(server.subscription_count.load(), subscriptions_after_connect);
+
+    platform.shutdown();
+}
+
+TEST(IntradeBarTradingConditions, ConnectedAccountPublishesSupportedScopes) {
+    IntradeBarPlatform platform;
+    std::vector<TradingConditionUpdate> updates;
+    platform.on_trading_condition() =
+        [&updates](const TradingConditionUpdate& update) {
+            updates.push_back(update);
+        };
+
+    auto account = std::make_shared<AccountInfoData>();
+    account->connect = true;
+    account->account_type = AccountType::DEMO;
+    account->currency = CurrencyType::USD;
+    platform.event_bus().notify_async(
+        std::make_unique<events::AccountInfoUpdateEvent>(
+            account,
+            AccountUpdateStatus::CONNECTED));
+    platform.event_bus().drain();
+
+    EXPECT_EQ(updates.size(), (supported_symbols().size() * 2) - 1);
+    const auto find_update = [&updates](
+            const std::string& symbol,
+            OptionType option_type) {
+        return std::find_if(
+            updates.begin(),
+            updates.end(),
+            [&symbol, option_type](const TradingConditionUpdate& update) {
+                return update.symbol == symbol &&
+                    update.option_type == option_type;
+            });
+    };
+
+    const auto eur = find_update("EURUSD", OptionType::SPRINT);
+    ASSERT_NE(eur, updates.end());
+    EXPECT_EQ(eur->platform_type, PlatformType::INTRADE_BAR);
+    EXPECT_EQ(eur->account_type, AccountType::DEMO);
+    EXPECT_EQ(eur->currency, CurrencyType::USD);
+    ASSERT_TRUE(eur->min_amount);
+    EXPECT_DOUBLE_EQ(*eur->min_amount, account->min_usd_amount);
+    ASSERT_TRUE(eur->max_amount);
+    ASSERT_TRUE(eur->max_open_trades);
+    EXPECT_GT(*eur->max_open_trades, 0u);
+    EXPECT_EQ(eur->min_duration, std::optional<std::uint32_t>(60u));
+    EXPECT_EQ(
+        eur->session_start,
+        std::optional<std::int64_t>(account->start_time));
+    EXPECT_EQ(
+        eur->session_end,
+        std::optional<std::int64_t>(account->end_time));
+    EXPECT_FALSE(eur->payout);
+
+    const auto btc = find_update("BTCUSDT", OptionType::SPRINT);
+    ASSERT_NE(btc, updates.end());
+    EXPECT_EQ(btc->market_open, std::optional<bool>(true));
+    EXPECT_EQ(btc->tradable, std::optional<bool>(true));
+    EXPECT_EQ(
+        btc->min_duration,
+        std::optional<std::uint32_t>(
+            static_cast<std::uint32_t>(account->min_btc_duration)));
+    EXPECT_EQ(
+        btc->max_duration,
+        std::optional<std::uint32_t>(
+            static_cast<std::uint32_t>(account->max_duration)));
+    EXPECT_EQ(find_update("BTCUSDT", OptionType::CLASSIC), updates.end());
+
+    platform.shutdown();
+}
+
+TEST(IntradeBarTradingConditions, OpenTradeLimitUpdatesPlatformBoundHub) {
+    IntradeBarPlatform platform;
+    components::TradingConditionHub hub;
+    hub.bind_to(platform.on_trading_condition());
+
+    auto account = std::make_shared<AccountInfoData>();
+    account->connect = true;
+    account->account_type = AccountType::REAL;
+    account->currency = CurrencyType::RUB;
+    platform.event_bus().notify_async(
+        std::make_unique<events::AccountInfoUpdateEvent>(
+            account,
+            AccountUpdateStatus::CONNECTED));
+    platform.event_bus().drain();
+
+    TradingConditionUpdate scope;
+    scope.symbol = "BTCUSDT";
+    scope.platform_type = PlatformType::INTRADE_BAR;
+    scope.account_type = AccountType::REAL;
+    scope.currency = CurrencyType::RUB;
+    scope.option_type = OptionType::SPRINT;
+
+    auto current = hub.current_condition(scope);
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->tradable, std::optional<bool>(true));
+    EXPECT_EQ(
+        current->min_amount,
+        std::optional<double>(account->min_rub_amount));
+
+    account->open_trades = account->max_trades;
+    platform.event_bus().notify_async(
+        std::make_unique<events::AccountInfoUpdateEvent>(
+            account,
+            AccountUpdateStatus::OPEN_TRADES_CHANGED));
+    platform.event_bus().drain();
+
+    current = hub.current_condition(scope);
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->tradable, std::optional<bool>(false));
 
     platform.shutdown();
 }
