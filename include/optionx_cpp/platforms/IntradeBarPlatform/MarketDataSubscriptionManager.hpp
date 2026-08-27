@@ -110,6 +110,8 @@ namespace optionx::platforms::intrade_bar {
             Bar current; ///< Current in-progress bar.
             std::uint64_t first_tick_time_ms = 0; ///< Earliest tick timestamp in the current bar bucket.
             std::uint64_t last_tick_time_ms = 0; ///< Latest tick timestamp in the current bar bucket.
+            std::uint32_t price_digits = 0; ///< Price precision inherited from the source stream.
+            std::uint32_t volume_digits = 0; ///< Volume precision inherited from the source stream.
             bool initialized = false; ///< True after the first valid tick was applied.
         };
 
@@ -170,7 +172,8 @@ namespace optionx::platforms::intrade_bar {
         /// \brief Finds or creates a pending bar delivery batch.
         market_data::BarDataBatch& pending_bar_batch_for(
                 const market_data::MarketDataSubscriptionHandle& subscription,
-                const events::TickUpdateBatch& source_batch);
+                std::uint32_t price_digits,
+                std::uint32_t volume_digits);
 
         /// \brief Removes queued tick data for an inactive subscription.
         /// \pre The caller holds m_mutex.
@@ -190,6 +193,13 @@ namespace optionx::platforms::intrade_bar {
 
         /// \brief Returns the event timestamp used for live bar bucketing.
         static std::uint64_t tick_time_ms(const Tick& tick) noexcept;
+
+        /// \brief Finalizes an in-progress bar after its wall-clock bucket elapsed.
+        static bool finalize_elapsed_bar(
+                const market_data::MarketDataSubscriptionHandle& subscription,
+                std::uint64_t now_ms,
+                BarAggregationState& state,
+                Bar& finalized);
 
         /// \brief Applies one tick to a live bar accumulator.
         static void append_bar_updates(
@@ -614,6 +624,26 @@ namespace optionx::platforms::intrade_bar {
         std::vector<market_data::BarDataBatch> bar_batches;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            const auto now_ms = static_cast<std::uint64_t>(OPTIONX_TIMESTAMP_MS);
+            for (const auto& [id, subscription] : m_bar_subscriptions) {
+                auto state_it = m_bar_states.find(id);
+                if (state_it == m_bar_states.end()) continue;
+
+                Bar finalized;
+                if (!finalize_elapsed_bar(
+                        subscription,
+                        now_ms,
+                        state_it->second,
+                        finalized)) {
+                    continue;
+                }
+
+                auto& batch = pending_bar_batch_for(
+                    subscription,
+                    state_it->second.price_digits,
+                    state_it->second.volume_digits);
+                batch.items.push_back(std::move(finalized));
+            }
             tick_batches.swap(m_pending_tick_batches);
             bar_batches.swap(m_pending_bar_batches);
         }
@@ -819,8 +849,13 @@ namespace optionx::platforms::intrade_bar {
                 if (subscription.symbol != normalized_symbol) continue;
                 if (!source_matches_subscription(subscription, event.source())) continue;
 
-                auto& batch = pending_bar_batch_for(subscription, source_batch);
                 auto& state = m_bar_states[subscription.id];
+                state.price_digits = source_batch.price_digits;
+                state.volume_digits = source_batch.volume_digits;
+                auto& batch = pending_bar_batch_for(
+                    subscription,
+                    state.price_digits,
+                    state.volume_digits);
                 for (const auto& tick : source_batch.items) {
                     append_bar_updates(subscription, tick, state, batch.items);
                 }
@@ -852,7 +887,8 @@ namespace optionx::platforms::intrade_bar {
     inline market_data::BarDataBatch&
     MarketDataSubscriptionManager::pending_bar_batch_for(
             const market_data::MarketDataSubscriptionHandle& subscription,
-            const events::TickUpdateBatch& source_batch) {
+            std::uint32_t price_digits,
+            std::uint32_t volume_digits) {
         for (auto& batch : m_pending_bar_batches) {
             if (batch.subscription.id == subscription.id) {
                 return batch;
@@ -864,8 +900,8 @@ namespace optionx::platforms::intrade_bar {
         created.type = market_data::MarketDataType::BARS;
         created.symbol = subscription.symbol;
         created.timeframe = subscription.timeframe;
-        created.price_digits = source_batch.price_digits;
-        created.volume_digits = source_batch.volume_digits;
+        created.price_digits = price_digits;
+        created.volume_digits = volume_digits;
         m_pending_bar_batches.push_back(std::move(created));
         return m_pending_bar_batches.back();
     }
@@ -950,6 +986,35 @@ namespace optionx::platforms::intrade_bar {
         return tick.time_ms != 0 ? tick.time_ms : tick.received_ms;
     }
 
+    inline bool MarketDataSubscriptionManager::finalize_elapsed_bar(
+            const market_data::MarketDataSubscriptionHandle& subscription,
+            std::uint64_t now_ms,
+            BarAggregationState& state,
+            Bar& finalized) {
+        if (!state.initialized ||
+            state.current.has_flag(MarketDataFlags::FINALIZED) ||
+            subscription.timeframe <= 0) {
+            return false;
+        }
+
+        const auto timeframe_ms =
+            static_cast<std::uint64_t>(subscription.timeframe) *
+            time_shield::MS_PER_SEC;
+        if (timeframe_ms == 0 ||
+            state.current.time_ms >
+                std::numeric_limits<std::uint64_t>::max() - timeframe_ms) {
+            return false;
+        }
+
+        const auto bucket_end_ms = state.current.time_ms + timeframe_ms;
+        if (now_ms < bucket_end_ms) return false;
+
+        state.current.set_flag(MarketDataFlags::INCOMPLETE, false);
+        state.current.set_flag(MarketDataFlags::FINALIZED);
+        finalized = state.current;
+        return true;
+    }
+
     inline void MarketDataSubscriptionManager::append_bar_updates(
             const market_data::MarketDataSubscriptionHandle& subscription,
             const Tick& tick,
@@ -970,12 +1035,17 @@ namespace optionx::platforms::intrade_bar {
         const auto bucket_ms = (timestamp_ms / timeframe_ms) * timeframe_ms;
         const auto price_type = market_price_type_from_bar_price_source(subscription.price_source);
 
-        if (state.initialized && bucket_ms < state.current.time_ms) {
-            return;
+        if (state.initialized) {
+            if (bucket_ms < state.current.time_ms) return;
+            if (bucket_ms == state.current.time_ms &&
+                state.current.has_flag(MarketDataFlags::FINALIZED)) {
+                return;
+            }
         }
 
         if (!state.initialized || state.current.time_ms != bucket_ms) {
-            if (state.initialized) {
+            if (state.initialized &&
+                !state.current.has_flag(MarketDataFlags::FINALIZED)) {
                 state.current.set_flag(MarketDataFlags::INCOMPLETE, false);
                 state.current.set_flag(MarketDataFlags::FINALIZED);
                 updates.push_back(state.current);

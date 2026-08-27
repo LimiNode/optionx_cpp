@@ -194,10 +194,10 @@ Contract rules:
   a local time series should upsert by `(provider_id, subscription_id, symbol,
   timeframe, time_ms)` until a `FINALIZED` payload for the same key arrives.
   Appending every incomplete snapshot as a new candle will create duplicate bars.
-- Tick-driven live bar aggregation finalizes a bar when the first tick from the
-  next timeframe bucket arrives. If the stream becomes silent, the latest bar can
-  remain `INCOMPLETE`. Future work: add timer/process-based finalization as a
-  separate change.
+- Live bar aggregation finalizes a bar when the first tick from the next
+  timeframe bucket arrives or when platform `process()` observes that the
+  current bucket has elapsed. The process-time path does not require a later
+  tick and emits the final snapshot through the normal `on_bar_data()` callback.
 - `on_market_data_status()` is a separate stream-status callback. Data callbacks
   should carry data batches, not connection lifecycle sentinel payloads.
 - `on_market_data_status()` is a stream-level event bus, not a per-subscription

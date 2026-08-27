@@ -115,9 +115,10 @@ Subscription rules:
 - Live bar streams can deliver several `INCOMPLETE` snapshots with the same
   `(provider_id, subscription_id, symbol, timeframe, time_ms)` key before the
   final `FINALIZED` snapshot. Treat them as upserts, not append-only candles.
-- Tick-driven bar streams finalize the current bar only when a tick from the next
-  timeframe bucket arrives. Timer/process-based finalization is tracked as
-  future work.
+- Live bar streams finalize the current bar when a tick from the next timeframe
+  bucket arrives or when a platform `process()` cycle observes that the bucket
+  has elapsed. With `run(false)`, callers must keep pumping `process()` for this
+  timer-based final snapshot to be delivered.
 - `MarketDataContinuityService` routes recovered historical bars into the same
   `BarDataBatch` pipeline and marks them as `HISTORICAL`/`BACKFILL`.
 - `BaseMarketDataProvider` is non-copyable and non-movable so provider identity
