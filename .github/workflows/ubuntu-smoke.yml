@@ -56,13 +56,20 @@ jobs:
       - name: Run bridge_host_test
         run: ./build-linux/bridge_host_test --gtest_brief=1
 
+      - name: Build trading_view_bridge_test
+        run: cmake --build build-linux --target trading_view_bridge_test -j
+
+      - name: Run trading_view_bridge_test
+        run: ./build-linux/trading_view_bridge_test --gtest_brief=1
+
       - name: Build Telegram parser and bridge tests
-        run: cmake --build build-linux --target telegram_signal_parser_test telegram_signal_bridge_test -j
+        run: cmake --build build-linux --target telegram_signal_parser_test telegram_signal_bridge_test telegram_worker_source_test -j
 
       - name: Run Telegram parser and bridge tests
         run: |
           ./build-linux/telegram_signal_parser_test --gtest_brief=1
           ./build-linux/telegram_signal_bridge_test --gtest_brief=1
+          ./build-linux/telegram_worker_source_test --gtest_brief=1
 
       - name: Build bot_binary_protocol_test
         run: cmake --build build-linux --target bot_binary_protocol_test -j
@@ -147,6 +154,12 @@ jobs:
 
       - name: Run protocol_v1_named_pipe_bridge_smoke
         run: ./build-linux/protocol_v1_named_pipe_bridge_smoke --self-test
+
+      - name: Build tradingview_extension_bridge_smoke
+        run: cmake --build build-linux --target tradingview_extension_bridge_smoke -j
+
+      - name: Run tradingview_extension_bridge_smoke
+        run: ./build-linux/tradingview_extension_bridge_smoke --self-test
 
       - name: Build telegram_archive_parser_smoke
         run: cmake --build build-linux --target telegram_archive_parser_smoke -j

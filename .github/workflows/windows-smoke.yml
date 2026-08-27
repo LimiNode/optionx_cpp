@@ -48,6 +48,8 @@ jobs:
           bridge_host_test
           telegram_signal_parser_test
           telegram_signal_bridge_test
+          telegram_worker_source_test
+          trading_view_bridge_test
 
       - name: Build MetaTrader file smoke example
         run: cmake --build build-windows --config Debug --target metatrader_file_bridge_smoke
@@ -79,6 +81,9 @@ jobs:
       - name: Build Telegram live bridge smoke example
         run: cmake --build build-windows --config Debug --target telegram_live_bridge_smoke
 
+      - name: Build TradingView extension bridge smoke example
+        run: cmake --build build-windows --config Debug --target tradingview_extension_bridge_smoke
+
       - name: Run MetaTrader file tests
         shell: pwsh
         run: |
@@ -94,6 +99,8 @@ jobs:
           .\build-windows\Debug\bridge_host_test.exe --gtest_brief=1
           .\build-windows\Debug\telegram_signal_parser_test.exe --gtest_brief=1
           .\build-windows\Debug\telegram_signal_bridge_test.exe --gtest_brief=1
+          .\build-windows\Debug\telegram_worker_source_test.exe --gtest_brief=1
+          .\build-windows\Debug\trading_view_bridge_test.exe --gtest_brief=1
           .\build-windows\Debug\metatrader_file_bridge_smoke.exe --self-test
           .\build-windows\Debug\metatrader_file_command_writer_smoke.exe --self-test
           .\build-windows\Debug\metatrader_file_end_to_end_smoke.exe --self-test
@@ -102,6 +109,7 @@ jobs:
           .\build-windows\Debug\named_pipe_bridge_smoke.exe --self-test
           .\build-windows\Debug\protocol_v1_bridge_smoke.exe --self-test
           .\build-windows\Debug\protocol_v1_named_pipe_bridge_smoke.exe --self-test
+          .\build-windows\Debug\tradingview_extension_bridge_smoke.exe --self-test
           .\build-windows\Debug\telegram_archive_parser_smoke.exe
 
       - name: Test MetaEditor compile smoke script
