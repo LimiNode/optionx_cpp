@@ -259,6 +259,28 @@ TEST(BaseMarketDataProvider, DefaultProviderRejectsBatchSubscriptions) {
     EXPECT_EQ(result.results[1].status, MarketDataSubscriptionStatus::UNSUPPORTED);
 }
 
+TEST(BaseMarketDataProvider, DefaultCallbackSlotsArePerInstance) {
+    BaseMarketDataProvider provider_a;
+    BaseMarketDataProvider provider_b;
+
+    EXPECT_NE(&provider_a.on_tick_data(), &provider_b.on_tick_data());
+    EXPECT_NE(&provider_a.on_bar_data(), &provider_b.on_bar_data());
+    EXPECT_NE(
+        &provider_a.on_market_data_status(),
+        &provider_b.on_market_data_status());
+
+    provider_a.on_tick_data() = [](std::unique_ptr<TickDataBatch>) {};
+    provider_a.on_bar_data() = [](std::unique_ptr<BarDataBatch>) {};
+    provider_a.on_market_data_status() = [](MarketDataStatusUpdate) {};
+
+    EXPECT_TRUE(static_cast<bool>(provider_a.on_tick_data()));
+    EXPECT_TRUE(static_cast<bool>(provider_a.on_bar_data()));
+    EXPECT_TRUE(static_cast<bool>(provider_a.on_market_data_status()));
+    EXPECT_FALSE(static_cast<bool>(provider_b.on_tick_data()));
+    EXPECT_FALSE(static_cast<bool>(provider_b.on_bar_data()));
+    EXPECT_FALSE(static_cast<bool>(provider_b.on_market_data_status()));
+}
+
 TEST(BaseMarketDataProvider, IsNotCopyableOrMovable) {
     static_assert(!std::is_copy_constructible<BaseMarketDataProvider>::value,
                   "provider identity must not be copy-constructible");

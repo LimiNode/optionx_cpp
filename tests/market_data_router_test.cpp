@@ -127,6 +127,52 @@ private:
     }
 };
 
+class TickOnlyProvider final : public BaseMarketDataProvider {
+public:
+    ticks_callback_t& on_tick_data() override {
+        return m_ticks_callback;
+    }
+
+    bool subscribe_ticks(
+            TickSubscriptionRequest request,
+            subscription_callback_t callback) override {
+        auto subscription = MarketDataSubscriptionHandle::from_tick_request(
+            provider_id(),
+            m_next_subscription_id++,
+            request);
+        if (callback) {
+            callback(MarketDataSubscriptionResult::subscribed(
+                std::move(subscription)));
+        }
+        return true;
+    }
+
+    bool unsubscribe(
+            MarketDataSubscriptionHandle subscription,
+            subscription_callback_t callback) override {
+        if (callback) {
+            callback(MarketDataSubscriptionResult::unsubscribed(
+                std::move(subscription)));
+        }
+        return true;
+    }
+
+    void emit_ticks(const MarketDataSubscriptionHandle& subscription) {
+        ASSERT_TRUE(static_cast<bool>(m_ticks_callback));
+        auto batch = std::make_unique<TickDataBatch>();
+        batch->subscription = subscription;
+        batch->type = MarketDataType::TICKS;
+        batch->symbol = subscription.symbol;
+        batch->price_digits = 5;
+        batch->items.emplace_back(1.10000, 1.10002, 0.0, 1.0, 1000, 0, 0);
+        m_ticks_callback(std::move(batch));
+    }
+
+private:
+    SubscriptionId m_next_subscription_id = 1;
+    ticks_callback_t m_ticks_callback;
+};
+
 class RecordingSubscriber final : public IMarketDataSubscriber {
 public:
     std::vector<TickDataBatch> ticks;
@@ -387,6 +433,35 @@ TEST(MarketDataRouter, RejectsProvidersWithAnExistingCallbackOwner) {
     EXPECT_NE(result.error_message.find("already assigned"), std::string::npos);
     EXPECT_EQ(router.subscription_count(), 0u);
     EXPECT_TRUE(static_cast<bool>(provider.on_tick_data()));
+}
+
+TEST(MarketDataRouter, BindsIndependentTickOnlyProvidersWithDefaultUnusedChannels) {
+    TickOnlyProvider provider_a;
+    TickOnlyProvider provider_b;
+    MarketDataRouter router_a;
+    MarketDataRouter router_b;
+    auto subscriber_a = std::make_shared<RecordingSubscriber>();
+    auto subscriber_b = std::make_shared<RecordingSubscriber>();
+
+    auto route_a = router_a.subscribe_ticks(
+        provider_a,
+        subscriber_a,
+        TickSubscriptionRequest("EURUSD"));
+    auto route_b = router_b.subscribe_ticks(
+        provider_b,
+        subscriber_b,
+        TickSubscriptionRequest("BTCUSDT"));
+
+    ASSERT_TRUE(route_a.active());
+    ASSERT_TRUE(route_b.active());
+
+    provider_a.emit_ticks(route_a.provider_subscription());
+    provider_b.emit_ticks(route_b.provider_subscription());
+
+    ASSERT_EQ(subscriber_a->ticks.size(), 1u);
+    ASSERT_EQ(subscriber_b->ticks.size(), 1u);
+    EXPECT_EQ(subscriber_a->ticks.front().symbol, "EURUSD");
+    EXPECT_EQ(subscriber_b->ticks.front().symbol, "BTCUSDT");
 }
 
 int main(int argc, char** argv) {
