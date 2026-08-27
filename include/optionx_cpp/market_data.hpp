@@ -29,5 +29,6 @@
 #include "market_data/IMarketDataSubscriber.hpp"
 #include "market_data/MarketDataHub.hpp"
 #include "market_data/MarketDataRouter.hpp"
+#include "market_data/MarketDataSubscriberBase.hpp"
 
 #endif // OPTIONX_HEADER_MARKET_DATA_HPP_INCLUDED
