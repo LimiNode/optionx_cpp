@@ -118,6 +118,32 @@ Subscription rules:
   websocket feeds may still run for trade lifecycle needs even when there are
   no public subscribers.
 
+## `market_data::MarketDataRouter`
+
+Файл: `include/optionx_cpp/market_data/MarketDataRouter.hpp`.
+
+`MarketDataRouter` owns public provider subscriptions and routes each batch or
+status only to the subscriber associated with that concrete subscription. Use it
+when a bot or chart needs RAII lifetime and per-subscription status replay; use
+`MarketDataHub` when simple stream-level broadcast without subscription
+ownership is sufficient.
+
+```cpp
+market_data::MarketDataRouter router;
+auto bot = std::make_shared<MyBot>();
+
+auto eur = router.subscribe_ticks(
+    platform,
+    bot,
+    market_data::TickSubscriptionRequest("EURUSD"));
+```
+
+The returned `MarketDataRouterSubscription` is move-only. Its destructor,
+`reset()`, and `unsubscribe()` release the provider subscription. Subscriber
+objects are weakly held, while the provider must outlive the router and pending
+provider operations. Do not bind a `MarketDataHub` or assign the provider's
+live-data callbacks while Router routes for that provider are active.
+
 ## Concrete Platforms
 
 ### `platforms::IntradeBarPlatform`

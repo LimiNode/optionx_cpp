@@ -147,8 +147,8 @@ Market-data APIs are split into DTO/data types and a provider role:
   `BaseMarketDataProvider`, `TickSubscriptionRequest`,
   `BarSubscriptionRequest`, `MarketDataSubscriptionBatch`,
   `MarketDataSubscriptionHandle`, `MarketDataSubscriptionResult`,
-  `MarketDataBatch<T>`, `MarketDataHub`, `IMarketDataSubscriber`, and
-  `MarketDataContinuityService`.
+  `MarketDataBatch<T>`, `MarketDataHub`, `MarketDataRouter`,
+  `IMarketDataSubscriber`, and `MarketDataContinuityService`.
 
 Contract rules:
 
@@ -193,8 +193,7 @@ Contract rules:
   should receive callbacks.
 - `MarketDataHub` does not own provider subscriptions and does not replay tick
   or bar payloads. Its status replay happens when a subscriber object is added;
-  it is not tied to creating a new provider subscription. Per-subscription
-  status replay belongs in a future router/RAII handle layer.
+  it is not tied to creating a new provider subscription.
 - `MarketDataHub` protects its containers and invokes callbacks outside its
   mutex, but strict replay/live ordering is guaranteed only when add/publish
   calls are marshalled through one owner loop, such as platform `process()`.
@@ -228,18 +227,28 @@ Contract rules:
   into the same bar batch pipeline. It marks payload bars as
   `HISTORICAL` and, for gap recovery, `BACKFILL`.
 
-Future market-data routing work:
+`MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 
-- Add a `MarketDataRouter` layer that binds provider subscriptions to concrete
-  subscribers and replays cached status for newly created subscription handles.
-- Add a move-only RAII `SubscriptionHandle` that unsubscribes automatically and
-  delegates to the router by `SubscriptionId`.
-- Have the router fill concrete subscription context in routed status/data
-  events so a subscriber can distinguish which logical subscription produced an
-  update.
-- Consider `MarketDataSubscriberBase` as convenience sugar for bots that want to
-  subscribe from inside their own methods while keeping `IMarketDataSubscriber`
-  as a pure receiving interface.
+- `subscribe_ticks()` and `subscribe_bars()` bind one weak subscriber to one
+  provider subscription and return a move-only `MarketDataRouterSubscription`.
+- The RAII handle has a stable router-local numeric ID. Its
+  `provider_subscription()` descriptor becomes valid after provider acceptance;
+  destroying, resetting, or explicitly unsubscribing the handle releases the
+  route.
+- Routed tick/bar batches and statuses carry that concrete provider subscription
+  descriptor, so one bot can distinguish its EURUSD and BTCUSDT routes without
+  parsing symbols as logical IDs.
+- Stream-level statuses are cached while a provider is bound. When a matching
+  late route is accepted, the latest status is replayed with the new concrete
+  subscription descriptor. Tick and bar payloads are never replayed.
+- Router and hub both own the provider's single live-data callback slots and
+  therefore must not be bound to the same provider at the same time.
+- Subscribers remain weakly owned. Providers must outlive the router and any
+  pending provider operations.
+
+Future market-data routing work: add `MarketDataSubscriberBase` as convenience
+sugar for bots that want to subscribe from inside their own methods while
+keeping `IMarketDataSubscriber` as the pure receiving interface.
 
 ## Trading Condition Subscriber Contract
 

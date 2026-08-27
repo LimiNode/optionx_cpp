@@ -182,6 +182,14 @@ jobs:
       - name: Run market_data_hub_test
         run: ./build-linux/market_data_hub_test --gtest_brief=1
 
+      - name: Build market_data_router_test and example
+        run: cmake --build build-linux --target market_data_router_test market_data_router_example -j
+
+      - name: Run market_data_router_test and example
+        run: |
+          ./build-linux/market_data_router_test --gtest_brief=1
+          ./build-linux/market_data_router_example
+
       - name: Build account_info_hub_test
         run: cmake --build build-linux --target account_info_hub_test -j
 
