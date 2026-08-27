@@ -34,6 +34,9 @@ Currently maintained examples:
 - `market_data_router_example.cpp` demonstrates provider registration by stable
   numeric ID and aliases, subscription-scoped routing, concrete subscription
   context, late `READY` replay and RAII unsubscription.
+- `market_data_subscriber_base_example.cpp` demonstrates a bot subscribing from
+  its own methods by stable provider ID and alias while the base owns route
+  handles and releases them automatically.
 - `trading_condition_hub_example.cpp` demonstrates routing payout, session and
   expiration-limit changes through `TradingConditionHub`, plus querying the
   merged current condition snapshot for a concrete symbol.

@@ -196,6 +196,46 @@ Router, and a registered provider must outlive its registration. Alias lookup
 happens only while creating a route; live delivery continues through numeric
 provider and subscription IDs.
 
+`MarketDataSubscriberBase` adds protected self-subscription helpers for bots
+that should own their routes internally:
+
+```cpp
+class MyBot : public market_data::MarketDataSubscriberBase {
+public:
+    MyBot(
+        market_data::MarketDataRouter& router,
+        market_data::MarketDataProviderId provider_id)
+        : MarketDataSubscriberBase(router), provider_id(provider_id) {}
+
+    void start() {
+        eur_route = subscribe_ticks(
+            provider_id,
+            market_data::TickSubscriptionRequest("EURUSD"));
+        btc_route = subscribe_ticks(
+            "intrade",
+            market_data::TickSubscriptionRequest("BTCUSDT"));
+    }
+
+private:
+    market_data::MarketDataProviderId provider_id;
+    market_data::RoutedSubscriptionId eur_route;
+    market_data::RoutedSubscriptionId btc_route;
+};
+
+const market_data::MarketDataProviderId intrade_id{1001};
+router.register_provider(intrade_id, platform, {"intrade"});
+auto bot = std::make_shared<MyBot>(router, intrade_id);
+bot->start();
+```
+
+The base stores Router handles, returns strong route IDs, and unsubscribes on
+destruction. A default-constructed route ID is invalid and can be checked with
+`valid()` or in a boolean context; no public invalid-sentinel constant is
+required. The object must already be owned by `std::shared_ptr` when a subscribe
+helper is called. Direct provider-reference overloads remain available for
+low-level composition, while stable IDs and aliases let the bot avoid depending
+on a concrete provider type.
+
 ## Concrete Platforms
 
 ### `platforms::IntradeBarPlatform`

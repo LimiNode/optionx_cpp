@@ -148,7 +148,8 @@ Market-data APIs are split into DTO/data types and a provider role:
   `BarSubscriptionRequest`, `MarketDataSubscriptionBatch`,
   `MarketDataSubscriptionHandle`, `MarketDataSubscriptionResult`,
   `MarketDataBatch<T>`, `MarketDataHub`, `MarketDataRouter`,
-  `IMarketDataSubscriber`, and `MarketDataContinuityService`.
+  `MarketDataSubscriberBase`, `IMarketDataSubscriber`, and
+  `MarketDataContinuityService`.
 
 Contract rules:
 
@@ -264,9 +265,16 @@ Contract rules:
   `registered_provider_id()` maps it back to the stable application ID while the
   provider remains registered; aliases are not copied into live batches.
 
-Future market-data routing work: add `MarketDataSubscriberBase` as convenience
-sugar for bots that want to subscribe from inside their own methods while
-keeping `IMarketDataSubscriber` as the pure receiving interface.
+`MarketDataSubscriberBase` is optional convenience sugar over Router. A bot can
+derive from it, call protected `subscribe_ticks()`/`subscribe_bars()` from its
+own methods, and let the base keep move-only handles alive. The base returns
+strong Router IDs, supports direct provider references plus registered provider
+IDs and aliases, explicit one/all unsubscribe, and releases all stored routes
+during destruction. Default-constructed route IDs represent failure and expose
+`valid()`/boolean checks instead of a public sentinel constant. Derived objects
+must be created through `std::shared_ptr` before subscribing;
+`IMarketDataSubscriber` remains the pure receiving interface for applications
+that prefer explicit ownership elsewhere.
 
 ## Trading Condition Subscriber Contract
 
