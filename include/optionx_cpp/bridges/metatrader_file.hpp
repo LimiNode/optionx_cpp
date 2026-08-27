@@ -33,11 +33,11 @@
 #include <utility>
 #include <vector>
 
-#include "data/bridge.hpp"
-#include "data/trading.hpp"
-#include "utils/Base36.hpp"
-#include "utils/metatrader_paths.hpp"
-#include "utils/tasks.hpp"
+#include <optionx_cpp/data/bridge.hpp>
+#include <optionx_cpp/data/trading.hpp>
+#include <optionx_cpp/utils/Base36.hpp>
+#include <optionx_cpp/utils/metatrader_paths.hpp>
+#include <optionx_cpp/utils/tasks.hpp>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX

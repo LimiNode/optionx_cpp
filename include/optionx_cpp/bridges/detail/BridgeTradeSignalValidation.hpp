@@ -5,7 +5,7 @@
 /// \file BridgeTradeSignalValidation.hpp
 /// \brief Defines shared validation helpers for executable bridge trade signals.
 
-#include "data/trading.hpp"
+#include <optionx_cpp/data/trading.hpp>
 
 #include <cmath>
 #include <stdexcept>

@@ -28,7 +28,7 @@
 #include <unordered_map>
 
 #include "BaseBridge.hpp"
-#include "utils/unicode_case.hpp"
+#include <optionx_cpp/utils/unicode_case.hpp>
 
 #include <server_http.hpp>
 

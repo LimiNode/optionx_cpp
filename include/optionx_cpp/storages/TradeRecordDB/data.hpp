@@ -7,7 +7,7 @@
 
 #include <type_traits>
 
-#include "data/trading.hpp"
+#include <optionx_cpp/data/trading.hpp>
 #include "enums.hpp"
 
 namespace optionx::storage {

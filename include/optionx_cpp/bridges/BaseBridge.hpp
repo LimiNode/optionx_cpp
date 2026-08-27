@@ -5,8 +5,8 @@
 /// \file BaseBridge.hpp
 /// \brief Declares the BaseBridge abstract class, serving as a foundation for bridge implementations.
 
-#include "data/account.hpp"
-#include "data/bridge.hpp"
+#include <optionx_cpp/data/account.hpp>
+#include <optionx_cpp/data/bridge.hpp>
 
 #include <functional>
 #include <memory>

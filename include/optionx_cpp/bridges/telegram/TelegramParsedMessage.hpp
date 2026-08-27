@@ -5,7 +5,7 @@
 /// \file TelegramParsedMessage.hpp
 /// \brief Parser result DTOs for Telegram signals and outcomes.
 
-#include "bridges/telegram/TelegramRawMessage.hpp"
+#include "TelegramRawMessage.hpp"
 
 #include <cstddef>
 #include <cstdint>

@@ -28,8 +28,8 @@
 
 #include <server_http.hpp>
 
-#include "data/trading.hpp"
-#include "utils/metatrader_paths.hpp"
+#include <optionx_cpp/data/trading.hpp>
+#include <optionx_cpp/utils/metatrader_paths.hpp>
 
 #include "BaseBridge.hpp"
 #include "detail/BridgeTradeSignalValidation.hpp"

@@ -5,7 +5,7 @@
 /// \file bridges/telegram/detail/TelegramWorkerMessageSource.hpp
 /// \brief Adapter from a tg-client-stdio-style worker client to Telegram bridge input.
 
-#include "bridges/telegram/TelegramSignalBridge.hpp"
+#include <optionx_cpp/bridges/telegram/TelegramSignalBridge.hpp>
 
 #include <functional>
 #include <string>

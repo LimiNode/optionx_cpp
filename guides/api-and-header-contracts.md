@@ -23,19 +23,24 @@
 #include <optionx_cpp/bridges/trading_view.hpp>
 ```
 
-Внутри самого дерева `include/optionx_cpp` используется локальный путь от
-`include/optionx_cpp`, без публичного префикса `optionx_cpp/`:
+Внутри одной header family используется путь, реально относительный к
+включающему файлу. Cross-domain dependency из вложенного header использует тот
+же установленный префикс, что и внешний consumer:
 
 ```cpp
-#include "data/trading.hpp"
-#include "utils/response_parse_utils.hpp"
-#include "storages/TradeRecordDB/TradeRecordFilterMatcher.hpp"
+#include "telegram/TelegramRawMessage.hpp"
+#include "detail/Parser.hpp"
+#include <optionx_cpp/data/trading.hpp>
+#include <optionx_cpp/utils/response_parse_utils.hpp>
 ```
 
 Правила:
 
 - Не используй `../` в `#include`.
-- Не используй `"optionx_cpp/..."` внутри `include/optionx_cpp`.
+- Не используй quoted `"optionx_cpp/..."`; cross-domain includes используют
+  angle brackets и установленный префикс `<optionx_cpp/...>`.
+- Не полагайся на `include/optionx_cpp` как на дополнительный include-root:
+  consumer contract должен работать только с корнем `include`.
 - Public aggregate headers (`optionx.hpp`, `data.hpp`, `market_data.hpp`,
   `platforms.hpp`, `storages.hpp`, `components.hpp`, `utils.hpp`,
   `bridges.hpp`) задают публичные точки подключения.
@@ -61,9 +66,9 @@
   are an exception: tests and examples must include the bridge umbrella header
   first.
 
-Текущая CMake-сборка tests/examples добавляет два include-root:
-`include` и `include/optionx_cpp`. Первый нужен для внешнего стиля
-`<optionx_cpp/...>`, второй - для внутренних локальных путей.
+Текущая CMake-сборка tests/examples добавляет один project include-root:
+`include`. Он совпадает с consumer contract `<optionx_cpp/...>` и не маскирует
+неверные cross-domain quoted includes во вложенных headers.
 
 ## Header-Only Ownership
 

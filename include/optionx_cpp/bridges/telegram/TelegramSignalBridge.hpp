@@ -5,10 +5,10 @@
 /// \file TelegramSignalBridge.hpp
 /// \brief Converts Telegram message events into OptionX TradeSignal objects.
 
-#include "bridges/BaseBridge.hpp"
-#include "bridges/detail/BridgeTradeSignalValidation.hpp"
-#include "bridges/telegram/TelegramSignalBridgeConfig.hpp"
-#include "data/trading/trade_state_traits.hpp"
+#include <optionx_cpp/bridges/BaseBridge.hpp>
+#include <optionx_cpp/bridges/detail/BridgeTradeSignalValidation.hpp>
+#include "TelegramSignalBridgeConfig.hpp"
+#include <optionx_cpp/data/trading/trade_state_traits.hpp>
 
 #include <algorithm>
 #include <chrono>

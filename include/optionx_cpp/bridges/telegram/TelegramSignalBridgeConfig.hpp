@@ -5,8 +5,8 @@
 /// \file TelegramSignalBridgeConfig.hpp
 /// \brief Configuration for the Telegram signal bridge.
 
-#include "data/bridge.hpp"
-#include "bridges/telegram/detail/TelegramSignalParser.hpp"
+#include <optionx_cpp/data/bridge.hpp>
+#include "detail/TelegramSignalParser.hpp"
 
 #include <cmath>
 #include <cstdint>
