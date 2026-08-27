@@ -1461,33 +1461,69 @@ namespace optionx::platforms::intrade_bar {
         return sequence;
     }
 
-    /// \brief Parses a BTCUSDT tick message from the WebSocket and updates the provided SingleTick structure.
+    /// \brief Parses the Intrade `/price_now` response into source tick batches.
+    /// \param content JSON object keyed by broker symbol.
+    /// \param received_ms Local receipt timestamp in milliseconds.
+    /// \return Tick batches grouped by normalized symbol and precision metadata.
+    inline std::vector<events::TickUpdateBatch> parse_price_snapshot_response(
+            const std::string& content,
+            std::uint64_t received_ms) {
+        const auto j = nlohmann::json::parse(content);
+        std::vector<events::TickUpdateBatch> batches;
+        batches.reserve(j.size());
+
+        for (const auto& el : j.items()) {
+            const auto symbol = normalize_symbol_name(el.key());
+            Tick tick;
+            tick.ask = el.value().at("ask").get<double>();
+            tick.bid = el.value().at("bid").get<double>();
+            tick.time_ms = time_shield::sec_to_ms(
+                static_cast<std::uint64_t>(
+                    detail::read_json_int64(el.value().at("Updates"), "Updates")));
+            tick.received_ms = received_ms;
+            tick.set_flag(MarketDataFlags::INITIALIZED);
+            tick.set_flag(MarketDataFlags::REALTIME);
+            batches.push_back(events::PriceUpdateEvent::make_tick_batch(
+                std::move(tick),
+                symbol,
+                to_str(PlatformType::INTRADE_BAR),
+                price_digits_for_symbol(symbol),
+                0));
+        }
+
+        return batches;
+    }
+
+    /// \brief Parses a BTCUSDT tick message into a source batch.
     /// \param message The JSON-formatted string containing the tick data.
-    /// \param tick_data Reference to the SingleTick structure to be updated.
+    /// \param batch Destination batch to fill.
     /// \return true if parsing is successful and the symbol matches BTCUSDT; false otherwise.
-    inline bool parse_btcusdt_tick(const std::string& message, SingleTick& tick_data) {
+    inline bool parse_btcusdt_tick(
+            const std::string& message,
+            events::TickUpdateBatch& batch) {
         auto j = nlohmann::json::parse(message);
 
         if (j.contains("data")) {
             const auto& j_data = j["data"];
             if (j_data.value("s", "") != "BTCUSDT") return false;
             if (!j_data.contains("T")) return false;
-            tick_data.symbol = "BTCUSDT";
-            tick_data.provider = to_str(PlatformType::INTRADE_BAR);
-            tick_data.price_digits = 2;
-            tick_data.volume_digits = 5;
-            tick_data.tick.flags = 0;
-            tick_data.tick.ask = 0.0;
-            tick_data.tick.bid = 0.0;
-            tick_data.tick.last = std::stod(j_data.value("p", "0.0"));
-            tick_data.tick.volume = std::stod(j_data.value("q", "0.0"));
-            tick_data.tick.time_ms = static_cast<std::uint64_t>(
+
+            Tick tick;
+            tick.last = std::stod(j_data.value("p", "0.0"));
+            tick.volume = std::stod(j_data.value("q", "0.0"));
+            tick.time_ms = static_cast<std::uint64_t>(
                 detail::read_json_int64(j_data.at("T"), "T"));
-            tick_data.tick.received_ms = OPTIONX_TIMESTAMP_MS;
-            tick_data.tick.set_flag(TickUpdateFlags::LAST_UPDATED);
-            tick_data.tick.set_flag(TickUpdateFlags::VOLUME_UPDATED);
-            tick_data.tick.set_flag(MarketDataFlags::INITIALIZED);
-            tick_data.tick.set_flag(MarketDataFlags::REALTIME);
+            tick.received_ms = OPTIONX_TIMESTAMP_MS;
+            tick.set_flag(TickUpdateFlags::LAST_UPDATED);
+            tick.set_flag(TickUpdateFlags::VOLUME_UPDATED);
+            tick.set_flag(MarketDataFlags::INITIALIZED);
+            tick.set_flag(MarketDataFlags::REALTIME);
+            batch = events::PriceUpdateEvent::make_tick_batch(
+                std::move(tick),
+                "BTCUSDT",
+                to_str(PlatformType::INTRADE_BAR),
+                2,
+                5);
             return true;
         }
 
@@ -1496,9 +1532,11 @@ namespace optionx::platforms::intrade_bar {
 
     /// \brief Parses an Intrade `/fxconnect` tick message.
     /// \param message JSON-formatted message received from the FX websocket.
-    /// \param tick_data Destination tick object to fill.
+    /// \param batch Destination source batch to fill.
     /// \return True when the payload contains a supported FX symbol and bid/ask prices.
-    inline bool parse_fxconnect_tick(const std::string& message, SingleTick& tick_data) {
+    inline bool parse_fxconnect_tick(
+            const std::string& message,
+            events::TickUpdateBatch& batch) {
         const auto j = nlohmann::json::parse(message);
 
         if (!j.contains("symbol") || !j.contains("ask") || !j.contains("bid")) {
@@ -1510,24 +1548,24 @@ namespace optionx::platforms::intrade_bar {
             return false;
         }
 
-        tick_data.symbol = normalized_symbol;
-        tick_data.provider = to_str(PlatformType::INTRADE_BAR);
-        tick_data.price_digits = price_digits_for_symbol(normalized_symbol);
-        tick_data.volume_digits = 0;
-        tick_data.tick.flags = 0;
-        tick_data.tick.ask = detail::read_json_double(j.at("ask"), "ask");
-        tick_data.tick.bid = detail::read_json_double(j.at("bid"), "bid");
-        tick_data.tick.last = 0.0;
-        tick_data.tick.volume = 0.0;
-        tick_data.tick.time_ms = j.contains("Updates")
+        Tick tick;
+        tick.ask = detail::read_json_double(j.at("ask"), "ask");
+        tick.bid = detail::read_json_double(j.at("bid"), "bid");
+        tick.time_ms = j.contains("Updates")
             ? static_cast<std::uint64_t>(
                 detail::read_json_int64(j.at("Updates"), "Updates")) * time_shield::MS_PER_SEC
             : 0;
-        tick_data.tick.received_ms = OPTIONX_TIMESTAMP_MS;
-        tick_data.tick.set_flag(TickUpdateFlags::ASK_UPDATED);
-        tick_data.tick.set_flag(TickUpdateFlags::BID_UPDATED);
-        tick_data.tick.set_flag(MarketDataFlags::INITIALIZED);
-        tick_data.tick.set_flag(MarketDataFlags::REALTIME);
+        tick.received_ms = OPTIONX_TIMESTAMP_MS;
+        tick.set_flag(TickUpdateFlags::ASK_UPDATED);
+        tick.set_flag(TickUpdateFlags::BID_UPDATED);
+        tick.set_flag(MarketDataFlags::INITIALIZED);
+        tick.set_flag(MarketDataFlags::REALTIME);
+        batch = events::PriceUpdateEvent::make_tick_batch(
+            std::move(tick),
+            normalized_symbol,
+            to_str(PlatformType::INTRADE_BAR),
+            price_digits_for_symbol(normalized_symbol),
+            0);
         return true;
     }
 

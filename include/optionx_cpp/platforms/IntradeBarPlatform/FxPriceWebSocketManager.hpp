@@ -443,17 +443,12 @@ namespace optionx::platforms::intrade_bar {
             const std::shared_ptr<FxStreamState>& stream,
             const std::string& message) {
         try {
-            SingleTick tick;
-            if (!parse_fxconnect_tick(message, tick)) return;
-            if (tick.symbol != stream->symbol) return;
+            events::TickUpdateBatch batch;
+            if (!parse_fxconnect_tick(message, batch)) return;
+            if (batch.symbol != stream->symbol) return;
 
             std::vector<events::TickUpdateBatch> batches;
-            batches.push_back(events::PriceUpdateEvent::make_tick_batch(
-                tick.tick,
-                tick.symbol,
-                tick.provider,
-                tick.price_digits,
-                tick.volume_digits));
+            batches.push_back(std::move(batch));
             notify_async(std::make_unique<events::PriceUpdateEvent>(
                 std::move(batches),
                 MarketDataUpdateSource::WEBSOCKET));

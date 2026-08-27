@@ -1380,66 +1380,107 @@ TEST(IntradeBarSymbols, FormatsFxConnectSymbols) {
     EXPECT_EQ(make_fxconnect_symbol(""), "");
 }
 
+TEST(IntradeBarApiResponses, ParsesPriceSnapshotIntoSourceBatches) {
+    const std::string content =
+        R"({"EUR/USD":{"Updates":1783028728,"ask":1.17234,"bid":1.17231},"BTC/USD":{"Updates":1783028729,"ask":61521.35,"bid":61521.34}})";
+    constexpr std::uint64_t received_ms = 1783028728123ULL;
+
+    const auto batches = parse_price_snapshot_response(content, received_ms);
+    ASSERT_EQ(batches.size(), 2u);
+
+    const auto fx_it = std::find_if(
+        batches.begin(),
+        batches.end(),
+        [](const auto& batch) { return batch.symbol == "EURUSD"; });
+    ASSERT_NE(fx_it, batches.end());
+    EXPECT_EQ(fx_it->provider, to_str(PlatformType::INTRADE_BAR));
+    EXPECT_EQ(fx_it->price_digits, 5u);
+    EXPECT_EQ(fx_it->volume_digits, 0u);
+    ASSERT_EQ(fx_it->items.size(), 1u);
+    EXPECT_DOUBLE_EQ(fx_it->items[0].ask, 1.17234);
+    EXPECT_DOUBLE_EQ(fx_it->items[0].bid, 1.17231);
+    EXPECT_EQ(fx_it->items[0].time_ms, 1783028728000ULL);
+    EXPECT_EQ(fx_it->items[0].received_ms, received_ms);
+    EXPECT_TRUE(fx_it->items[0].has_flag(MarketDataFlags::INITIALIZED));
+    EXPECT_TRUE(fx_it->items[0].has_flag(MarketDataFlags::REALTIME));
+    EXPECT_FALSE(fx_it->items[0].has_flag(TickUpdateFlags::ASK_UPDATED));
+    EXPECT_FALSE(fx_it->items[0].has_flag(TickUpdateFlags::BID_UPDATED));
+
+    const auto btc_it = std::find_if(
+        batches.begin(),
+        batches.end(),
+        [](const auto& batch) { return batch.symbol == "BTCUSDT"; });
+    ASSERT_NE(btc_it, batches.end());
+    EXPECT_EQ(btc_it->price_digits, 2u);
+    ASSERT_EQ(btc_it->items.size(), 1u);
+    EXPECT_DOUBLE_EQ(btc_it->items[0].ask, 61521.35);
+    EXPECT_DOUBLE_EQ(btc_it->items[0].bid, 61521.34);
+}
+
 TEST(IntradeBarApiResponses, ParsesFxConnectTickMessage) {
     const std::string message =
         R"({"Updates":1783028728,"ask":0.56971,"bid":0.5693,"symbol":"NZD\/USD"})";
 
-    SingleTick tick;
-    ASSERT_TRUE(parse_fxconnect_tick(message, tick));
+    events::TickUpdateBatch batch;
+    ASSERT_TRUE(parse_fxconnect_tick(message, batch));
 
-    EXPECT_EQ(tick.symbol, "NZDUSD");
-    EXPECT_EQ(tick.provider, to_str(PlatformType::INTRADE_BAR));
-    EXPECT_EQ(tick.price_digits, 5u);
-    EXPECT_EQ(tick.volume_digits, 0u);
-    EXPECT_DOUBLE_EQ(tick.tick.ask, 0.56971);
-    EXPECT_DOUBLE_EQ(tick.tick.bid, 0.5693);
-    EXPECT_DOUBLE_EQ(tick.tick.volume, 0.0);
-    EXPECT_EQ(tick.tick.time_ms, 1783028728000ULL);
-    EXPECT_TRUE(tick.tick.has_flag(TickUpdateFlags::ASK_UPDATED));
-    EXPECT_TRUE(tick.tick.has_flag(TickUpdateFlags::BID_UPDATED));
-    EXPECT_FALSE(tick.tick.has_flag(TickUpdateFlags::VOLUME_UPDATED));
-    EXPECT_TRUE(tick.tick.has_flag(MarketDataFlags::INITIALIZED));
-    EXPECT_TRUE(tick.tick.has_flag(MarketDataFlags::REALTIME));
+    EXPECT_EQ(batch.symbol, "NZDUSD");
+    EXPECT_EQ(batch.provider, to_str(PlatformType::INTRADE_BAR));
+    EXPECT_EQ(batch.price_digits, 5u);
+    EXPECT_EQ(batch.volume_digits, 0u);
+    ASSERT_EQ(batch.items.size(), 1u);
+    const auto& tick = batch.items[0];
+    EXPECT_DOUBLE_EQ(tick.ask, 0.56971);
+    EXPECT_DOUBLE_EQ(tick.bid, 0.5693);
+    EXPECT_DOUBLE_EQ(tick.volume, 0.0);
+    EXPECT_EQ(tick.time_ms, 1783028728000ULL);
+    EXPECT_TRUE(tick.has_flag(TickUpdateFlags::ASK_UPDATED));
+    EXPECT_TRUE(tick.has_flag(TickUpdateFlags::BID_UPDATED));
+    EXPECT_FALSE(tick.has_flag(TickUpdateFlags::VOLUME_UPDATED));
+    EXPECT_TRUE(tick.has_flag(MarketDataFlags::INITIALIZED));
+    EXPECT_TRUE(tick.has_flag(MarketDataFlags::REALTIME));
 }
 
 TEST(IntradeBarApiResponses, RejectsFxConnectBtcTickMessage) {
     const std::string message =
         R"({"Updates":1783028728,"ask":61521.35,"bid":61521.34,"symbol":"BTC\/USD"})";
 
-    SingleTick tick;
-    EXPECT_FALSE(parse_fxconnect_tick(message, tick));
+    events::TickUpdateBatch batch;
+    EXPECT_FALSE(parse_fxconnect_tick(message, batch));
 }
 
 TEST(IntradeBarApiResponses, RejectsFxConnectUnsupportedTickMessage) {
     const std::string message =
         R"({"Updates":1783028728,"ask":2300.10,"bid":2299.90,"symbol":"XAU\/USD"})";
 
-    SingleTick tick;
-    EXPECT_FALSE(parse_fxconnect_tick(message, tick));
+    events::TickUpdateBatch batch;
+    EXPECT_FALSE(parse_fxconnect_tick(message, batch));
 }
 
 TEST(IntradeBarApiResponses, ParsesBtcusdtWebSocketTickWithEpochMilliseconds) {
     const std::string message =
         R"({"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":1783028778697,"s":"BTCUSDT","a":4005288360,"p":"61521.34000000","q":"0.00017000","f":6473852503,"l":6473852503,"T":1783028778697,"m":false,"M":true}})";
 
-    SingleTick tick;
-    ASSERT_TRUE(parse_btcusdt_tick(message, tick));
+    events::TickUpdateBatch batch;
+    ASSERT_TRUE(parse_btcusdt_tick(message, batch));
 
-    EXPECT_EQ(tick.symbol, "BTCUSDT");
-    EXPECT_EQ(tick.provider, to_str(PlatformType::INTRADE_BAR));
-    EXPECT_EQ(tick.price_digits, 2u);
-    EXPECT_EQ(tick.volume_digits, 5u);
-    EXPECT_DOUBLE_EQ(tick.tick.ask, 0.0);
-    EXPECT_DOUBLE_EQ(tick.tick.bid, 0.0);
-    EXPECT_DOUBLE_EQ(tick.tick.last, 61521.34);
-    EXPECT_DOUBLE_EQ(tick.tick.volume, 0.00017);
-    EXPECT_EQ(tick.tick.time_ms, 1783028778697ULL);
-    EXPECT_TRUE(tick.tick.has_flag(TickUpdateFlags::LAST_UPDATED));
-    EXPECT_FALSE(tick.tick.has_flag(TickUpdateFlags::ASK_UPDATED));
-    EXPECT_FALSE(tick.tick.has_flag(TickUpdateFlags::BID_UPDATED));
-    EXPECT_TRUE(tick.tick.has_flag(TickUpdateFlags::VOLUME_UPDATED));
-    EXPECT_TRUE(tick.tick.has_flag(MarketDataFlags::INITIALIZED));
-    EXPECT_TRUE(tick.tick.has_flag(MarketDataFlags::REALTIME));
+    EXPECT_EQ(batch.symbol, "BTCUSDT");
+    EXPECT_EQ(batch.provider, to_str(PlatformType::INTRADE_BAR));
+    EXPECT_EQ(batch.price_digits, 2u);
+    EXPECT_EQ(batch.volume_digits, 5u);
+    ASSERT_EQ(batch.items.size(), 1u);
+    const auto& tick = batch.items[0];
+    EXPECT_DOUBLE_EQ(tick.ask, 0.0);
+    EXPECT_DOUBLE_EQ(tick.bid, 0.0);
+    EXPECT_DOUBLE_EQ(tick.last, 61521.34);
+    EXPECT_DOUBLE_EQ(tick.volume, 0.00017);
+    EXPECT_EQ(tick.time_ms, 1783028778697ULL);
+    EXPECT_TRUE(tick.has_flag(TickUpdateFlags::LAST_UPDATED));
+    EXPECT_FALSE(tick.has_flag(TickUpdateFlags::ASK_UPDATED));
+    EXPECT_FALSE(tick.has_flag(TickUpdateFlags::BID_UPDATED));
+    EXPECT_TRUE(tick.has_flag(TickUpdateFlags::VOLUME_UPDATED));
+    EXPECT_TRUE(tick.has_flag(MarketDataFlags::INITIALIZED));
+    EXPECT_TRUE(tick.has_flag(MarketDataFlags::REALTIME));
 }
 
 TEST(IntradeBarApiResponses, BtcWebSocketSubscriptionReportsStatusAndRoutesTick) {
