@@ -960,6 +960,7 @@ if(OPTIONX_BUILD_TESTS)
         telegram_signal_parser_test
         telegram_signal_bridge_test
         telegram_worker_source_test
+        trading_view_bridge_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
@@ -977,6 +978,7 @@ if(OPTIONX_BUILD_TESTS)
         bot_binary_bridge_test
         bridge_umbrella_include_test
         protocol_v1_bridge_test
+        trading_view_bridge_test
     )
 
     file(GLOB_RECURSE PROJECT_HEADERS

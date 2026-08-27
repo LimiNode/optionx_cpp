@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <ctime>
 #include <cstdint>
 #include <iomanip>
@@ -27,7 +28,7 @@
 #include <unordered_map>
 
 #include "BaseBridge.hpp"
-#include <optionx_cpp/utils/unicode_case.hpp>
+#include "utils/unicode_case.hpp"
 
 #include <server_http.hpp>
 

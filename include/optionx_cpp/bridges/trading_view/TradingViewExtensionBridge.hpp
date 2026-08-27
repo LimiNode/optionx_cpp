@@ -33,6 +33,7 @@ namespace optionx::bridges::tradingview {
 
         struct RuntimeState {
             std::mutex mutex;
+            std::condition_variable lifecycle_cv;
             bridge_status_callback_t status_callback;
             BaseBridge::trade_signal_callback_t trade_signal_callback;
             BaseBridge::signal_report_callback_t signal_report_callback;
@@ -41,7 +42,45 @@ namespace optionx::bridges::tradingview {
             std::thread server_thread;
             std::deque<std::string> dedupe_order;
             std::unordered_set<std::string> dedupe_keys;
+            std::size_t active_http_requests = 0;
             bool running = false;
+            bool stopping = false;
+            bool stop_requested = false;
+            bool pending_callback_shutdown = false;
+        };
+
+        inline static thread_local const RuntimeState* s_callback_state = nullptr;
+        inline static thread_local std::size_t s_callback_depth = 0;
+
+        class CallbackScope final {
+        public:
+            explicit CallbackScope(std::shared_ptr<RuntimeState> state)
+                : m_state(std::move(state)),
+                  m_identity(m_state.get()),
+                  m_previous_state(s_callback_state),
+                  m_previous_depth(s_callback_depth) {
+                if (m_identity) {
+                    s_callback_state = m_identity;
+                    s_callback_depth =
+                        m_previous_state == m_identity
+                        ? m_previous_depth + 1
+                        : 1;
+                }
+            }
+
+            ~CallbackScope() {
+                if (!m_identity) {
+                    return;
+                }
+                s_callback_state = m_previous_state;
+                s_callback_depth = m_previous_depth;
+            }
+
+        private:
+            std::shared_ptr<RuntimeState> m_state;
+            const RuntimeState* m_identity = nullptr;
+            const RuntimeState* m_previous_state = nullptr;
+            std::size_t m_previous_depth = 0;
         };
 
     public:
@@ -115,12 +154,33 @@ namespace optionx::bridges::tradingview {
                     "TradingView extension bridge requires a signal ID allocator.");
                 return;
             }
+            if (!get_trade_signal_callback()) {
+                notify_status(
+                    BridgeStatus::SERVER_START_FAILED,
+                    {},
+                    "TradingView extension bridge requires a trade signal callback.");
+                return;
+            }
 
             {
-                std::lock_guard<std::mutex> lock(m_state->mutex);
+                std::unique_lock<std::mutex> lock(m_state->mutex);
+                if (m_state->stopping) {
+                    if (is_inside_callback(m_state.get())) {
+                        return;
+                    }
+                    m_state->lifecycle_cv.wait(
+                        lock,
+                        [state = m_state]() { return !state->stopping; });
+                }
                 if (m_state->running) {
                     return;
                 }
+                m_state->running = true;
+                m_state->stop_requested = false;
+                m_state->pending_callback_shutdown = false;
+                m_state->active_http_requests = 0;
+                m_state->dedupe_order.clear();
+                m_state->dedupe_keys.clear();
             }
 
             auto server = std::make_shared<HttpServer>();
@@ -131,10 +191,10 @@ namespace optionx::bridges::tradingview {
 
             {
                 std::lock_guard<std::mutex> lock(m_state->mutex);
+                if (!m_state->running) {
+                    return;
+                }
                 m_state->server = server;
-                m_state->dedupe_order.clear();
-                m_state->dedupe_keys.clear();
-                m_state->running = true;
                 m_state->server_thread = std::thread([state = m_state, server]() {
                     try {
                         server->start([state](unsigned short port) {
@@ -144,11 +204,11 @@ namespace optionx::bridges::tradingview {
                                 std::to_string(port));
                         });
                     } catch (const std::exception& ex) {
-                        {
-                            std::lock_guard<std::mutex> lock(state->mutex);
-                            state->running = false;
-                        }
-                        notify_status(state, BridgeStatus::SERVER_START_FAILED, {}, ex.what());
+                        finalize_failed_start(state, ex.what());
+                    } catch (...) {
+                        finalize_failed_start(
+                            state,
+                            "Unknown TradingView HTTP server start failure.");
                     }
                 });
             }
@@ -156,35 +216,7 @@ namespace optionx::bridges::tradingview {
 
         /// \brief Stops the HTTP server and joins the server thread.
         void shutdown() override {
-            std::shared_ptr<HttpServer> server;
-            std::thread server_thread;
-            bool was_running = false;
-            {
-                std::lock_guard<std::mutex> lock(m_state->mutex);
-                was_running =
-                    m_state->running ||
-                    static_cast<bool>(m_state->server) ||
-                    m_state->server_thread.joinable();
-                server = m_state->server;
-                m_state->server.reset();
-                m_state->running = false;
-                if (m_state->server_thread.joinable()) {
-                    server_thread = std::move(m_state->server_thread);
-                }
-            }
-
-            if (server) {
-                server->stop();
-            }
-            if (server_thread.joinable() &&
-                server_thread.get_id() != std::this_thread::get_id()) {
-                server_thread.join();
-            } else if (server_thread.joinable()) {
-                server_thread.detach();
-            }
-            if (was_running) {
-                notify_status(BridgeStatus::SERVER_STOPPED);
-            }
+            shutdown_impl();
         }
 
         /// \brief Returns the currently bound HTTP port.
@@ -216,6 +248,11 @@ namespace optionx::bridges::tradingview {
             return m_state->signal_id_allocator;
         }
 
+        trade_signal_callback_t get_trade_signal_callback() const {
+            std::lock_guard<std::mutex> lock(m_state->mutex);
+            return m_state->trade_signal_callback;
+        }
+
         void notify_status(
                 BridgeStatus status,
                 std::string connection_id = {},
@@ -234,10 +271,14 @@ namespace optionx::bridges::tradingview {
                 callback = state->status_callback;
             }
             if (callback) {
-                callback(BridgeStatusUpdate(
-                    status,
-                    std::move(connection_id),
-                    std::move(message)));
+                try {
+                    CallbackScope scope(state);
+                    callback(BridgeStatusUpdate(
+                        status,
+                        std::move(connection_id),
+                        std::move(message)));
+                } catch (...) {
+                }
             }
         }
 
@@ -250,7 +291,217 @@ namespace optionx::bridges::tradingview {
                 callback = state->signal_report_callback;
             }
             if (callback) {
-                callback(report);
+                try {
+                    CallbackScope scope(state);
+                    callback(report);
+                } catch (...) {
+                }
+            }
+        }
+
+        static bool is_inside_callback(const RuntimeState* state) noexcept {
+            return state && s_callback_state == state && s_callback_depth > 0;
+        }
+
+        bool is_runtime_thread_locked() const noexcept {
+            return m_state->server_thread.joinable() &&
+                   m_state->server_thread.get_id() == std::this_thread::get_id();
+        }
+
+        static void finalize_runtime_stop(
+                const std::shared_ptr<RuntimeState>& state,
+                std::shared_ptr<HttpServer> server,
+                std::thread server_thread,
+                const bool notify_stopped) {
+            try {
+                if (server) {
+                    server->stop();
+                }
+                if (server_thread.joinable()) {
+                    if (server_thread.get_id() == std::this_thread::get_id()) {
+                        server_thread.detach();
+                    } else {
+                        server_thread.join();
+                    }
+                }
+            } catch (...) {
+                if (server_thread.joinable()) {
+                    server_thread.detach();
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->stopping = false;
+                state->stop_requested = false;
+                state->pending_callback_shutdown = false;
+                state->active_http_requests = 0;
+            }
+            state->lifecycle_cv.notify_all();
+            if (notify_stopped) {
+                notify_status(state, BridgeStatus::SERVER_STOPPED);
+            }
+        }
+
+        static void finalize_runtime_stop_async(
+                std::shared_ptr<RuntimeState> state,
+                std::shared_ptr<HttpServer> server,
+                std::thread server_thread,
+                const bool notify_stopped) {
+            std::thread(
+                [state = std::move(state),
+                 server = std::move(server),
+                 server_thread = std::move(server_thread),
+                 notify_stopped]() mutable {
+                    finalize_runtime_stop(
+                        state,
+                        std::move(server),
+                        std::move(server_thread),
+                        notify_stopped);
+                }).detach();
+        }
+
+        static void finalize_failed_start(
+                const std::shared_ptr<RuntimeState>& state,
+                std::string message) {
+            std::shared_ptr<HttpServer> server;
+            std::thread server_thread;
+            bool should_finalize = false;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                should_finalize =
+                    !state->stopping &&
+                    (state->running ||
+                     static_cast<bool>(state->server) ||
+                     state->server_thread.joinable());
+                if (should_finalize) {
+                    state->stopping = true;
+                    state->running = false;
+                    state->stop_requested = true;
+                    server = std::move(state->server);
+                    if (state->server_thread.joinable()) {
+                        server_thread = std::move(state->server_thread);
+                    }
+                }
+            }
+            state->lifecycle_cv.notify_all();
+            notify_status(
+                state,
+                BridgeStatus::SERVER_START_FAILED,
+                {},
+                std::move(message));
+            if (should_finalize) {
+                finalize_runtime_stop_async(
+                    state,
+                    std::move(server),
+                    std::move(server_thread),
+                    true);
+            }
+        }
+
+        static void drain_pending_callback_shutdown(
+                const std::shared_ptr<RuntimeState>& state) {
+            std::shared_ptr<HttpServer> server;
+            std::thread server_thread;
+            bool should_finalize = false;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                should_finalize =
+                    state->pending_callback_shutdown &&
+                    state->active_http_requests == 0 &&
+                    state->stopping;
+                if (should_finalize) {
+                    state->pending_callback_shutdown = false;
+                    server = std::move(state->server);
+                    if (state->server_thread.joinable()) {
+                        server_thread = std::move(state->server_thread);
+                    }
+                }
+            }
+            if (should_finalize) {
+                finalize_runtime_stop_async(
+                    state,
+                    std::move(server),
+                    std::move(server_thread),
+                    true);
+            }
+        }
+
+        void shutdown_impl() {
+            std::shared_ptr<HttpServer> server;
+            std::thread server_thread;
+            bool should_notify = false;
+            bool async_finalize = false;
+            {
+                std::unique_lock<std::mutex> lock(m_state->mutex);
+                if (m_state->stopping) {
+                    if (!is_runtime_thread_locked() &&
+                        !is_inside_callback(m_state.get())) {
+                        m_state->lifecycle_cv.wait(
+                            lock,
+                            [state = m_state]() { return !state->stopping; });
+                    }
+                    return;
+                }
+
+                should_notify =
+                    m_state->running ||
+                    static_cast<bool>(m_state->server) ||
+                    m_state->server_thread.joinable();
+                if (!should_notify) {
+                    return;
+                }
+
+                async_finalize =
+                    is_runtime_thread_locked() || is_inside_callback(m_state.get());
+                m_state->stopping = true;
+                m_state->running = false;
+                m_state->stop_requested = true;
+                m_state->pending_callback_shutdown = async_finalize;
+                if (!async_finalize) {
+                    server = std::move(m_state->server);
+                    if (m_state->server_thread.joinable()) {
+                        server_thread = std::move(m_state->server_thread);
+                    }
+                }
+            }
+            m_state->lifecycle_cv.notify_all();
+
+            if (async_finalize) {
+                drain_pending_callback_shutdown(m_state);
+                return;
+            }
+            finalize_runtime_stop(
+                m_state,
+                std::move(server),
+                std::move(server_thread),
+                should_notify);
+        }
+
+        static bool begin_http_request(
+                const std::shared_ptr<RuntimeState>& state) {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->running || state->stopping || state->stop_requested) {
+                return false;
+            }
+            ++state->active_http_requests;
+            return true;
+        }
+
+        static void end_http_request(
+                const std::shared_ptr<RuntimeState>& state) {
+            bool should_drain = false;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->active_http_requests > 0) {
+                    --state->active_http_requests;
+                }
+                should_drain =
+                    state->active_http_requests == 0 &&
+                    state->pending_callback_shutdown;
+            }
+            if (should_drain) {
+                drain_pending_callback_shutdown(state);
             }
         }
 
@@ -469,6 +720,26 @@ namespace optionx::bridges::tradingview {
                 const std::shared_ptr<TradingViewExtensionBridgeConfig>& config,
                 const std::shared_ptr<HttpServer::Response>& response,
                 const std::shared_ptr<HttpServer::Request>& request) {
+            if (!begin_http_request(state)) {
+                write_json(
+                    response,
+                    SimpleWeb::StatusCode::server_error_service_unavailable,
+                    nlohmann::json{
+                        {"ok", false},
+                        {"accepted", false},
+                        {"reason", "server_stopping"}
+                    },
+                    *config);
+                return;
+            }
+            struct HttpRequestGuard {
+                std::shared_ptr<RuntimeState> state;
+
+                ~HttpRequestGuard() {
+                    end_http_request(state);
+                }
+            } request_guard{state};
+
             const auto body = request->content.string();
             if (body.size() > config->request_body_limit) {
                 notify_signal_report(
@@ -610,8 +881,85 @@ namespace optionx::bridges::tradingview {
                     *config);
                 return;
             }
+            if (!callback) {
+                forget_dedupe_key(state, result.dedupe_key);
+                notify_signal_report(
+                    state,
+                    make_signal_report(
+                        *config,
+                        BridgeSignalReportStatus::INTAKE_ERROR,
+                        "missing_trade_signal_callback",
+                        "TradingView extension bridge trade signal callback is not configured.",
+                        result.raw_payload,
+                        result.parsed_payload,
+                        result.event_id,
+                        result.dedupe_key,
+                        clone_candidate_signal(result.signal)));
+                write_json(
+                    response,
+                    SimpleWeb::StatusCode::server_error_internal_server_error,
+                    nlohmann::json{
+                        {"ok", false},
+                        {"accepted", false},
+                        {"reason", "missing_trade_signal_callback"}
+                    },
+                    *config);
+                return;
+            }
 
-            const auto signal_id = allocator();
+            SignalId signal_id = 0;
+            try {
+                CallbackScope scope(state);
+                signal_id = allocator();
+            } catch (const std::exception& ex) {
+                forget_dedupe_key(state, result.dedupe_key);
+                notify_signal_report(
+                    state,
+                    make_signal_report(
+                        *config,
+                        BridgeSignalReportStatus::INTAKE_ERROR,
+                        "signal_id_allocation_failed",
+                        ex.what(),
+                        result.raw_payload,
+                        result.parsed_payload,
+                        result.event_id,
+                        result.dedupe_key,
+                        clone_candidate_signal(result.signal)));
+                write_json(
+                    response,
+                    SimpleWeb::StatusCode::server_error_internal_server_error,
+                    nlohmann::json{
+                        {"ok", false},
+                        {"accepted", false},
+                        {"reason", "signal_id_allocation_failed"}
+                    },
+                    *config);
+                return;
+            } catch (...) {
+                forget_dedupe_key(state, result.dedupe_key);
+                notify_signal_report(
+                    state,
+                    make_signal_report(
+                        *config,
+                        BridgeSignalReportStatus::INTAKE_ERROR,
+                        "signal_id_allocation_failed",
+                        "TradingView extension signal ID allocator threw an unknown exception.",
+                        result.raw_payload,
+                        result.parsed_payload,
+                        result.event_id,
+                        result.dedupe_key,
+                        clone_candidate_signal(result.signal)));
+                write_json(
+                    response,
+                    SimpleWeb::StatusCode::server_error_internal_server_error,
+                    nlohmann::json{
+                        {"ok", false},
+                        {"accepted", false},
+                        {"reason", "signal_id_allocation_failed"}
+                    },
+                    *config);
+                return;
+            }
             if (signal_id == 0) {
                 forget_dedupe_key(state, result.dedupe_key);
                 notify_signal_report(
@@ -640,8 +988,56 @@ namespace optionx::bridges::tradingview {
 
             result.signal->signal_id = signal_id;
             result.signal->bridge_id = config->bridge_id;
-            if (callback) {
+            const auto candidate = clone_candidate_signal(result.signal);
+            try {
+                CallbackScope scope(state);
                 callback(std::move(result.signal));
+            } catch (const std::exception& ex) {
+                notify_signal_report(
+                    state,
+                    make_signal_report(
+                        *config,
+                        BridgeSignalReportStatus::INTAKE_ERROR,
+                        "ambiguous_dispatch_failure",
+                        ex.what(),
+                        result.raw_payload,
+                        result.parsed_payload,
+                        result.event_id,
+                        result.dedupe_key,
+                        candidate));
+                write_json(
+                    response,
+                    SimpleWeb::StatusCode::server_error_internal_server_error,
+                    nlohmann::json{
+                        {"ok", false},
+                        {"accepted", false},
+                        {"reason", "ambiguous_dispatch_failure"}
+                    },
+                    *config);
+                return;
+            } catch (...) {
+                notify_signal_report(
+                    state,
+                    make_signal_report(
+                        *config,
+                        BridgeSignalReportStatus::INTAKE_ERROR,
+                        "ambiguous_dispatch_failure",
+                        "TradingView extension trade signal callback threw an unknown exception.",
+                        result.raw_payload,
+                        result.parsed_payload,
+                        result.event_id,
+                        result.dedupe_key,
+                        candidate));
+                write_json(
+                    response,
+                    SimpleWeb::StatusCode::server_error_internal_server_error,
+                    nlohmann::json{
+                        {"ok", false},
+                        {"accepted", false},
+                        {"reason", "ambiguous_dispatch_failure"}
+                    },
+                    *config);
+                return;
             }
             write_json(
                 response,

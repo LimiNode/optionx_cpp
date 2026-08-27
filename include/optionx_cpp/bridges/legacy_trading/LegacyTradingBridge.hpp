@@ -195,10 +195,12 @@ namespace optionx::bridges::legacy_trading {
         /// \details Drains the ping task manager and then stops the pipe server
         ///          if it was running.
         void shutdown() override {
+            bool was_running = false;
 #           if defined(_WIN32)
             std::shared_ptr<SimpleNamedPipe::NamedPipeServer> server;
             {
                 std::lock_guard<std::mutex> lock(m_state->mutex);
+                was_running = m_state->running || static_cast<bool>(m_state->server);
                 server = m_state->server;
                 m_state->server.reset();
                 m_state->client_ids.clear();
@@ -212,7 +214,9 @@ namespace optionx::bridges::legacy_trading {
 #           else
             m_task_manager.shutdown();
 #           endif
-            notify_status(BridgeStatus::SERVER_STOPPED);
+            if (was_running) {
+                notify_status(BridgeStatus::SERVER_STOPPED);
+            }
         }
 
     private:
