@@ -183,13 +183,13 @@ namespace optionx::bridges::tradingview {
                 m_state->dedupe_keys.clear();
             }
 
-            auto server = std::make_shared<HttpServer>();
-            server->config.address = config->address;
-            server->config.port = config->port;
-            server->config.thread_pool_size = 1;
-            configure_routes(server, config);
+            try {
+                auto server = std::make_shared<HttpServer>();
+                server->config.address = config->address;
+                server->config.port = config->port;
+                server->config.thread_pool_size = 1;
+                configure_routes(server, config);
 
-            {
                 std::lock_guard<std::mutex> lock(m_state->mutex);
                 if (!m_state->running) {
                     return;
@@ -211,6 +211,12 @@ namespace optionx::bridges::tradingview {
                             "Unknown TradingView HTTP server start failure.");
                     }
                 });
+            } catch (const std::exception& ex) {
+                finalize_failed_start(m_state, ex.what());
+            } catch (...) {
+                finalize_failed_start(
+                    m_state,
+                    "Unknown TradingView HTTP server initialization failure.");
             }
         }
 
@@ -391,11 +397,21 @@ namespace optionx::bridges::tradingview {
                 {},
                 std::move(message));
             if (should_finalize) {
-                finalize_runtime_stop_async(
-                    state,
-                    std::move(server),
-                    std::move(server_thread),
-                    true);
+                if (server_thread.joinable() &&
+                    server_thread.get_id() == std::this_thread::get_id()) {
+                    finalize_runtime_stop_async(
+                        state,
+                        std::move(server),
+                        std::move(server_thread),
+                        true);
+                }
+                else {
+                    finalize_runtime_stop(
+                        state,
+                        std::move(server),
+                        std::move(server_thread),
+                        true);
+                }
             }
         }
 

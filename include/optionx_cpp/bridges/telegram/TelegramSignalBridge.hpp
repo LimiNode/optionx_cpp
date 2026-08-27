@@ -281,8 +281,9 @@ namespace optionx::bridges::telegram {
                 m_state->source_chain_signal_groups.clear();
                 m_state->assumed_source_chain_steps.clear();
                 m_state->source_chain_stop = true;
-                m_state->source_chain_join_pending =
-                    m_state->source_chain_thread.joinable();
+                if (m_state->source_chain_thread.joinable()) {
+                    m_state->source_chain_join_pending = true;
+                }
                 m_state->active_config.reset();
             }
             m_state->source_chain_cv.notify_all();
@@ -330,8 +331,9 @@ namespace optionx::bridges::telegram {
                     m_state->source_chain_signal_groups.clear();
                     m_state->assumed_source_chain_steps.clear();
                     m_state->source_chain_stop = true;
-                    m_state->source_chain_join_pending =
-                        m_state->source_chain_thread.joinable();
+                    if (m_state->source_chain_thread.joinable()) {
+                        m_state->source_chain_join_pending = true;
+                    }
                     m_state->active_config.reset();
                 }
             }
