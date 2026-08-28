@@ -222,6 +222,30 @@ MarketDataStatusUpdate ready_status(
 
 } // namespace
 
+TEST(MarketDataRouter, UsesStrongRoutedSubscriptionIds) {
+    const RoutedSubscriptionId empty;
+    EXPECT_FALSE(empty.valid());
+    EXPECT_FALSE(static_cast<bool>(empty));
+
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto eur = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("EURUSD"));
+    auto btc = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("BTCUSDT"));
+
+    ASSERT_TRUE(eur.router_id().valid());
+    ASSERT_TRUE(btc.router_id().valid());
+    EXPECT_NE(eur.router_id(), btc.router_id());
+    EXPECT_NE(eur.router_id().value(), 0u);
+}
+
 TEST(MarketDataRouter, RoutesEventsToTheirConcreteSubscriptions) {
     FakeMarketDataProvider provider;
     MarketDataRouter router;

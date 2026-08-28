@@ -7,18 +7,66 @@
 
 namespace optionx::market_data {
 
-    /// \brief Router-local identifier of a logical market-data subscription.
-    using RoutedSubscriptionId = std::uint64_t;
-
-    /// \brief Invalid router-local subscription identifier.
-    inline constexpr RoutedSubscriptionId kInvalidRoutedSubscriptionId = 0;
-
     namespace detail {
         class MarketDataRouterState;
+    } // namespace detail
+
+    /// \class RoutedSubscriptionId
+    /// \brief Strong Router-local identifier of a logical market-data subscription.
+    class RoutedSubscriptionId {
+    public:
+        /// \brief Constructs an invalid identifier.
+        constexpr RoutedSubscriptionId() noexcept = default;
+
+        /// \brief Returns true when the Router assigned an identifier.
+        [[nodiscard]] constexpr bool valid() const noexcept {
+            return m_value != 0;
+        }
+
+        /// \brief Allows identifiers to be checked directly in conditions.
+        constexpr explicit operator bool() const noexcept {
+            return valid();
+        }
+
+        /// \brief Returns the numeric value for logging and diagnostics.
+        [[nodiscard]] constexpr std::uint64_t value() const noexcept {
+            return m_value;
+        }
+
+        friend constexpr bool operator==(
+                RoutedSubscriptionId lhs,
+                RoutedSubscriptionId rhs) noexcept {
+            return lhs.m_value == rhs.m_value;
+        }
+
+        friend constexpr bool operator!=(
+                RoutedSubscriptionId lhs,
+                RoutedSubscriptionId rhs) noexcept {
+            return !(lhs == rhs);
+        }
+
+    private:
+        std::uint64_t m_value = 0;
+
+        explicit constexpr RoutedSubscriptionId(std::uint64_t value) noexcept
+                : m_value(value) {}
+
+        friend class detail::MarketDataRouterState;
+    };
+
+    /// \struct RoutedSubscriptionIdHash
+    /// \brief Hashes a routed subscription identifier for unordered containers.
+    struct RoutedSubscriptionIdHash {
+        [[nodiscard]] std::size_t operator()(RoutedSubscriptionId id) const noexcept {
+            return std::hash<std::uint64_t>{}(id.value());
+        }
+    };
+
+    namespace detail {
 
         struct MarketDataRouterSubscriptionControl {
             mutable std::mutex mutex;
-            RoutedSubscriptionId router_id = kInvalidRoutedSubscriptionId;
+            RoutedSubscriptionId router_id;
             MarketDataSubscriptionHandle provider_subscription;
             std::weak_ptr<MarketDataRouterState> router;
             bool active = false;
@@ -205,7 +253,7 @@ namespace optionx::market_data {
             };
 
             struct Entry {
-                RoutedSubscriptionId router_id = kInvalidRoutedSubscriptionId;
+                RoutedSubscriptionId router_id;
                 ProviderInstanceId provider_id = kInvalidProviderInstanceId;
                 BaseMarketDataProvider* provider = nullptr;
                 std::weak_ptr<IMarketDataSubscriber> subscriber;
@@ -260,9 +308,12 @@ namespace optionx::market_data {
 
         private:
             mutable std::mutex m_mutex;
-            std::unordered_map<RoutedSubscriptionId, std::shared_ptr<Entry>> m_entries;
+            std::unordered_map<
+                RoutedSubscriptionId,
+                std::shared_ptr<Entry>,
+                RoutedSubscriptionIdHash> m_entries;
             std::unordered_map<ProviderInstanceId, ProviderSlot> m_providers;
-            RoutedSubscriptionId m_next_router_id = 1;
+            std::uint64_t m_next_router_id = 1;
             bool m_shutdown = false;
 
             static StreamDescriptor stream_from(const TickSubscriptionRequest& request);
@@ -498,10 +549,11 @@ namespace optionx::market_data {
                     return {};
                 }
 
-                auto router_id = m_next_router_id++;
-                if (router_id == kInvalidRoutedSubscriptionId) {
-                    router_id = m_next_router_id++;
+                auto router_id_value = m_next_router_id++;
+                if (router_id_value == 0) {
+                    router_id_value = m_next_router_id++;
                 }
+                const RoutedSubscriptionId router_id(router_id_value);
 
                 control->router_id = router_id;
                 control->router = shared_from_this();
@@ -1207,7 +1259,7 @@ namespace optionx::market_data {
     }
 
     inline RoutedSubscriptionId MarketDataRouterSubscription::router_id() const noexcept {
-        return m_control ? m_control->router_id : kInvalidRoutedSubscriptionId;
+        return m_control ? m_control->router_id : RoutedSubscriptionId{};
     }
 
     inline MarketDataSubscriptionHandle
@@ -1221,7 +1273,7 @@ namespace optionx::market_data {
         if (!m_control) return false;
         std::lock_guard<std::mutex> lock(m_control->mutex);
         return !m_control->released &&
-               m_control->router_id != kInvalidRoutedSubscriptionId;
+               m_control->router_id.valid();
     }
 
     inline bool MarketDataRouterSubscription::active() const {

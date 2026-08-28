@@ -31,6 +31,8 @@ Currently maintained examples:
   `OPTIONX_INTRADE_EMAIL` and `OPTIONX_INTRADE_PASSWORD` from the environment.
 - `market_data_hub_example.cpp` demonstrates routing provider callbacks through
   `MarketDataHub` into an `IMarketDataSubscriber` implementation.
+- `market_data_router_example.cpp` demonstrates subscription-scoped routing,
+  concrete subscription context, late `READY` replay and RAII unsubscription.
 - `trading_condition_hub_example.cpp` demonstrates routing payout, session and
   expiration-limit changes through `TradingConditionHub`, plus querying the
   merged current condition snapshot for a concrete symbol.

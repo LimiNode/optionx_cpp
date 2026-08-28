@@ -129,6 +129,18 @@ when a bot or chart needs RAII lifetime and per-subscription status replay; use
 ownership is sufficient.
 
 ```cpp
+class MyBot final : public market_data::IMarketDataSubscriber {
+public:
+    void on_tick_data(const market_data::TickDataBatch& batch) override {
+        consume_ticks(batch.subscription, batch.items);
+    }
+
+    void on_market_data_status(
+            const market_data::MarketDataStatusUpdate& update) override {
+        log_status(update.subscription, update.status);
+    }
+};
+
 market_data::MarketDataRouter router;
 auto bot = std::make_shared<MyBot>();
 
@@ -136,6 +148,10 @@ auto eur = router.subscribe_ticks(
     platform,
     bot,
     market_data::TickSubscriptionRequest("EURUSD"));
+
+if (!eur.valid()) {
+    // The Router rejected the logical route.
+}
 ```
 
 The returned `MarketDataRouterSubscription` is move-only. Its destructor,
@@ -143,6 +159,11 @@ The returned `MarketDataRouterSubscription` is move-only. Its destructor,
 objects are weakly held, while the provider must outlive the router and pending
 provider operations. Do not bind a `MarketDataHub` or assign the provider's
 live-data callbacks while Router routes for that provider are active.
+`TickDataBatch::subscription` and `MarketDataStatusUpdate::subscription` identify
+the concrete provider subscription delivered to the bot. The Router may replay
+a cached matching stream status synchronously while a new route is accepted;
+callbacks should therefore use the subscription carried by the event rather
+than assume that caller state was already updated after `subscribe_ticks()`.
 
 ## Concrete Platforms
 

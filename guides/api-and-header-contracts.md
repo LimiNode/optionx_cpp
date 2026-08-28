@@ -231,7 +231,9 @@ Contract rules:
 
 - `subscribe_ticks()` and `subscribe_bars()` bind one weak subscriber to one
   provider subscription and return a move-only `MarketDataRouterSubscription`.
-- The RAII handle has a stable router-local numeric ID. Its
+- The RAII handle has a stable router-local strong ID. Use `router_id().valid()`
+  or its explicit boolean conversion instead of comparing against an invalid
+  numeric sentinel. Its
   `provider_subscription()` descriptor becomes valid after provider acceptance;
   destroying, resetting, or explicitly unsubscribing the handle releases the
   route.
