@@ -253,6 +253,16 @@ Contract rules:
   `failed_unsubscribe_count()` and call `retry_failed_unsubscribes()` from the
   owner loop; new routes through that provider are rejected until cleanup
   succeeds. `shutdown()` makes a final best-effort attempt.
+- `register_provider()` adds a non-owning provider reference under a stable,
+  application-assigned `MarketDataProviderId` and optional exact string aliases.
+  Registration is a selection catalog only and does not bind live callbacks.
+- Registered numeric IDs and aliases resolve to the same provider-reference
+  overloads used by direct subscriptions. Unknown keys produce a typed failed
+  subscription result, and an active or pending route prevents unregistering
+  its provider.
+- `ProviderInstanceId` remains the runtime identity carried by provider handles.
+  `registered_provider_id()` maps it back to the stable application ID while the
+  provider remains registered; aliases are not copied into live batches.
 
 Future market-data routing work: add `MarketDataSubscriberBase` as convenience
 sugar for bots that want to subscribe from inside their own methods while

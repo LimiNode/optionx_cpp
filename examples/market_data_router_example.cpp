@@ -81,10 +81,16 @@ private:
 
 class TradingBot final : public market_data::IMarketDataSubscriber {
 public:
+    explicit TradingBot(market_data::MarketDataRouter& router)
+            : m_router(router) {}
+
     std::vector<market_data::MarketDataStatusUpdate> statuses;
 
     void on_tick_data(const market_data::TickDataBatch& batch) override {
-        std::cout << "tick subscription=" << batch.subscription.id
+        const auto registered_provider =
+            m_router.registered_provider_id(batch.subscription.provider_id);
+        std::cout << "tick provider=" << registered_provider.value()
+                  << " subscription=" << batch.subscription.id
                   << " symbol=" << batch.symbol
                   << " mid=" << batch.items.back().mid_price(batch.price_digits)
                   << '\n';
@@ -93,11 +99,17 @@ public:
     void on_market_data_status(
             const market_data::MarketDataStatusUpdate& update) override {
         statuses.push_back(update);
-        std::cout << "status subscription=" << update.subscription.id
+        const auto registered_provider =
+            m_router.registered_provider_id(update.provider_id);
+        std::cout << "status provider=" << registered_provider.value()
+                  << " subscription=" << update.subscription.id
                   << " symbol=" << update.symbol
                   << " state=" << market_data::to_str(update.status)
                   << '\n';
     }
+
+private:
+    market_data::MarketDataRouter& m_router;
 };
 
 } // namespace
@@ -105,10 +117,18 @@ public:
 int main() {
     DemoMarketDataProvider provider;
     market_data::MarketDataRouter router;
-    auto bot = std::make_shared<TradingBot>();
+    const market_data::MarketDataProviderId provider_id{1001};
+    if (!router.register_provider(
+            provider_id,
+            provider,
+            {"demo", "primary-market-data"})) {
+        std::cerr << "Provider registration failed\n";
+        return 1;
+    }
+    auto bot = std::make_shared<TradingBot>(router);
 
     auto eur = router.subscribe_ticks(
-        provider,
+        provider_id,
         bot,
         market_data::TickSubscriptionRequest(
             "EURUSD",
@@ -123,13 +143,18 @@ int main() {
     provider.emit_ready("BTCUSDT");
 
     auto btc = router.subscribe_ticks(
-        provider,
+        "primary-market-data",
         bot,
         market_data::TickSubscriptionRequest(
             "BTCUSDT",
             market_data::MarketDataTransport::WEBSOCKET));
     if (!btc.active()) {
         std::cerr << "BTCUSDT subscription failed\n";
+        return 1;
+    }
+    if (eur.registered_provider_id() != provider_id ||
+        btc.registered_provider_id() != provider_id) {
+        std::cerr << "Stable provider context is missing\n";
         return 1;
     }
 

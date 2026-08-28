@@ -62,11 +62,62 @@ namespace optionx::market_data {
         }
     };
 
+    /// \class MarketDataProviderId
+    /// \brief Stable application-assigned identifier of a registered provider.
+    class MarketDataProviderId {
+    public:
+        /// \brief Constructs an invalid provider identifier.
+        constexpr MarketDataProviderId() noexcept = default;
+
+        /// \brief Constructs a stable provider identifier from application data.
+        explicit constexpr MarketDataProviderId(std::uint64_t value) noexcept
+                : m_value(value) {}
+
+        /// \brief Returns true when the identifier can select a provider.
+        [[nodiscard]] constexpr bool valid() const noexcept {
+            return m_value != 0;
+        }
+
+        /// \brief Allows identifiers to be checked directly in conditions.
+        constexpr explicit operator bool() const noexcept {
+            return valid();
+        }
+
+        /// \brief Returns the application-assigned numeric value.
+        [[nodiscard]] constexpr std::uint64_t value() const noexcept {
+            return m_value;
+        }
+
+        friend constexpr bool operator==(
+                MarketDataProviderId lhs,
+                MarketDataProviderId rhs) noexcept {
+            return lhs.m_value == rhs.m_value;
+        }
+
+        friend constexpr bool operator!=(
+                MarketDataProviderId lhs,
+                MarketDataProviderId rhs) noexcept {
+            return !(lhs == rhs);
+        }
+
+    private:
+        std::uint64_t m_value = 0;
+    };
+
+    /// \struct MarketDataProviderIdHash
+    /// \brief Hashes an application-assigned provider identifier.
+    struct MarketDataProviderIdHash {
+        [[nodiscard]] std::size_t operator()(MarketDataProviderId id) const noexcept {
+            return std::hash<std::uint64_t>{}(id.value());
+        }
+    };
+
     namespace detail {
 
         struct MarketDataRouterSubscriptionControl {
             mutable std::mutex mutex;
             RoutedSubscriptionId router_id;
+            MarketDataProviderId registered_provider_id;
             MarketDataSubscriptionHandle provider_subscription;
             std::weak_ptr<MarketDataRouterState> router;
             bool active = false;
@@ -108,6 +159,10 @@ namespace optionx::market_data {
 
         /// \brief Returns the provider-assigned subscription descriptor, if accepted.
         [[nodiscard]] MarketDataSubscriptionHandle provider_subscription() const;
+
+        /// \brief Returns the stable registered provider ID used to create this route.
+        /// \details Direct provider-reference subscriptions return an invalid ID.
+        [[nodiscard]] MarketDataProviderId registered_provider_id() const;
 
         /// \brief Returns true while this object owns a pending or active route.
         [[nodiscard]] bool valid() const;
@@ -190,6 +245,36 @@ namespace optionx::market_data {
         /// \brief Stops routed subscriptions and releases provider callbacks.
         ~MarketDataRouter();
 
+        /// \brief Adds a non-owning provider registration with stable aliases.
+        /// \details Registration does not bind provider callbacks. Aliases are
+        ///          exact, case-sensitive and unique inside this Router.
+        /// \param id Stable non-zero application-assigned provider ID.
+        /// \param provider Provider that outlives its registration and Router use.
+        /// \param aliases Optional selection aliases for configuration-facing code.
+        /// \return True when the complete registration was added atomically.
+        bool register_provider(
+                MarketDataProviderId id,
+                BaseMarketDataProvider& provider,
+                std::vector<std::string> aliases = {});
+
+        /// \brief Adds one exact alias to an existing provider registration.
+        bool add_provider_alias(MarketDataProviderId id, std::string alias);
+
+        /// \brief Removes an idle provider registration and all of its aliases.
+        /// \return False when the provider is unknown or still has Router routes.
+        bool unregister_provider(MarketDataProviderId id);
+
+        /// \brief Returns the number of registered provider entries.
+        [[nodiscard]] std::size_t registered_provider_count() const;
+
+        /// \brief Resolves a runtime provider instance to its stable registered ID.
+        [[nodiscard]] MarketDataProviderId registered_provider_id(
+                ProviderInstanceId provider_id) const;
+
+        /// \brief Returns a copy of the aliases assigned to a registered provider.
+        [[nodiscard]] std::vector<std::string> provider_aliases(
+                MarketDataProviderId id) const;
+
         /// \brief Creates a tick route for a shared subscriber.
         /// \param provider Provider that owns the physical subscription.
         /// \param subscriber Subscriber that receives this route's events.
@@ -209,6 +294,34 @@ namespace optionx::market_data {
                 TickSubscriptionRequest request,
                 subscription_callback_t callback = {});
 
+        /// \brief Creates a tick route through a stable provider registration ID.
+        SubscriptionHandle subscribe_ticks(
+                MarketDataProviderId provider_id,
+                const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+                TickSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
+        /// \brief Creates a tick route through a stable provider ID for a weak subscriber.
+        SubscriptionHandle subscribe_ticks_weak(
+                MarketDataProviderId provider_id,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                TickSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
+        /// \brief Creates a tick route through an exact registered provider alias.
+        SubscriptionHandle subscribe_ticks(
+                std::string_view provider_alias,
+                const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+                TickSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
+        /// \brief Creates an aliased tick route for a weak subscriber.
+        SubscriptionHandle subscribe_ticks_weak(
+                std::string_view provider_alias,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                TickSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
         /// \brief Creates a bar route for a shared subscriber.
         /// \param provider Provider that owns the physical subscription.
         /// \param subscriber Subscriber that receives this route's events.
@@ -224,6 +337,34 @@ namespace optionx::market_data {
         /// \brief Creates a bar route from an explicitly weak subscriber.
         SubscriptionHandle subscribe_bars_weak(
                 BaseMarketDataProvider& provider,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                BarSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
+        /// \brief Creates a bar route through a stable provider registration ID.
+        SubscriptionHandle subscribe_bars(
+                MarketDataProviderId provider_id,
+                const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+                BarSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
+        /// \brief Creates a bar route through a stable provider ID for a weak subscriber.
+        SubscriptionHandle subscribe_bars_weak(
+                MarketDataProviderId provider_id,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                BarSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
+        /// \brief Creates a bar route through an exact registered provider alias.
+        SubscriptionHandle subscribe_bars(
+                std::string_view provider_alias,
+                const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+                BarSubscriptionRequest request,
+                subscription_callback_t callback = {});
+
+        /// \brief Creates an aliased bar route for a weak subscriber.
+        SubscriptionHandle subscribe_bars_weak(
+                std::string_view provider_alias,
                 std::weak_ptr<IMarketDataSubscriber> subscriber,
                 BarSubscriptionRequest request,
                 subscription_callback_t callback = {});
@@ -297,14 +438,58 @@ namespace optionx::market_data {
                 std::uint64_t next_status_sequence = 1;
             };
 
+            struct RegisteredProvider {
+                BaseMarketDataProvider* provider = nullptr;
+                ProviderInstanceId instance_id = kInvalidProviderInstanceId;
+                std::vector<std::string> aliases;
+            };
+
+            bool register_provider(
+                    MarketDataProviderId id,
+                    BaseMarketDataProvider& provider,
+                    std::vector<std::string> aliases);
+            bool add_provider_alias(MarketDataProviderId id, std::string alias);
+            bool unregister_provider(MarketDataProviderId id);
+            [[nodiscard]] std::size_t registered_provider_count() const;
+            [[nodiscard]] MarketDataProviderId registered_provider_id(
+                    ProviderInstanceId provider_id) const;
+            [[nodiscard]] std::vector<std::string> provider_aliases(
+                    MarketDataProviderId id) const;
+
             MarketDataRouterSubscription subscribe_ticks(
                     BaseMarketDataProvider& provider,
+                    std::weak_ptr<IMarketDataSubscriber> subscriber,
+                    TickSubscriptionRequest request,
+                    subscription_callback_t callback,
+                    MarketDataProviderId registered_provider_id = {});
+
+            MarketDataRouterSubscription subscribe_ticks(
+                    MarketDataProviderId provider_id,
+                    std::weak_ptr<IMarketDataSubscriber> subscriber,
+                    TickSubscriptionRequest request,
+                    subscription_callback_t callback);
+
+            MarketDataRouterSubscription subscribe_ticks(
+                    std::string_view provider_alias,
                     std::weak_ptr<IMarketDataSubscriber> subscriber,
                     TickSubscriptionRequest request,
                     subscription_callback_t callback);
 
             MarketDataRouterSubscription subscribe_bars(
                     BaseMarketDataProvider& provider,
+                    std::weak_ptr<IMarketDataSubscriber> subscriber,
+                    BarSubscriptionRequest request,
+                    subscription_callback_t callback,
+                    MarketDataProviderId registered_provider_id = {});
+
+            MarketDataRouterSubscription subscribe_bars(
+                    MarketDataProviderId provider_id,
+                    std::weak_ptr<IMarketDataSubscriber> subscriber,
+                    BarSubscriptionRequest request,
+                    subscription_callback_t callback);
+
+            MarketDataRouterSubscription subscribe_bars(
+                    std::string_view provider_alias,
                     std::weak_ptr<IMarketDataSubscriber> subscriber,
                     BarSubscriptionRequest request,
                     subscription_callback_t callback);
@@ -335,6 +520,13 @@ namespace optionx::market_data {
                 std::shared_ptr<Entry>,
                 RoutedSubscriptionIdHash> m_entries;
             std::unordered_map<ProviderInstanceId, ProviderSlot> m_providers;
+            std::unordered_map<
+                MarketDataProviderId,
+                RegisteredProvider,
+                MarketDataProviderIdHash> m_registered_providers;
+            std::unordered_map<std::string, MarketDataProviderId> m_provider_aliases;
+            std::unordered_map<ProviderInstanceId, MarketDataProviderId>
+                m_registered_provider_ids;
             std::uint64_t m_next_router_id = 1;
             bool m_shutdown = false;
 
@@ -365,7 +557,13 @@ namespace optionx::market_data {
                     BaseMarketDataProvider& provider,
                     std::weak_ptr<IMarketDataSubscriber> subscriber,
                     StreamDescriptor stream,
+                    MarketDataProviderId registered_provider_id,
                     std::string& error_message);
+
+            BaseMarketDataProvider* registered_provider_no_lock(
+                    MarketDataProviderId id) const noexcept;
+            MarketDataProviderId provider_id_for_alias_no_lock(
+                    std::string_view alias) const;
 
             void complete_subscribe(
                     RoutedSubscriptionId router_id,
@@ -434,6 +632,119 @@ namespace optionx::market_data {
             stream.price_source = subscription.price_source;
             stream.transport = subscription.transport;
             return stream;
+        }
+
+        inline bool MarketDataRouterState::register_provider(
+                MarketDataProviderId id,
+                BaseMarketDataProvider& provider,
+                std::vector<std::string> aliases) {
+            if (!id.valid()) return false;
+            for (std::size_t i = 0; i < aliases.size(); ++i) {
+                if (aliases[i].empty()) return false;
+                for (std::size_t j = i + 1; j < aliases.size(); ++j) {
+                    if (aliases[i] == aliases[j]) return false;
+                }
+            }
+
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_shutdown ||
+                m_registered_providers.find(id) != m_registered_providers.end() ||
+                m_registered_provider_ids.find(provider.provider_id()) !=
+                    m_registered_provider_ids.end()) {
+                return false;
+            }
+            for (const auto& alias : aliases) {
+                if (m_provider_aliases.find(alias) != m_provider_aliases.end()) {
+                    return false;
+                }
+            }
+
+            RegisteredProvider registration;
+            registration.provider = &provider;
+            registration.instance_id = provider.provider_id();
+            registration.aliases = std::move(aliases);
+            for (const auto& alias : registration.aliases) {
+                m_provider_aliases.emplace(alias, id);
+            }
+            m_registered_provider_ids.emplace(registration.instance_id, id);
+            m_registered_providers.emplace(id, std::move(registration));
+            return true;
+        }
+
+        inline bool MarketDataRouterState::add_provider_alias(
+                MarketDataProviderId id,
+                std::string alias) {
+            if (!id.valid() || alias.empty()) return false;
+
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_shutdown) return false;
+            const auto registration_it = m_registered_providers.find(id);
+            if (registration_it == m_registered_providers.end()) return false;
+
+            const auto alias_it = m_provider_aliases.find(alias);
+            if (alias_it != m_provider_aliases.end()) {
+                return alias_it->second == id;
+            }
+            registration_it->second.aliases.push_back(alias);
+            m_provider_aliases.emplace(std::move(alias), id);
+            return true;
+        }
+
+        inline bool MarketDataRouterState::unregister_provider(MarketDataProviderId id) {
+            if (!id.valid()) return false;
+
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_shutdown) return false;
+            const auto registration_it = m_registered_providers.find(id);
+            if (registration_it == m_registered_providers.end()) return false;
+
+            for (const auto& [router_id, entry] : m_entries) {
+                (void)router_id;
+                if (entry->provider_id == registration_it->second.instance_id) {
+                    return false;
+                }
+            }
+            for (const auto& alias : registration_it->second.aliases) {
+                m_provider_aliases.erase(alias);
+            }
+            m_registered_provider_ids.erase(registration_it->second.instance_id);
+            m_registered_providers.erase(registration_it);
+            return true;
+        }
+
+        inline std::size_t MarketDataRouterState::registered_provider_count() const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_registered_providers.size();
+        }
+
+        inline MarketDataProviderId MarketDataRouterState::registered_provider_id(
+                ProviderInstanceId provider_id) const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto it = m_registered_provider_ids.find(provider_id);
+            return it == m_registered_provider_ids.end()
+                ? MarketDataProviderId{}
+                : it->second;
+        }
+
+        inline std::vector<std::string> MarketDataRouterState::provider_aliases(
+                MarketDataProviderId id) const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto it = m_registered_providers.find(id);
+            return it == m_registered_providers.end()
+                ? std::vector<std::string>{}
+                : it->second.aliases;
+        }
+
+        inline BaseMarketDataProvider* MarketDataRouterState::registered_provider_no_lock(
+                MarketDataProviderId id) const noexcept {
+            const auto it = m_registered_providers.find(id);
+            return it == m_registered_providers.end() ? nullptr : it->second.provider;
+        }
+
+        inline MarketDataProviderId MarketDataRouterState::provider_id_for_alias_no_lock(
+                std::string_view alias) const {
+            const auto it = m_provider_aliases.find(std::string(alias));
+            return it == m_provider_aliases.end() ? MarketDataProviderId{} : it->second;
         }
 
         inline bool MarketDataRouterState::same_status_stream(
@@ -548,6 +859,7 @@ namespace optionx::market_data {
                 BaseMarketDataProvider& provider,
                 std::weak_ptr<IMarketDataSubscriber> subscriber,
                 StreamDescriptor stream,
+                MarketDataProviderId registered_provider_id,
                 std::string& error_message) {
             if (subscriber.expired()) {
                 error_message = "Market-data subscriber is null or expired.";
@@ -591,6 +903,7 @@ namespace optionx::market_data {
                 const RoutedSubscriptionId router_id(router_id_value);
 
                 control->router_id = router_id;
+                control->registered_provider_id = registered_provider_id;
                 control->router = shared_from_this();
                 entry->router_id = router_id;
                 entry->provider_id = provider.provider_id();
@@ -608,7 +921,8 @@ namespace optionx::market_data {
                 BaseMarketDataProvider& provider,
                 std::weak_ptr<IMarketDataSubscriber> subscriber,
                 TickSubscriptionRequest request,
-                subscription_callback_t callback) {
+                subscription_callback_t callback,
+                MarketDataProviderId registered_provider_id) {
             if (!request.valid()) {
                 dispatch_result(
                     std::move(callback),
@@ -625,6 +939,7 @@ namespace optionx::market_data {
                 provider,
                 std::move(subscriber),
                 stream_from(request),
+                registered_provider_id,
                 error_message);
             if (!control) {
                 dispatch_result(
@@ -686,11 +1001,67 @@ namespace optionx::market_data {
             return MarketDataRouterSubscription(std::move(control));
         }
 
+        inline MarketDataRouterSubscription MarketDataRouterState::subscribe_ticks(
+                MarketDataProviderId provider_id,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                TickSubscriptionRequest request,
+                subscription_callback_t callback) {
+            BaseMarketDataProvider* provider = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_shutdown) provider = registered_provider_no_lock(provider_id);
+            }
+            if (!provider) {
+                dispatch_result(
+                    std::move(callback),
+                    MarketDataSubscriptionResult::failed(
+                        std::move(request),
+                        MarketDataSubscriptionStatus::FAILED,
+                        "Market-data provider ID is not registered."));
+                return {};
+            }
+            return subscribe_ticks(
+                *provider,
+                std::move(subscriber),
+                std::move(request),
+                std::move(callback),
+                provider_id);
+        }
+
+        inline MarketDataRouterSubscription MarketDataRouterState::subscribe_ticks(
+                std::string_view provider_alias,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                TickSubscriptionRequest request,
+                subscription_callback_t callback) {
+            MarketDataProviderId provider_id;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_shutdown) {
+                    provider_id = provider_id_for_alias_no_lock(provider_alias);
+                }
+            }
+            if (!provider_id.valid()) {
+                dispatch_result(
+                    std::move(callback),
+                    MarketDataSubscriptionResult::failed(
+                        std::move(request),
+                        MarketDataSubscriptionStatus::FAILED,
+                        "Market-data provider alias is not registered."));
+                return {};
+            }
+            return subscribe_ticks(
+                provider_id,
+                std::move(subscriber),
+                std::move(request),
+                std::move(callback));
+        }
+
         inline MarketDataRouterSubscription MarketDataRouterState::subscribe_bars(
                 BaseMarketDataProvider& provider,
                 std::weak_ptr<IMarketDataSubscriber> subscriber,
                 BarSubscriptionRequest request,
-                subscription_callback_t callback) {
+                subscription_callback_t callback,
+                MarketDataProviderId registered_provider_id) {
             if (!request.valid()) {
                 dispatch_result(
                     std::move(callback),
@@ -707,6 +1078,7 @@ namespace optionx::market_data {
                 provider,
                 std::move(subscriber),
                 stream_from(request),
+                registered_provider_id,
                 error_message);
             if (!control) {
                 dispatch_result(
@@ -766,6 +1138,61 @@ namespace optionx::market_data {
                     std::move(callback));
             }
             return MarketDataRouterSubscription(std::move(control));
+        }
+
+        inline MarketDataRouterSubscription MarketDataRouterState::subscribe_bars(
+                MarketDataProviderId provider_id,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                BarSubscriptionRequest request,
+                subscription_callback_t callback) {
+            BaseMarketDataProvider* provider = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_shutdown) provider = registered_provider_no_lock(provider_id);
+            }
+            if (!provider) {
+                dispatch_result(
+                    std::move(callback),
+                    MarketDataSubscriptionResult::failed(
+                        std::move(request),
+                        MarketDataSubscriptionStatus::FAILED,
+                        "Market-data provider ID is not registered."));
+                return {};
+            }
+            return subscribe_bars(
+                *provider,
+                std::move(subscriber),
+                std::move(request),
+                std::move(callback),
+                provider_id);
+        }
+
+        inline MarketDataRouterSubscription MarketDataRouterState::subscribe_bars(
+                std::string_view provider_alias,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                BarSubscriptionRequest request,
+                subscription_callback_t callback) {
+            MarketDataProviderId provider_id;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_shutdown) {
+                    provider_id = provider_id_for_alias_no_lock(provider_alias);
+                }
+            }
+            if (!provider_id.valid()) {
+                dispatch_result(
+                    std::move(callback),
+                    MarketDataSubscriptionResult::failed(
+                        std::move(request),
+                        MarketDataSubscriptionStatus::FAILED,
+                        "Market-data provider alias is not registered."));
+                return {};
+            }
+            return subscribe_bars(
+                provider_id,
+                std::move(subscriber),
+                std::move(request),
+                std::move(callback));
         }
 
         inline void MarketDataRouterState::complete_subscribe(
@@ -1304,6 +1731,9 @@ namespace optionx::market_data {
                 }
                 m_entries.clear();
                 m_providers.clear();
+                m_registered_providers.clear();
+                m_provider_aliases.clear();
+                m_registered_provider_ids.clear();
             }
 
             for (auto* provider : providers) {
@@ -1337,6 +1767,13 @@ namespace optionx::market_data {
         if (!m_control) return {};
         std::lock_guard<std::mutex> lock(m_control->mutex);
         return m_control->provider_subscription;
+    }
+
+    inline MarketDataProviderId
+    MarketDataRouterSubscription::registered_provider_id() const {
+        if (!m_control) return {};
+        std::lock_guard<std::mutex> lock(m_control->mutex);
+        return m_control->registered_provider_id;
     }
 
     inline bool MarketDataRouterSubscription::valid() const {
@@ -1387,6 +1824,40 @@ namespace optionx::market_data {
         shutdown();
     }
 
+    inline bool MarketDataRouter::register_provider(
+            MarketDataProviderId id,
+            BaseMarketDataProvider& provider,
+            std::vector<std::string> aliases) {
+        return m_state && m_state->register_provider(
+            id,
+            provider,
+            std::move(aliases));
+    }
+
+    inline bool MarketDataRouter::add_provider_alias(
+            MarketDataProviderId id,
+            std::string alias) {
+        return m_state && m_state->add_provider_alias(id, std::move(alias));
+    }
+
+    inline bool MarketDataRouter::unregister_provider(MarketDataProviderId id) {
+        return m_state && m_state->unregister_provider(id);
+    }
+
+    inline std::size_t MarketDataRouter::registered_provider_count() const {
+        return m_state ? m_state->registered_provider_count() : 0;
+    }
+
+    inline MarketDataProviderId MarketDataRouter::registered_provider_id(
+            ProviderInstanceId provider_id) const {
+        return m_state ? m_state->registered_provider_id(provider_id) : MarketDataProviderId{};
+    }
+
+    inline std::vector<std::string> MarketDataRouter::provider_aliases(
+            MarketDataProviderId id) const {
+        return m_state ? m_state->provider_aliases(id) : std::vector<std::string>{};
+    }
+
     inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_ticks(
             BaseMarketDataProvider& provider,
             const std::shared_ptr<IMarketDataSubscriber>& subscriber,
@@ -1411,6 +1882,54 @@ namespace optionx::market_data {
             std::move(callback));
     }
 
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_ticks(
+            MarketDataProviderId provider_id,
+            const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+            TickSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return subscribe_ticks_weak(
+            provider_id,
+            std::weak_ptr<IMarketDataSubscriber>(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_ticks_weak(
+            MarketDataProviderId provider_id,
+            std::weak_ptr<IMarketDataSubscriber> subscriber,
+            TickSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return m_state->subscribe_ticks(
+            provider_id,
+            std::move(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_ticks(
+            std::string_view provider_alias,
+            const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+            TickSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return subscribe_ticks_weak(
+            provider_alias,
+            std::weak_ptr<IMarketDataSubscriber>(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_ticks_weak(
+            std::string_view provider_alias,
+            std::weak_ptr<IMarketDataSubscriber> subscriber,
+            TickSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return m_state->subscribe_ticks(
+            provider_alias,
+            std::move(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
     inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_bars(
             BaseMarketDataProvider& provider,
             const std::shared_ptr<IMarketDataSubscriber>& subscriber,
@@ -1430,6 +1949,54 @@ namespace optionx::market_data {
             subscription_callback_t callback) {
         return m_state->subscribe_bars(
             provider,
+            std::move(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_bars(
+            MarketDataProviderId provider_id,
+            const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+            BarSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return subscribe_bars_weak(
+            provider_id,
+            std::weak_ptr<IMarketDataSubscriber>(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_bars_weak(
+            MarketDataProviderId provider_id,
+            std::weak_ptr<IMarketDataSubscriber> subscriber,
+            BarSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return m_state->subscribe_bars(
+            provider_id,
+            std::move(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_bars(
+            std::string_view provider_alias,
+            const std::shared_ptr<IMarketDataSubscriber>& subscriber,
+            BarSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return subscribe_bars_weak(
+            provider_alias,
+            std::weak_ptr<IMarketDataSubscriber>(subscriber),
+            std::move(request),
+            std::move(callback));
+    }
+
+    inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_bars_weak(
+            std::string_view provider_alias,
+            std::weak_ptr<IMarketDataSubscriber> subscriber,
+            BarSubscriptionRequest request,
+            subscription_callback_t callback) {
+        return m_state->subscribe_bars(
+            provider_alias,
             std::move(subscriber),
             std::move(request),
             std::move(callback));
