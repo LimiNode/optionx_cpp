@@ -60,8 +60,12 @@
   umbrella headers `bridges/metatrader_file.hpp`, `bridges/named_pipe.hpp`,
   `bridges/trading_view.hpp`; leaf/detail bridge headers не являются
   самостоятельными include-точками.
-- Внутри `include/optionx_cpp` не подключай headers через `"optionx_cpp/..."`;
-  используй локальные пути от `include/optionx_cpp`, например `"data/..."`.
+- Внутри одной header family используй реальный путь относительно включающего
+  файла, например `"telegram/TelegramRawMessage.hpp"` из umbrella в `bridges/`
+  или `"detail/Parser.hpp"` из соседнего family header.
+- Cross-domain dependencies из вложенных headers подключай через установленный
+  префикс, например `<optionx_cpp/data/trading.hpp>`. Не используй
+  `"optionx_cpp/..."` и не полагайся на `include/optionx_cpp` как include-root.
 - Для project-owned C/C++ headers используй `#pragma once` и non-reserved
   include guard без leading underscore, например
   `OPTIONX_HEADER_<PATH>_<FILE>_<EXT>_INCLUDED`.

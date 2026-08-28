@@ -16,6 +16,8 @@ families are grouped by external protocol or adapter contract, not by transport.
 | BotBinary command helper | `optionx_cpp/bridges/bot_binary.hpp` | none | `examples/bot_binary_command_builder_smoke.cpp` | Formatter/parser helper for legacy BotBinary command strings. |
 | Legacy trading pipe | `optionx_cpp/bridges/legacy_trading.hpp` | `LegacyTradingBridgeConfig` | `examples/named_pipe_bridge_smoke.cpp` | Compatibility bridge for the older named-pipe JSON trading protocol. |
 | Telegram signal bridge | `optionx_cpp/bridges/telegram.hpp` | `TelegramSignalBridgeConfig` | `examples/telegram_signal_bridge_smoke.cpp` | Deterministic parser, source boundary, signal callback, duplicate report, and shutdown lifecycle without Telegram credentials. |
+| Telegram archive replay | `optionx_cpp/bridges/telegram.hpp` | `TelegramSignalBridgeConfig` | `examples/telegram_archive_parser_smoke.cpp` | Offline replay of raw messages exported by `tg-client-stdio` through the same OptionX parser used by the live bridge. |
+| Telegram live worker | `optionx_cpp/bridges/telegram.hpp` | `TelegramSignalBridgeConfig` | `examples/telegram_live_bridge_smoke.cpp` | Production wiring from the external `tg-client-stdio` worker source into `TelegramSignalBridge`, including environment-owned credentials and clean shutdown. |
 
 ## Choosing A Bridge
 

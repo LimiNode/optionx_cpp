@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <limits>
 
-#include "data/trading.hpp"
+#include <optionx_cpp/data/trading.hpp>
 
 namespace optionx::storage {
 

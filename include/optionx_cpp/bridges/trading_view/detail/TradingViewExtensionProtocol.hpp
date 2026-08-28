@@ -5,7 +5,7 @@
 /// \file TradingViewExtensionProtocol.hpp
 /// \brief Parses TradingView browser-extension messages into TradeSignal objects.
 
-#include "bridges/detail/BridgeTradeSignalValidation.hpp"
+#include <optionx_cpp/bridges/detail/BridgeTradeSignalValidation.hpp>
 
 namespace optionx::bridges::tradingview::detail {
 

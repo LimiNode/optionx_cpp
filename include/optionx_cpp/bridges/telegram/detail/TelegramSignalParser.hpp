@@ -5,7 +5,7 @@
 /// \file bridges/telegram/detail/TelegramSignalParser.hpp
 /// \brief Deterministic regex parser for Telegram signal and outcome messages.
 
-#include "bridges/telegram/TelegramParsedMessage.hpp"
+#include <optionx_cpp/bridges/telegram/TelegramParsedMessage.hpp>
 
 #include <algorithm>
 #include <cctype>

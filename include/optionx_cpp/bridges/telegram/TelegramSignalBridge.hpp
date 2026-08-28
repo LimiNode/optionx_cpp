@@ -5,10 +5,10 @@
 /// \file TelegramSignalBridge.hpp
 /// \brief Converts Telegram message events into OptionX TradeSignal objects.
 
-#include "bridges/BaseBridge.hpp"
-#include "bridges/detail/BridgeTradeSignalValidation.hpp"
-#include "bridges/telegram/TelegramSignalBridgeConfig.hpp"
-#include "data/trading/trade_state_traits.hpp"
+#include <optionx_cpp/bridges/BaseBridge.hpp>
+#include <optionx_cpp/bridges/detail/BridgeTradeSignalValidation.hpp>
+#include "TelegramSignalBridgeConfig.hpp"
+#include <optionx_cpp/data/trading/trade_state_traits.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -85,7 +85,9 @@ namespace optionx::bridges::telegram {
             std::unordered_map<std::string, std::int32_t> assumed_source_chain_steps;
             std::condition_variable source_chain_cv;
             std::thread source_chain_thread;
+            std::thread::id source_chain_thread_id;
             bool source_chain_stop = false;
+            bool source_chain_join_pending = false;
             std::shared_ptr<const TelegramSignalBridgeConfig> active_config;
             bool running = false;
         };
@@ -207,7 +209,16 @@ namespace optionx::bridges::telegram {
             }
 
             {
-                std::lock_guard<std::mutex> lock(m_state->mutex);
+                std::unique_lock<std::mutex> lock(m_state->mutex);
+                if (m_state->source_chain_join_pending) {
+                    if (m_state->source_chain_thread_id ==
+                        std::this_thread::get_id()) {
+                        return;
+                    }
+                    m_state->source_chain_cv.wait(lock, [state = m_state] {
+                        return !state->source_chain_join_pending;
+                    });
+                }
                 if (m_state->running) {
                     return;
                 }
@@ -270,10 +281,14 @@ namespace optionx::bridges::telegram {
                 m_state->source_chain_signal_groups.clear();
                 m_state->assumed_source_chain_steps.clear();
                 m_state->source_chain_stop = true;
+                if (m_state->source_chain_thread.joinable()) {
+                    m_state->source_chain_join_pending = true;
+                }
                 m_state->active_config.reset();
             }
             m_state->source_chain_cv.notify_all();
-            join_source_chain_watchdog(m_state);
+            const bool watchdog_joined =
+                join_source_chain_watchdog(m_state, was_running);
             if (source) {
                 try {
                     source->stop();
@@ -283,7 +298,7 @@ namespace optionx::bridges::telegram {
                                   "Telegram message source threw during stop.");
                 }
             }
-            if (was_running) {
+            if (was_running && watchdog_joined) {
                 notify_status(BridgeStatus::SERVER_STOPPED, {});
             }
         }
@@ -316,12 +331,15 @@ namespace optionx::bridges::telegram {
                     m_state->source_chain_signal_groups.clear();
                     m_state->assumed_source_chain_steps.clear();
                     m_state->source_chain_stop = true;
+                    if (m_state->source_chain_thread.joinable()) {
+                        m_state->source_chain_join_pending = true;
+                    }
                     m_state->active_config.reset();
                 }
             }
             m_state->source_chain_cv.notify_all();
             if (!running) {
-                join_source_chain_watchdog(m_state);
+                join_source_chain_watchdog(m_state, false);
             }
         }
 
@@ -901,24 +919,59 @@ namespace optionx::bridges::telegram {
             std::lock_guard<std::mutex> lock(state->mutex);
             if (!state->source_chain_thread.joinable() && !state->source_chain_stop) {
                 state->source_chain_thread = std::thread(
-                    [state, config] { source_chain_watchdog_loop(state, config); });
+                    [state, config] {
+                        {
+                            std::lock_guard<std::mutex> state_lock(state->mutex);
+                            state->source_chain_thread_id = std::this_thread::get_id();
+                        }
+                        source_chain_watchdog_loop(state, config);
+                    });
             }
         }
 
-        static void join_source_chain_watchdog(const std::shared_ptr<RuntimeState>& state) {
+        static bool join_source_chain_watchdog(
+                const std::shared_ptr<RuntimeState>& state,
+                const bool notify_stopped) {
             std::thread watchdog;
+            bool self_join = false;
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->source_chain_thread.joinable()) {
+                    return !state->source_chain_join_pending;
+                }
+                self_join =
+                    state->source_chain_thread.get_id() == std::this_thread::get_id();
+                state->source_chain_join_pending = true;
+                state->source_chain_thread_id = state->source_chain_thread.get_id();
                 watchdog = std::move(state->source_chain_thread);
             }
-            if (watchdog.joinable()) {
-                if (watchdog.get_id() == std::this_thread::get_id()) {
-                    watchdog.detach();
-                }
-                else {
-                    watchdog.join();
-                }
+            if (!watchdog.joinable()) {
+                return true;
             }
+            if (self_join) {
+                std::thread(
+                    [state, watchdog = std::move(watchdog), notify_stopped]() mutable {
+                        watchdog.join();
+                        {
+                            std::lock_guard<std::mutex> lock(state->mutex);
+                            state->source_chain_join_pending = false;
+                            state->source_chain_thread_id = {};
+                        }
+                        state->source_chain_cv.notify_all();
+                        if (notify_stopped) {
+                            notify_status(state, BridgeStatus::SERVER_STOPPED, {});
+                        }
+                    }).detach();
+                return false;
+            }
+            watchdog.join();
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->source_chain_join_pending = false;
+                state->source_chain_thread_id = {};
+            }
+            state->source_chain_cv.notify_all();
+            return true;
         }
 
         static void process_message(

@@ -5,7 +5,7 @@
 /// \file BotBinaryBridge.hpp
 /// \brief Defines the BotBinary/BinaryBot compatibility bridge.
 
-#include "bridges/detail/BridgeTradeSignalValidation.hpp"
+#include <optionx_cpp/bridges/detail/BridgeTradeSignalValidation.hpp>
 
 namespace optionx::bridges::bot_binary {
 

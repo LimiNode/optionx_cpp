@@ -15,14 +15,12 @@
 - Domain aggregates such as `data/trading.hpp` own common include context for
   their leaf DTO headers. Leaf DTO headers should not recreate sibling include
   order or pull broad dependencies unless that leaf truly owns the dependency.
-- External consumers include through `<optionx_cpp/...>`. Internal headers under
-  `include/optionx_cpp` include other project headers through local paths from
-  that root: `"data/..."`, `"utils/..."`, `"components/..."`,
-  `"platforms/..."`, `"storages/..."`.
-- Do not use `"optionx_cpp/..."` inside `include/optionx_cpp`, and do not use
-  `../` include paths. The local test/example CMake setup exposes both
-  `include` and `include/optionx_cpp` so public and internal include contracts
-  can be checked together.
+- External consumers and nested cross-domain headers include through
+  `<optionx_cpp/...>`. Headers within one family use paths genuinely relative
+  to the including file.
+- Do not use quoted `"optionx_cpp/..."` or `../` include paths. The local
+  test/example CMake setup exposes only `include` as the project include root,
+  matching the consumer contract and catching invalid cross-domain quotes.
 - При добавлении public header обновляй ближайший aggregate header; при
   внутреннем helper не расширяй public surface.
 

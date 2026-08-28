@@ -131,7 +131,6 @@ endfunction()
 
 set(OPTIONX_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/optionx_cpp
 )
 
 set(OPTIONX_COMPILE_DEFINITIONS
@@ -155,12 +154,10 @@ add_library(optionx_cpp::optionx_cpp ALIAS optionx_cpp)
 
 target_include_directories(optionx_cpp INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/optionx_cpp>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/SimpleNamedPipe/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/Simple-Web-Server>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/uni-algo/include>
     $<INSTALL_INTERFACE:include>
-    $<INSTALL_INTERFACE:include/optionx_cpp>
 )
 
 target_compile_features(optionx_cpp INTERFACE cxx_std_17)
@@ -960,6 +957,7 @@ if(OPTIONX_BUILD_TESTS)
         telegram_signal_parser_test
         telegram_signal_bridge_test
         telegram_worker_source_test
+        trading_view_bridge_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
@@ -977,6 +975,7 @@ if(OPTIONX_BUILD_TESTS)
         bot_binary_bridge_test
         bridge_umbrella_include_test
         protocol_v1_bridge_test
+        trading_view_bridge_test
     )
 
     file(GLOB_RECURSE PROJECT_HEADERS

@@ -35,9 +35,9 @@
 #include <SimpleNamedPipe/NamedPipeServer.hpp>
 #endif
 
-#include "data/bridge.hpp"
-#include "data/trading.hpp"
-#include "utils/tasks.hpp"
+#include <optionx_cpp/data/bridge.hpp>
+#include <optionx_cpp/data/trading.hpp>
+#include <optionx_cpp/utils/tasks.hpp>
 
 #include "BaseBridge.hpp"
 #include "metatrader_file.hpp"

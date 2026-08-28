@@ -18,11 +18,14 @@
 - External consumers include public headers with the installed prefix, for
   example `<optionx_cpp/data.hpp>` or
   `<optionx_cpp/platforms/IntradeBarPlatform.hpp>`.
-- Internal headers under `include/optionx_cpp` include other project headers
-  with local paths from `include/optionx_cpp`, for example
-  `"data/trading.hpp"`, `"utils/http_utils.hpp"`, and
-  `"platforms/common/ApiResult.hpp"`.
-- Do not use `"optionx_cpp/..."` inside `include/optionx_cpp`.
+- Headers in the same family use paths that are genuinely relative to the
+  including file, for example `"telegram/TelegramRawMessage.hpp"` from
+  `bridges/telegram.hpp` or `"detail/Parser.hpp"` from a neighboring family
+  header.
+- Nested headers include cross-domain dependencies through the installed
+  prefix, for example `<optionx_cpp/data/trading.hpp>` or
+  `<optionx_cpp/utils/tasks.hpp>`. Do not use quoted `"optionx_cpp/..."` paths
+  and do not rely on `include/optionx_cpp` as an additional include root.
 - Prefer the nearest aggregate header for public-domain and cross-domain
   dependencies; do not rebuild aggregate include order inside leaf DTO headers.
 - Do not use `../` in `#include` directives.

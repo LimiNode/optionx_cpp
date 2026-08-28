@@ -659,6 +659,92 @@ TEST(TelegramSignalBridge, EmitsAssumedContiguousSourceStepAfterTimeout) {
     bridge.shutdown();
 }
 
+TEST(TelegramSignalBridge, WatchdogCallbackShutdownJoinsBeforeStoppedAndRestart) {
+    auto source = std::make_shared<FakeMessageSource>();
+    optionx::bridges::telegram::TelegramSignalBridge bridge(source);
+    auto bridge_config = config();
+    bridge_config->martingale_policy =
+        optionx::bridges::telegram::TelegramMartingalePolicy::CONTIGUOUS_STEPS;
+    bridge_config->parser.martingale_rules = {
+        {"explicit-mg", R"(\bMG[ -]?(\d+)\b)", 1},
+    };
+    bridge_config->source_chain_rules = {
+        {"cobra", "COBRA", optionx::bridges::telegram::TelegramOutcomeResult::LOSS,
+         2, 1, optionx::bridges::telegram::TelegramSourceChainAction::EMIT_ASSUMED_SIGNAL},
+    };
+    ASSERT_TRUE(bridge.configure(std::move(bridge_config)));
+
+    std::atomic<optionx::SignalId> next_signal_id{100};
+    std::atomic<int> started_count{0};
+    std::atomic<int> stopped_count{0};
+    std::atomic<bool> callback_active{false};
+    std::atomic<bool> stopped_during_callback{false};
+    std::promise<void> self_shutdown_ready;
+    auto self_shutdown_future = self_shutdown_ready.get_future();
+    auto release_callback = std::make_shared<std::promise<void>>();
+    auto callback_released = release_callback->get_future().share();
+    std::promise<void> stopped_ready;
+    auto stopped_future = stopped_ready.get_future();
+    bridge.on_signal_id() = [&] { return next_signal_id.fetch_add(1); };
+    bridge.on_trade_signal() = [&](std::unique_ptr<optionx::TradeSignal> signal) {
+        if (!signal->is_assumed) {
+            return;
+        }
+        callback_active.store(true);
+        bridge.shutdown();
+        self_shutdown_ready.set_value();
+        callback_released.wait();
+        if (stopped_count.load() != 0) {
+            stopped_during_callback.store(true);
+        }
+        callback_active.store(false);
+    };
+    bridge.on_status_update() = [&](const optionx::BridgeStatusUpdate& update) {
+        if (update.status == optionx::BridgeStatus::SERVER_STARTED) {
+            started_count.fetch_add(1);
+        }
+        if (update.status == optionx::BridgeStatus::SERVER_STOPPED) {
+            if (callback_active.load()) {
+                stopped_during_callback.store(true);
+            }
+            if (stopped_count.fetch_add(1) == 0) {
+                stopped_ready.set_value();
+            }
+        }
+    };
+
+    bridge.run();
+    source->emit(make_message(124, "EURUSD BUY 5m COBRA MG-0"));
+    auto outcome = make_message(125, "EURUSD LOSS");
+    outcome.reply_to_message_id = 124;
+    source->emit(outcome);
+
+    ASSERT_EQ(self_shutdown_future.wait_for(std::chrono::seconds(3)),
+              std::future_status::ready);
+    bridge.shutdown();
+
+    auto restart = std::async(std::launch::async, [&bridge] {
+        bridge.run();
+    });
+    EXPECT_EQ(restart.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::timeout);
+    EXPECT_EQ(started_count.load(), 1);
+
+    release_callback->set_value();
+    ASSERT_EQ(stopped_future.wait_for(std::chrono::seconds(3)),
+              std::future_status::ready);
+    ASSERT_EQ(restart.wait_for(std::chrono::seconds(3)),
+              std::future_status::ready);
+    restart.get();
+    EXPECT_FALSE(stopped_during_callback.load());
+
+    for (int attempt = 0; attempt < 100 && started_count.load() < 2; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(started_count.load(), 2);
+    bridge.shutdown();
+}
+
 TEST(TelegramSignalBridge, IgnoresLateSourceStepAfterAssumedContinuation) {
     auto source = std::make_shared<FakeMessageSource>();
     optionx::bridges::telegram::TelegramSignalBridge bridge(source);

@@ -1120,6 +1120,7 @@ TEST(TradingViewExtensionBridge, ReportsRejectedLevelAlertOverHttp) {
     bridge.on_signal_id() = [] {
         return optionx::SignalId{100};
     };
+    bridge.on_trade_signal() = [](std::unique_ptr<optionx::TradeSignal>) {};
 
     std::mutex reports_mutex;
     std::vector<optionx::BridgeSignalReport> reports;

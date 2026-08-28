@@ -5,7 +5,7 @@
 /// \file TelegramRawMessage.hpp
 /// \brief Stable transport DTO for one Telegram message.
 
-#include "data/trading.hpp"
+#include <optionx_cpp/data/trading.hpp>
 
 #include <cstdint>
 #include <stdexcept>

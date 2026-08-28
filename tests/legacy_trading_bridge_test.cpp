@@ -284,6 +284,21 @@ TEST(LegacyTradingBridge, RunFailsWithoutSignalIdAllocator) {
     bridge.shutdown();
 }
 
+TEST(LegacyTradingBridge, ShutdownWithoutRunningDoesNotPublishStopped) {
+    LegacyTradingBridge bridge;
+    int stopped_count = 0;
+    bridge.on_status_update() = [&](const optionx::BridgeStatusUpdate& update) {
+        if (update.status == optionx::BridgeStatus::SERVER_STOPPED) {
+            ++stopped_count;
+        }
+    };
+
+    bridge.shutdown();
+    bridge.shutdown();
+
+    EXPECT_EQ(stopped_count, 0);
+}
+
 TEST(LegacyTradingBridge, SendsTradeResultThroughNamedPipe) {
 #if defined(_WIN32)
     LegacyTradingBridge bridge;
