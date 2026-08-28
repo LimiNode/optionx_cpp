@@ -189,6 +189,31 @@ namespace optionx::platforms {
             m_task_manager.process();
         }
 
+        /// \brief Queues work for serialized execution in the platform owner loop.
+        /// \details This is the cross-thread ingress point for components such as
+        ///          bots that must not call platform-owned provider APIs directly.
+        ///          Accepted work runs from TaskManager processing and can be
+        ///          cancelled by platform shutdown before execution.
+        /// \param callback Work that must execute in the platform owner loop.
+        /// \return True when the task was accepted for owner-loop processing.
+        bool post_task(std::function<void()> callback) {
+            if (!callback) return false;
+
+            std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
+            if (m_stopping.load(std::memory_order_acquire) ||
+                m_stopped.load(std::memory_order_acquire)) {
+                return false;
+            }
+
+            return m_task_manager.add_single_task(
+                "external",
+                [callback = std::move(callback)](
+                        std::shared_ptr<utils::Task> task) mutable {
+                    if (task->is_shutdown()) return;
+                    callback();
+                });
+        }
+
         /// \brief Shuts down the platform, stopping the event loop and tasks.
         /// \details Always calls shutdown() on TaskManager, regardless of internal thread usage.
         void shutdown() noexcept override {
