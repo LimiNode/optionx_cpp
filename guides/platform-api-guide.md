@@ -172,6 +172,30 @@ binding, reports it through `failed_unsubscribe_count()`, and rejects new routes
 through that provider. Call `retry_failed_unsubscribes()` from the Router owner
 loop; `shutdown()` performs the final best-effort cleanup attempt.
 
+Applications that assemble a fixed provider set can register each non-owning
+provider reference under a stable numeric ID and any number of exact aliases:
+
+```cpp
+const market_data::MarketDataProviderId intrade_id{1001};
+
+router.register_provider(
+    intrade_id,
+    intrade,
+    {"intrade", "primary-options"});
+
+auto by_id = router.subscribe_ticks(intrade_id, bot, eur_request);
+auto by_alias = router.subscribe_ticks("intrade", bot, btc_request);
+```
+
+`MarketDataProviderId` is assigned by the application and can remain stable in
+configuration across restarts. It is separate from `ProviderInstanceId`, which
+identifies one concrete provider object only for its current runtime lifetime.
+Registration does not bind provider callbacks; binding remains lazy until the
+first route is created. Numeric IDs and aliases must be unique inside one
+Router, and a registered provider must outlive its registration. Alias lookup
+happens only while creating a route; live delivery continues through numeric
+provider and subscription IDs.
+
 ## Concrete Platforms
 
 ### `platforms::IntradeBarPlatform`
