@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -11,6 +14,45 @@ using namespace optionx::market_data;
 
 namespace {
 
+class ManualOwnerLoop {
+public:
+    bool post(MarketDataRouter::owner_task_t task) {
+        if (!task) return false;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_accepting) return false;
+        m_tasks.push_back(std::move(task));
+        return true;
+    }
+
+    void close() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_accepting = false;
+    }
+
+    void process_all() {
+        while (true) {
+            MarketDataRouter::owner_task_t task;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_tasks.empty()) return;
+                task = std::move(m_tasks.front());
+                m_tasks.pop_front();
+            }
+            task();
+        }
+    }
+
+    std::size_t size() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_tasks.size();
+    }
+
+private:
+    mutable std::mutex m_mutex;
+    std::deque<MarketDataRouter::owner_task_t> m_tasks;
+    bool m_accepting = true;
+};
+
 class FakeMarketDataProvider final : public BaseMarketDataProvider {
 public:
     bars_callback_t bars_callback;
@@ -18,6 +60,8 @@ public:
     status_callback_t status_callback;
     bool defer_ticks = false;
     std::size_t unsubscribe_calls = 0;
+    std::thread::id subscribe_thread;
+    std::thread::id unsubscribe_thread;
 
     bars_callback_t& on_bar_data() override {
         return bars_callback;
@@ -34,6 +78,7 @@ public:
     bool subscribe_ticks(
             TickSubscriptionRequest request,
             subscription_callback_t callback) override {
+        subscribe_thread = std::this_thread::get_id();
         auto subscription = MarketDataSubscriptionHandle::from_tick_request(
             provider_id(),
             m_next_subscription_id++,
@@ -53,6 +98,7 @@ public:
     bool subscribe_bars(
             BarSubscriptionRequest request,
             subscription_callback_t callback) override {
+        subscribe_thread = std::this_thread::get_id();
         auto subscription = MarketDataSubscriptionHandle::from_bar_request(
             provider_id(),
             m_next_subscription_id++,
@@ -67,6 +113,7 @@ public:
     bool unsubscribe(
             MarketDataSubscriptionHandle subscription,
             subscription_callback_t callback) override {
+        unsubscribe_thread = std::this_thread::get_id();
         ++unsubscribe_calls;
         if (callback) {
             callback(MarketDataSubscriptionResult::unsubscribed(
@@ -126,6 +173,8 @@ public:
 
     std::vector<TickDataBatch> ticks;
     std::vector<MarketDataStatusUpdate> statuses;
+    std::thread::id tick_thread;
+    std::thread::id status_thread;
 
     RoutedSubscriptionId start_ticks(
             BaseMarketDataProvider& provider,
@@ -200,6 +249,78 @@ public:
                 timeframe,
                 BarPriceSource::MID,
                 MarketDataTransport::WEBSOCKET));
+    }
+
+    bool request_ticks(
+            MarketDataProviderId provider_id,
+            std::string symbol,
+            route_callback_t route_callback = {},
+            subscription_callback_t callback = {}) {
+        return post_subscribe_ticks(
+            provider_id,
+            TickSubscriptionRequest(
+                std::move(symbol),
+                MarketDataTransport::WEBSOCKET),
+            std::move(route_callback),
+            std::move(callback));
+    }
+
+    bool request_ticks(
+            std::string_view provider_alias,
+            std::string symbol,
+            route_callback_t route_callback = {},
+            subscription_callback_t callback = {}) {
+        return post_subscribe_ticks(
+            provider_alias,
+            TickSubscriptionRequest(
+                std::move(symbol),
+                MarketDataTransport::WEBSOCKET),
+            std::move(route_callback),
+            std::move(callback));
+    }
+
+    bool request_bars(
+            MarketDataProviderId provider_id,
+            std::string symbol,
+            BarTimeframe timeframe,
+            route_callback_t route_callback = {},
+            subscription_callback_t callback = {}) {
+        return post_subscribe_bars(
+            provider_id,
+            BarSubscriptionRequest(
+                std::move(symbol),
+                timeframe,
+                BarPriceSource::MID,
+                MarketDataTransport::WEBSOCKET),
+            std::move(route_callback),
+            std::move(callback));
+    }
+
+    bool request_bars(
+            std::string_view provider_alias,
+            std::string symbol,
+            BarTimeframe timeframe,
+            route_callback_t route_callback = {},
+            subscription_callback_t callback = {}) {
+        return post_subscribe_bars(
+            provider_alias,
+            BarSubscriptionRequest(
+                std::move(symbol),
+                timeframe,
+                BarPriceSource::MID,
+                MarketDataTransport::WEBSOCKET),
+            std::move(route_callback),
+            std::move(callback));
+    }
+
+    bool request_stop(
+            RoutedSubscriptionId router_id,
+            subscription_callback_t callback = {}) {
+        return post_unsubscribe(router_id, std::move(callback));
+    }
+
+    bool request_stop_all() {
+        return post_unsubscribe_all();
     }
 
     bool stop(
@@ -225,10 +346,12 @@ public:
     }
 
     void on_tick_data(const TickDataBatch& batch) override {
+        tick_thread = std::this_thread::get_id();
         ticks.push_back(batch);
     }
 
     void on_market_data_status(const MarketDataStatusUpdate& update) override {
+        status_thread = std::this_thread::get_id();
         statuses.push_back(update);
     }
 };
@@ -278,6 +401,240 @@ TEST(MarketDataSubscriberBase, SubscribesByStableProviderIdAndAliasFromBotMethod
     bot->stop_all();
     EXPECT_EQ(provider.unsubscribe_calls, 4u);
     EXPECT_EQ(router.subscription_count(), 0u);
+}
+
+TEST(MarketDataSubscriberBase, MarshalsBotThreadCommandsAndEventsToOwnerLoop) {
+    FakeMarketDataProvider provider;
+    ManualOwnerLoop owner_loop;
+    MarketDataRouter router(
+        [&owner_loop](MarketDataRouter::owner_task_t task) {
+            return owner_loop.post(std::move(task));
+        });
+    const MarketDataProviderId provider_id{1001};
+    ASSERT_TRUE(router.register_provider(provider_id, provider, {"demo"}));
+    ASSERT_TRUE(router.has_owner_dispatcher());
+    auto bot = std::make_shared<TestBot>(router);
+
+    RoutedSubscriptionId route;
+    MarketDataSubscriptionStatus subscribe_status =
+        MarketDataSubscriptionStatus::UNKNOWN;
+    std::thread::id route_callback_thread;
+    std::thread::id subscribe_callback_thread;
+    bool subscribe_command_accepted = false;
+    std::thread bot_thread([&]() {
+        subscribe_command_accepted = bot->request_ticks(
+            "demo",
+            "EURUSD",
+            [&](RoutedSubscriptionId update) {
+                route = update;
+                route_callback_thread = std::this_thread::get_id();
+            },
+            [&](MarketDataSubscriptionResult result) {
+                subscribe_status = result.status;
+                subscribe_callback_thread = std::this_thread::get_id();
+            });
+    });
+    bot_thread.join();
+
+    EXPECT_TRUE(subscribe_command_accepted);
+    EXPECT_FALSE(route.valid());
+    EXPECT_EQ(provider.subscribe_thread, std::thread::id{});
+    EXPECT_EQ(owner_loop.size(), 1u);
+
+    const auto owner_thread = std::this_thread::get_id();
+    owner_loop.process_all();
+
+    ASSERT_TRUE(route.valid());
+    EXPECT_TRUE(bot->owns(route));
+    EXPECT_EQ(provider.subscribe_thread, owner_thread);
+    EXPECT_EQ(route_callback_thread, owner_thread);
+    EXPECT_EQ(subscribe_callback_thread, owner_thread);
+    EXPECT_EQ(subscribe_status, MarketDataSubscriptionStatus::SUBSCRIBED);
+
+    const auto subscription = bot->subscription(route);
+    std::thread source_thread([&]() {
+        provider.emit_tick(subscription);
+        provider.emit_ready("EURUSD");
+    });
+    source_thread.join();
+
+    EXPECT_TRUE(bot->ticks.empty());
+    EXPECT_TRUE(bot->statuses.empty());
+    owner_loop.process_all();
+
+    ASSERT_EQ(bot->ticks.size(), 1u);
+    ASSERT_EQ(bot->statuses.size(), 1u);
+    EXPECT_EQ(bot->tick_thread, owner_thread);
+    EXPECT_EQ(bot->status_thread, owner_thread);
+
+    MarketDataSubscriptionStatus unsubscribe_status =
+        MarketDataSubscriptionStatus::UNKNOWN;
+    std::thread::id unsubscribe_callback_thread;
+    bool unsubscribe_command_accepted = false;
+    std::thread stop_thread([&]() {
+        unsubscribe_command_accepted = bot->request_stop(
+            route,
+            [&](MarketDataSubscriptionResult result) {
+                unsubscribe_status = result.status;
+                unsubscribe_callback_thread = std::this_thread::get_id();
+            });
+    });
+    stop_thread.join();
+
+    EXPECT_TRUE(unsubscribe_command_accepted);
+    EXPECT_FALSE(bot->owns(route));
+    EXPECT_EQ(provider.unsubscribe_calls, 0u);
+    owner_loop.process_all();
+
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    EXPECT_EQ(provider.unsubscribe_thread, owner_thread);
+    EXPECT_EQ(unsubscribe_callback_thread, owner_thread);
+    EXPECT_EQ(unsubscribe_status, MarketDataSubscriptionStatus::UNSUBSCRIBED);
+    EXPECT_EQ(router.subscription_count(), 0u);
+}
+
+TEST(MarketDataSubscriberBase, PostsBarCommandsByStableIdAndAlias) {
+    FakeMarketDataProvider provider;
+    ManualOwnerLoop owner_loop;
+    MarketDataRouter router(
+        [&owner_loop](MarketDataRouter::owner_task_t task) {
+            return owner_loop.post(std::move(task));
+        });
+    const MarketDataProviderId provider_id{1001};
+    ASSERT_TRUE(router.register_provider(provider_id, provider, {"demo"}));
+    auto bot = std::make_shared<TestBot>(router);
+    RoutedSubscriptionId by_id;
+    RoutedSubscriptionId by_alias;
+    bool commands_accepted = false;
+
+    std::thread bot_thread([&]() {
+        const bool first = bot->request_bars(
+            provider_id,
+            "EURUSD",
+            60,
+            [&](RoutedSubscriptionId route) {
+                by_id = route;
+            });
+        const bool second = bot->request_bars(
+            "demo",
+            "BTCUSDT",
+            300,
+            [&](RoutedSubscriptionId route) {
+                by_alias = route;
+            });
+        commands_accepted = first && second;
+    });
+    bot_thread.join();
+
+    EXPECT_TRUE(commands_accepted);
+    EXPECT_FALSE(by_id.valid());
+    EXPECT_FALSE(by_alias.valid());
+    owner_loop.process_all();
+
+    EXPECT_TRUE(by_id.valid());
+    EXPECT_TRUE(by_alias.valid());
+    EXPECT_EQ(bot->route_count(), 2u);
+
+    bool stop_accepted = false;
+    bot_thread = std::thread([&]() {
+        stop_accepted = bot->request_stop_all();
+    });
+    bot_thread.join();
+    EXPECT_TRUE(stop_accepted);
+    EXPECT_EQ(provider.unsubscribe_calls, 0u);
+
+    owner_loop.process_all();
+    EXPECT_EQ(provider.unsubscribe_calls, 2u);
+    EXPECT_EQ(router.subscription_count(), 0u);
+}
+
+TEST(MarketDataSubscriberBase, DestructionPostsHandleCleanupToOwnerLoop) {
+    FakeMarketDataProvider provider;
+    ManualOwnerLoop owner_loop;
+    MarketDataRouter router(
+        [&owner_loop](MarketDataRouter::owner_task_t task) {
+            return owner_loop.post(std::move(task));
+        });
+    const MarketDataProviderId provider_id{1001};
+    ASSERT_TRUE(router.register_provider(provider_id, provider));
+    auto bot = std::make_shared<TestBot>(router);
+
+    RoutedSubscriptionId route;
+    ASSERT_TRUE(bot->request_ticks(
+        provider_id,
+        "BTCUSDT",
+        [&](RoutedSubscriptionId update) {
+            route = update;
+        }));
+    owner_loop.process_all();
+    ASSERT_TRUE(route.valid());
+
+    std::thread bot_thread([bot = std::move(bot)]() mutable {
+        bot.reset();
+    });
+    bot_thread.join();
+
+    EXPECT_EQ(provider.unsubscribe_calls, 0u);
+    EXPECT_EQ(owner_loop.size(), 1u);
+
+    const auto owner_thread = std::this_thread::get_id();
+    owner_loop.process_all();
+
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    EXPECT_EQ(provider.unsubscribe_thread, owner_thread);
+    EXPECT_EQ(router.subscription_count(), 0u);
+}
+
+TEST(MarketDataSubscriberBase, DoesNotDeliverEventsInlineWhenOwnerLoopRejectsWork) {
+    FakeMarketDataProvider provider;
+    ManualOwnerLoop owner_loop;
+    MarketDataRouter router(
+        [&owner_loop](MarketDataRouter::owner_task_t task) {
+            return owner_loop.post(std::move(task));
+        });
+    const MarketDataProviderId provider_id{1001};
+    ASSERT_TRUE(router.register_provider(provider_id, provider, {"demo"}));
+    auto bot = std::make_shared<TestBot>(router);
+
+    RoutedSubscriptionId route;
+    ASSERT_TRUE(bot->request_ticks(
+        "demo",
+        "EURUSD",
+        [&route](RoutedSubscriptionId update) {
+            route = update;
+        }));
+    owner_loop.process_all();
+    ASSERT_TRUE(route.valid());
+    ASSERT_EQ(bot->route_count(), 1u);
+    const auto subscription = bot->subscription(route);
+    ASSERT_TRUE(subscription.valid());
+
+    owner_loop.close();
+    std::thread source_thread([&]() {
+        provider.emit_ready("EURUSD");
+        provider.emit_tick(subscription);
+    });
+    source_thread.join();
+
+    EXPECT_TRUE(bot->statuses.empty());
+    EXPECT_TRUE(bot->ticks.empty());
+
+    router.shutdown();
+}
+
+TEST(MarketDataSubscriberBase, RejectsPostedCommandsWithoutAnOwnerDispatcher) {
+    MarketDataRouter router;
+    auto bot = std::make_shared<TestBot>(router);
+    RoutedSubscriptionId route;
+
+    EXPECT_FALSE(bot->request_ticks(
+        MarketDataProviderId{1001},
+        "EURUSD",
+        [&](RoutedSubscriptionId update) {
+            route = update;
+        }));
+    EXPECT_FALSE(route.valid());
+    EXPECT_EQ(bot->route_count(), 0u);
 }
 
 TEST(MarketDataSubscriberBase, ExplicitStopAndStopAllReleaseStoredHandles) {

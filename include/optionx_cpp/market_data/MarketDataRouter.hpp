@@ -217,9 +217,11 @@ namespace optionx::market_data {
     ///          do not bind MarketDataHub or assign those callbacks concurrently.
     ///
     ///          Container access is synchronized and callbacks are never invoked
-    ///          under the router mutex. Deterministic replay/live ordering still
-    ///          requires subscribe and provider publish calls to use one owner
-    ///          loop, such as platform process().
+    ///          under the router mutex. Synchronous subscribe/unsubscribe methods
+    ///          remain owner-loop operations. Applications with bot threads can
+    ///          configure an owner dispatcher and use the posted helpers exposed
+    ///          by MarketDataSubscriberBase. Provider completions and market-data
+    ///          delivery are then marshalled back into the same owner loop.
     ///
     ///          Releasing a route stops delivery immediately. If the provider rejects
     ///          or fails physical unsubscription, the router retains that provider
@@ -229,9 +231,19 @@ namespace optionx::market_data {
     public:
         using SubscriptionHandle = MarketDataRouterSubscription; ///< Move-only route owner.
         using subscription_callback_t = BaseMarketDataProvider::subscription_callback_t; ///< Operation callback.
+        using owner_task_t = std::function<void()>; ///< One owner-loop operation.
+        using owner_dispatcher_t = std::function<bool(owner_task_t)>; ///< Thread-safe task ingress.
 
-        /// \brief Constructs an empty router.
+        /// \brief Constructs an empty router for direct owner-loop use.
         MarketDataRouter();
+
+        /// \brief Constructs a router with cross-thread owner-loop dispatch.
+        /// \details The dispatcher must be thread-safe, enqueue tasks in FIFO
+        ///          order, and remain available until Router shutdown completes.
+        ///          It must not execute posted work inline on a foreign caller.
+        ///          Provider events are dropped if the configured dispatcher
+        ///          rejects them during shutdown.
+        explicit MarketDataRouter(owner_dispatcher_t owner_dispatcher);
 
         /// \brief Copy construction is disabled because provider callbacks are owned.
         MarketDataRouter(const MarketDataRouter&) = delete;
@@ -274,6 +286,13 @@ namespace optionx::market_data {
         /// \brief Returns a copy of the aliases assigned to a registered provider.
         [[nodiscard]] std::vector<std::string> provider_aliases(
                 MarketDataProviderId id) const;
+
+        /// \brief Posts work to the configured provider owner loop.
+        /// \return False when no dispatcher is configured or it rejects the task.
+        bool post_to_owner(owner_task_t task) const;
+
+        /// \brief Returns true when cross-thread owner-loop dispatch is configured.
+        [[nodiscard]] bool has_owner_dispatcher() const noexcept;
 
         /// \brief Creates a tick route for a shared subscriber.
         /// \param provider Provider that owns the physical subscription.
@@ -398,6 +417,10 @@ namespace optionx::market_data {
         public:
             using subscription_callback_t = BaseMarketDataProvider::subscription_callback_t;
 
+            explicit MarketDataRouterState(
+                    MarketDataRouter::owner_dispatcher_t owner_dispatcher = {})
+                    : m_owner_dispatcher(std::move(owner_dispatcher)) {}
+
             struct StreamDescriptor {
                 MarketDataType type = MarketDataType::UNKNOWN;
                 std::string symbol;
@@ -503,6 +526,11 @@ namespace optionx::market_data {
             std::size_t retry_failed_unsubscribes();
             void shutdown() noexcept;
 
+            bool post_to_owner(MarketDataRouter::owner_task_t task) const;
+            [[nodiscard]] bool has_owner_dispatcher() const noexcept {
+                return static_cast<bool>(m_owner_dispatcher);
+            }
+
             void route_ticks(
                     ProviderInstanceId provider_id,
                     std::unique_ptr<TickDataBatch> batch);
@@ -529,6 +557,7 @@ namespace optionx::market_data {
                 m_registered_provider_ids;
             std::uint64_t m_next_router_id = 1;
             bool m_shutdown = false;
+            MarketDataRouter::owner_dispatcher_t m_owner_dispatcher;
 
             static StreamDescriptor stream_from(const TickSubscriptionRequest& request);
             static StreamDescriptor stream_from(const BarSubscriptionRequest& request);
@@ -599,8 +628,31 @@ namespace optionx::market_data {
                     subscription_callback_t callback,
                     MarketDataSubscriptionResult result);
 
+            void dispatch_or_run(MarketDataRouter::owner_task_t task) const;
+
             friend class ::optionx::market_data::MarketDataRouterSubscription;
         };
+
+        inline bool MarketDataRouterState::post_to_owner(
+                MarketDataRouter::owner_task_t task) const {
+            if (!task || !m_owner_dispatcher) return false;
+            try {
+                return m_owner_dispatcher(std::move(task));
+            } catch (...) {
+                return false;
+            }
+        }
+
+        inline void MarketDataRouterState::dispatch_or_run(
+                MarketDataRouter::owner_task_t task) const {
+            if (!task) return;
+            if (!m_owner_dispatcher) {
+                task();
+                return;
+            }
+
+            post_to_owner(std::move(task));
+        }
 
         inline MarketDataRouterState::StreamDescriptor
         MarketDataRouterState::stream_from(const TickSubscriptionRequest& request) {
@@ -822,19 +874,34 @@ namespace optionx::market_data {
             provider.on_tick_data() =
                 [weak_state, provider_id](std::unique_ptr<TickDataBatch> batch) {
                     if (const auto state = weak_state.lock()) {
-                        state->route_ticks(provider_id, std::move(batch));
+                        auto pending = std::make_shared<std::unique_ptr<TickDataBatch>>(
+                            std::move(batch));
+                        state->dispatch_or_run(
+                            [state, provider_id, pending]() mutable {
+                                state->route_ticks(provider_id, std::move(*pending));
+                            });
                     }
                 };
             provider.on_bar_data() =
                 [weak_state, provider_id](std::unique_ptr<BarDataBatch> batch) {
                     if (const auto state = weak_state.lock()) {
-                        state->route_bars(provider_id, std::move(batch));
+                        auto pending = std::make_shared<std::unique_ptr<BarDataBatch>>(
+                            std::move(batch));
+                        state->dispatch_or_run(
+                            [state, provider_id, pending]() mutable {
+                                state->route_bars(provider_id, std::move(*pending));
+                            });
                     }
                 };
             provider.on_market_data_status() =
                 [weak_state, provider_id](MarketDataStatusUpdate update) {
                     if (const auto state = weak_state.lock()) {
-                        state->route_status(provider_id, std::move(update));
+                        auto pending = std::make_shared<MarketDataStatusUpdate>(
+                            std::move(update));
+                        state->dispatch_or_run(
+                            [state, provider_id, pending]() mutable {
+                                state->route_status(provider_id, std::move(*pending));
+                            });
                     }
                 };
 
@@ -959,11 +1026,20 @@ namespace optionx::market_data {
                     std::move(request),
                     [state, router_id, &provider, callback](
                             MarketDataSubscriptionResult result) mutable {
-                        state->complete_subscribe(
-                            router_id,
-                            provider,
-                            std::move(result),
-                            std::move(callback));
+                        auto pending = std::make_shared<MarketDataSubscriptionResult>(
+                            std::move(result));
+                        state->dispatch_or_run(
+                            [state,
+                             router_id,
+                             provider = &provider,
+                             callback = std::move(callback),
+                             pending]() mutable {
+                                state->complete_subscribe(
+                                    router_id,
+                                    *provider,
+                                    std::move(*pending),
+                                    std::move(callback));
+                            });
                     });
             } catch (const std::exception& exception) {
                 fail_pending_subscribe(
@@ -1098,11 +1174,20 @@ namespace optionx::market_data {
                     std::move(request),
                     [state, router_id, &provider, callback](
                             MarketDataSubscriptionResult result) mutable {
-                        state->complete_subscribe(
-                            router_id,
-                            provider,
-                            std::move(result),
-                            std::move(callback));
+                        auto pending = std::make_shared<MarketDataSubscriptionResult>(
+                            std::move(result));
+                        state->dispatch_or_run(
+                            [state,
+                             router_id,
+                             provider = &provider,
+                             callback = std::move(callback),
+                             pending]() mutable {
+                                state->complete_subscribe(
+                                    router_id,
+                                    *provider,
+                                    std::move(*pending),
+                                    std::move(callback));
+                            });
                     });
             } catch (const std::exception& exception) {
                 fail_pending_subscribe(
@@ -1361,11 +1446,20 @@ namespace optionx::market_data {
                      subscription,
                      callback](
                             MarketDataSubscriptionResult result) mutable {
-                        state->complete_unsubscribe(
-                            router_id,
-                            subscription,
-                            std::move(result),
-                            std::move(callback));
+                        auto pending = std::make_shared<MarketDataSubscriptionResult>(
+                            std::move(result));
+                        state->dispatch_or_run(
+                            [state,
+                             router_id,
+                             subscription,
+                             callback = std::move(callback),
+                             pending]() mutable {
+                                state->complete_unsubscribe(
+                                    router_id,
+                                    subscription,
+                                    std::move(*pending),
+                                    std::move(callback));
+                            });
                     });
             } catch (const std::exception& exception) {
                 complete_unsubscribe(
@@ -1820,6 +1914,10 @@ namespace optionx::market_data {
     inline MarketDataRouter::MarketDataRouter()
             : m_state(std::make_shared<detail::MarketDataRouterState>()) {}
 
+    inline MarketDataRouter::MarketDataRouter(owner_dispatcher_t owner_dispatcher)
+            : m_state(std::make_shared<detail::MarketDataRouterState>(
+                  std::move(owner_dispatcher))) {}
+
     inline MarketDataRouter::~MarketDataRouter() {
         shutdown();
     }
@@ -1856,6 +1954,14 @@ namespace optionx::market_data {
     inline std::vector<std::string> MarketDataRouter::provider_aliases(
             MarketDataProviderId id) const {
         return m_state ? m_state->provider_aliases(id) : std::vector<std::string>{};
+    }
+
+    inline bool MarketDataRouter::post_to_owner(owner_task_t task) const {
+        return m_state && m_state->post_to_owner(std::move(task));
+    }
+
+    inline bool MarketDataRouter::has_owner_dispatcher() const noexcept {
+        return m_state && m_state->has_owner_dispatcher();
     }
 
     inline MarketDataRouter::SubscriptionHandle MarketDataRouter::subscribe_ticks(

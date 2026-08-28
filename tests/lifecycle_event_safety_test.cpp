@@ -117,6 +117,36 @@ TEST(BaseTradingPlatformLifecycle, ShutdownBeforeProcessSkipsLifecycleCallbacks)
     EXPECT_EQ(platform.loop_count(), 0);
 }
 
+TEST(BaseTradingPlatformLifecycle, PostsForeignThreadWorkToTheOwnerLoop) {
+    TestPlatform platform;
+    platform.run(false);
+    std::atomic<bool> accepted{false};
+    std::atomic<bool> executed{false};
+    std::thread::id callback_thread;
+
+    std::thread bot_thread([&]() {
+        accepted.store(
+            platform.post_task([&]() {
+                callback_thread = std::this_thread::get_id();
+                executed.store(true, std::memory_order_release);
+            }),
+            std::memory_order_release);
+    });
+    bot_thread.join();
+
+    EXPECT_TRUE(accepted.load(std::memory_order_acquire));
+    EXPECT_FALSE(executed.load(std::memory_order_acquire));
+
+    const auto owner_thread = std::this_thread::get_id();
+    platform.process();
+
+    EXPECT_TRUE(executed.load(std::memory_order_acquire));
+    EXPECT_EQ(callback_thread, owner_thread);
+
+    platform.shutdown();
+    EXPECT_FALSE(platform.post_task([]() {}));
+}
+
 TEST(BaseTradingPlatformLifecycle, ConcurrentRunAndShutdownDoNotRunAfterStop) {
     for (int attempt = 0; attempt < 64; ++attempt) {
         TestPlatform platform;
