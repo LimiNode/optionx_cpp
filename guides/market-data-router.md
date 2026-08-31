@@ -337,8 +337,13 @@ transport is ready. Those stages are observed separately:
 If the subscriber expires before a posted subscribe command runs, the command is
 cancelled and its callbacks are not invoked. Once a configured dispatcher starts
 rejecting work during shutdown, new provider completions and deliveries are
-dropped rather than being invoked inline on the source thread. A route whose
-completion was rejected remains pending until Router cleanup.
+dropped rather than being invoked inline on the source thread. Tick, bar, and
+status deliveries need no physical cleanup and are discarded immediately. If a
+rejected completion reports a successful subscribe, Router retains its concrete
+provider handle internally, quarantines that provider from new routes, and keeps
+the logical route pending. `router.shutdown()` unsubscribes the retained handle
+from the owner loop; neither the subscription callback nor subscriber callbacks
+run on the source thread.
 
 All Router callbacks are serialized by the owner loop, but fields read directly
 from a different bot thread still require the bot's own mutex, atomics, or

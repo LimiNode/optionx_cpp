@@ -443,6 +443,7 @@ namespace optionx::market_data {
                 std::weak_ptr<IMarketDataSubscriber> subscriber;
                 std::shared_ptr<MarketDataRouterSubscriptionControl> control;
                 StreamDescriptor stream;
+                MarketDataSubscriptionHandle retained_cleanup_subscription;
                 EntryPhase phase = EntryPhase::PENDING;
                 bool release_requested = false;
                 subscription_callback_t release_callback;
@@ -628,7 +629,11 @@ namespace optionx::market_data {
                     subscription_callback_t callback,
                     MarketDataSubscriptionResult result);
 
-            void dispatch_or_run(MarketDataRouter::owner_task_t task) const;
+            bool dispatch_or_run(MarketDataRouter::owner_task_t task) const;
+            void retain_rejected_subscribe_cleanup(
+                    RoutedSubscriptionId router_id,
+                    BaseMarketDataProvider& provider,
+                    MarketDataSubscriptionResult& result);
 
             friend class ::optionx::market_data::MarketDataRouterSubscription;
         };
@@ -643,15 +648,39 @@ namespace optionx::market_data {
             }
         }
 
-        inline void MarketDataRouterState::dispatch_or_run(
+        inline bool MarketDataRouterState::dispatch_or_run(
                 MarketDataRouter::owner_task_t task) const {
-            if (!task) return;
+            if (!task) return false;
             if (!m_owner_dispatcher) {
                 task();
+                return true;
+            }
+
+            return post_to_owner(std::move(task));
+        }
+
+        inline void MarketDataRouterState::retain_rejected_subscribe_cleanup(
+                RoutedSubscriptionId router_id,
+                BaseMarketDataProvider& provider,
+                MarketDataSubscriptionResult& result) {
+            if (!result.success() ||
+                !result.subscription.valid() ||
+                result.subscription.provider_id != provider.provider_id()) {
                 return;
             }
 
-            post_to_owner(std::move(task));
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto entry_it = m_entries.find(router_id);
+            if (m_shutdown ||
+                entry_it == m_entries.end() ||
+                entry_it->second->provider != &provider ||
+                entry_it->second->phase != EntryPhase::PENDING ||
+                entry_it->second->retained_cleanup_subscription.valid()) {
+                return;
+            }
+
+            entry_it->second->retained_cleanup_subscription =
+                std::move(result.subscription);
         }
 
         inline MarketDataRouterState::StreamDescriptor
@@ -954,7 +983,8 @@ namespace optionx::market_data {
                     (void)id;
                     if (existing_entry->provider_id == provider.provider_id() &&
                         (existing_entry->phase == EntryPhase::UNSUBSCRIBING ||
-                         existing_entry->phase == EntryPhase::CLEANUP_FAILED)) {
+                         existing_entry->phase == EntryPhase::CLEANUP_FAILED ||
+                         existing_entry->retained_cleanup_subscription.valid())) {
                         error_message =
                             "Market-data provider has pending or failed physical "
                             "subscription cleanup; wait for completion or retry failed "
@@ -1028,7 +1058,7 @@ namespace optionx::market_data {
                             MarketDataSubscriptionResult result) mutable {
                         auto pending = std::make_shared<MarketDataSubscriptionResult>(
                             std::move(result));
-                        state->dispatch_or_run(
+                        const bool dispatched = state->dispatch_or_run(
                             [state,
                              router_id,
                              provider = &provider,
@@ -1040,6 +1070,12 @@ namespace optionx::market_data {
                                     std::move(*pending),
                                     std::move(callback));
                             });
+                        if (!dispatched) {
+                            state->retain_rejected_subscribe_cleanup(
+                                router_id,
+                                provider,
+                                *pending);
+                        }
                     });
             } catch (const std::exception& exception) {
                 fail_pending_subscribe(
@@ -1176,7 +1212,7 @@ namespace optionx::market_data {
                             MarketDataSubscriptionResult result) mutable {
                         auto pending = std::make_shared<MarketDataSubscriptionResult>(
                             std::move(result));
-                        state->dispatch_or_run(
+                        const bool dispatched = state->dispatch_or_run(
                             [state,
                              router_id,
                              provider = &provider,
@@ -1188,6 +1224,12 @@ namespace optionx::market_data {
                                     std::move(*pending),
                                     std::move(callback));
                             });
+                        if (!dispatched) {
+                            state->retain_rejected_subscribe_cleanup(
+                                router_id,
+                                provider,
+                                *pending);
+                        }
                     });
             } catch (const std::exception& exception) {
                 fail_pending_subscribe(
@@ -1821,6 +1863,12 @@ namespace optionx::market_data {
                     const auto subscription = entry->control->provider_subscription;
                     if (entry->provider && subscription.valid()) {
                         subscriptions.emplace_back(entry->provider, subscription);
+                    }
+                    if (entry->provider &&
+                        entry->retained_cleanup_subscription.valid()) {
+                        subscriptions.emplace_back(
+                            entry->provider,
+                            std::move(entry->retained_cleanup_subscription));
                     }
                 }
                 m_entries.clear();

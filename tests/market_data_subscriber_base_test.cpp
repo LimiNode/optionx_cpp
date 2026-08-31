@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -59,7 +60,9 @@ public:
     ticks_callback_t ticks_callback;
     status_callback_t status_callback;
     bool defer_ticks = false;
+    bool defer_bars = false;
     std::size_t unsubscribe_calls = 0;
+    std::vector<MarketDataSubscriptionHandle> active_subscriptions;
     std::thread::id subscribe_thread;
     std::thread::id unsubscribe_thread;
 
@@ -84,10 +87,11 @@ public:
             m_next_subscription_id++,
             request);
         if (defer_ticks) {
-            m_pending_subscription = std::move(subscription);
-            m_pending_callback = std::move(callback);
+            m_pending_tick_subscription = std::move(subscription);
+            m_pending_tick_callback = std::move(callback);
             return true;
         }
+        active_subscriptions.push_back(subscription);
         if (callback) {
             callback(MarketDataSubscriptionResult::subscribed(
                 std::move(subscription)));
@@ -103,6 +107,12 @@ public:
             provider_id(),
             m_next_subscription_id++,
             request);
+        if (defer_bars) {
+            m_pending_bar_subscription = std::move(subscription);
+            m_pending_bar_callback = std::move(callback);
+            return true;
+        }
+        active_subscriptions.push_back(subscription);
         if (callback) {
             callback(MarketDataSubscriptionResult::subscribed(
                 std::move(subscription)));
@@ -115,6 +125,16 @@ public:
             subscription_callback_t callback) override {
         unsubscribe_thread = std::this_thread::get_id();
         ++unsubscribe_calls;
+        const auto active = std::find_if(
+            active_subscriptions.begin(),
+            active_subscriptions.end(),
+            [&subscription](const MarketDataSubscriptionHandle& candidate) {
+                return candidate.provider_id == subscription.provider_id &&
+                       candidate.id == subscription.id;
+            });
+        if (active != active_subscriptions.end()) {
+            active_subscriptions.erase(active);
+        }
         if (callback) {
             callback(MarketDataSubscriptionResult::unsubscribed(
                 std::move(subscription)));
@@ -123,17 +143,26 @@ public:
     }
 
     void complete_pending_tick() {
-        ASSERT_TRUE(static_cast<bool>(m_pending_callback));
-        auto callback = std::move(m_pending_callback);
+        ASSERT_TRUE(static_cast<bool>(m_pending_tick_callback));
+        active_subscriptions.push_back(m_pending_tick_subscription);
+        auto callback = std::move(m_pending_tick_callback);
         callback(MarketDataSubscriptionResult::subscribed(
-            std::move(m_pending_subscription)));
+            std::move(m_pending_tick_subscription)));
+    }
+
+    void complete_pending_bar() {
+        ASSERT_TRUE(static_cast<bool>(m_pending_bar_callback));
+        active_subscriptions.push_back(m_pending_bar_subscription);
+        auto callback = std::move(m_pending_bar_callback);
+        callback(MarketDataSubscriptionResult::subscribed(
+            std::move(m_pending_bar_subscription)));
     }
 
     void fail_pending_tick() {
-        ASSERT_TRUE(static_cast<bool>(m_pending_callback));
-        auto callback = std::move(m_pending_callback);
+        ASSERT_TRUE(static_cast<bool>(m_pending_tick_callback));
+        auto callback = std::move(m_pending_tick_callback);
         callback(MarketDataSubscriptionResult::failed(
-            std::move(m_pending_subscription),
+            std::move(m_pending_tick_subscription),
             MarketDataSubscriptionStatus::FAILED,
             "Deferred test failure."));
     }
@@ -162,8 +191,10 @@ public:
 
 private:
     SubscriptionId m_next_subscription_id = 1;
-    MarketDataSubscriptionHandle m_pending_subscription;
-    subscription_callback_t m_pending_callback;
+    MarketDataSubscriptionHandle m_pending_tick_subscription;
+    MarketDataSubscriptionHandle m_pending_bar_subscription;
+    subscription_callback_t m_pending_tick_callback;
+    subscription_callback_t m_pending_bar_callback;
 };
 
 class TestBot final : public MarketDataSubscriberBase {
@@ -215,14 +246,16 @@ public:
     RoutedSubscriptionId start_bars(
             BaseMarketDataProvider& provider,
             std::string symbol,
-            BarTimeframe timeframe) {
+            BarTimeframe timeframe,
+            subscription_callback_t callback = {}) {
         return subscribe_bars(
             provider,
             BarSubscriptionRequest(
                 std::move(symbol),
                 timeframe,
                 BarPriceSource::MID,
-                MarketDataTransport::WEBSOCKET));
+                MarketDataTransport::WEBSOCKET),
+            std::move(callback));
     }
 
     RoutedSubscriptionId start_bars(
@@ -620,6 +653,72 @@ TEST(MarketDataSubscriberBase, DoesNotDeliverEventsInlineWhenOwnerLoopRejectsWor
     EXPECT_TRUE(bot->ticks.empty());
 
     router.shutdown();
+}
+
+TEST(MarketDataSubscriberBase, RetainsRejectedSubscribeCompletionsForShutdownCleanup) {
+    FakeMarketDataProvider provider;
+    provider.defer_ticks = true;
+    provider.defer_bars = true;
+    ManualOwnerLoop owner_loop;
+    MarketDataRouter router(
+        [&owner_loop](MarketDataRouter::owner_task_t task) {
+            return owner_loop.post(std::move(task));
+        });
+    auto bot = std::make_shared<TestBot>(router);
+    std::size_t completion_callbacks = 0;
+
+    const auto ticks = bot->start_ticks(
+        provider,
+        "EURUSD",
+        [&completion_callbacks](MarketDataSubscriptionResult) {
+            ++completion_callbacks;
+        });
+    const auto bars = bot->start_bars(
+        provider,
+        "BTCUSDT",
+        60,
+        [&completion_callbacks](MarketDataSubscriptionResult) {
+            ++completion_callbacks;
+        });
+
+    ASSERT_TRUE(ticks.valid());
+    ASSERT_TRUE(bars.valid());
+    ASSERT_EQ(router.subscription_count(), 2u);
+    ASSERT_TRUE(provider.active_subscriptions.empty());
+
+    owner_loop.close();
+    std::thread source_thread([&]() {
+        provider.complete_pending_tick();
+        provider.complete_pending_bar();
+    });
+    source_thread.join();
+
+    EXPECT_EQ(completion_callbacks, 0u);
+    EXPECT_EQ(owner_loop.size(), 0u);
+    EXPECT_EQ(provider.active_subscriptions.size(), 2u);
+    EXPECT_FALSE(bot->subscription(ticks).valid());
+    EXPECT_FALSE(bot->subscription(bars).valid());
+
+    MarketDataSubscriptionStatus quarantined_status =
+        MarketDataSubscriptionStatus::UNKNOWN;
+    const auto quarantined = bot->start_ticks(
+        provider,
+        "GBPUSD",
+        [&quarantined_status](MarketDataSubscriptionResult result) {
+            quarantined_status = result.status;
+        });
+    EXPECT_FALSE(quarantined.valid());
+    EXPECT_EQ(quarantined_status, MarketDataSubscriptionStatus::FAILED);
+    EXPECT_EQ(router.subscription_count(), 2u);
+    EXPECT_EQ(provider.active_subscriptions.size(), 2u);
+
+    const auto owner_thread = std::this_thread::get_id();
+    router.shutdown();
+
+    EXPECT_EQ(provider.unsubscribe_calls, 2u);
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_EQ(provider.unsubscribe_thread, owner_thread);
+    EXPECT_EQ(completion_callbacks, 0u);
 }
 
 TEST(MarketDataSubscriberBase, RejectsPostedCommandsWithoutAnOwnerDispatcher) {
