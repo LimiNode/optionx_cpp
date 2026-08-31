@@ -148,6 +148,33 @@ if (!eur.valid()) {
 владение; `unsubscribe()`, `reset()`, destructor или shutdown Router освобождают
 его. Handle должен жить всё время, пока нужен поток.
 
+### Ошибка Физического Cleanup
+
+Логическое освобождение маршрута и физический cleanup у провайдера разделены.
+Сразу после освобождения handle становится невалидным, а маршрут перестаёт
+получать scoped и unscoped данные. Если provider `unsubscribe()` вернул `false`,
+бросил исключение или завершился с failed result, Router сохраняет физический
+`MarketDataSubscriptionHandle`, callback binding провайдера и внутреннюю cleanup
+entry. `subscription_count()` включает такую сохранённую entry, а
+`failed_unsubscribe_count()` отдельно считает ошибки cleanup.
+
+Router помещает provider с failed cleanup в карантин: существующие active
+маршруты продолжают работать, но новые маршруты через этого provider отклоняются
+до успешной очистки. Повтор выполняется из owner loop:
+
+```cpp
+if (router.failed_unsubscribe_count() != 0) {
+    const auto accepted = router.retry_failed_unsubscribes();
+    // accepted считает retry-операции, принятые providers. Завершение может
+    // быть асинхронным, поэтому затем снова проверь failed_unsubscribe_count().
+}
+```
+
+Исходный unsubscribe callback получает ошибку один раз; внутренний retry не
+восстанавливает уже использованный публичный handle. Для постоянных ошибок
+применяй backoff на уровне приложения. `shutdown()` делает последнюю
+best-effort попытку cleanup перед освобождением состояния Router.
+
 Необязательный subscription callback сообщает о принятии desired state
 провайдером. Это не callback готовности транспорта:
 
@@ -334,7 +361,9 @@ provider и owner dispatcher
 2. Запроси unsubscribe или уничтожь subscribers, пока dispatcher принимает
    работу.
 3. Продолжай обработку owner loop, пока не завершатся unsubscribe commands и
-   вложенные provider completion callbacks.
+   вложенные provider completion callbacks. Проверь
+   `failed_unsubscribe_count()` и выполни retry по политике приложения, пока
+   owner loop и providers ещё доступны.
 4. Вызови `router.shutdown()` из owner loop. Метод идемпотентен, освобождает
    callback slots провайдера и запрашивает unsubscribe оставшихся маршрутов.
 5. Останови platform/dispatcher, затем уничтожай providers.

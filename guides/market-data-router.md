@@ -148,6 +148,33 @@ if (!eur.valid()) {
 `unsubscribe()`, `reset()`, destruction, or Router shutdown releases it. Keep the
 handle alive for as long as the stream is required.
 
+### Failed Physical Cleanup
+
+Logical route release and physical provider cleanup are separate. As soon as a
+handle is released, it becomes invalid and that route stops receiving scoped or
+unscoped data. If provider `unsubscribe()` returns `false`, throws, or completes
+with a failed result, Router keeps the physical
+`MarketDataSubscriptionHandle`, the provider callback binding, and an internal
+cleanup entry. `subscription_count()` includes that retained entry, while
+`failed_unsubscribe_count()` reports failed cleanup entries specifically.
+
+Router quarantines a provider with failed cleanup: existing active routes keep
+working, but new routes through that provider are rejected until cleanup
+succeeds. Retry from the owner loop:
+
+```cpp
+if (router.failed_unsubscribe_count() != 0) {
+    const auto accepted = router.retry_failed_unsubscribes();
+    // accepted counts retry operations accepted by providers. Completion may
+    // be asynchronous, so inspect failed_unsubscribe_count() again afterwards.
+}
+```
+
+The original unsubscribe callback receives the failure once; internal retries
+do not resurrect the consumed public handle. Apply application-level backoff
+before retrying persistent failures. `shutdown()` makes one final best-effort
+cleanup attempt before releasing Router state.
+
 The optional subscription callback reports desired-state acceptance by the
 provider. It is not a transport-readiness callback:
 
@@ -333,7 +360,9 @@ Use this shutdown order:
 2. Request unsubscribe or destroy subscribers while the dispatcher still accepts
    work.
 3. Keep processing the owner loop until unsubscribe commands and any nested
-   provider completion callbacks are drained.
+   provider completion callbacks are drained. Inspect
+   `failed_unsubscribe_count()` and retry according to the application policy
+   while the owner loop and providers are still available.
 4. Call `router.shutdown()` from the owner loop. It is idempotent, releases
    provider callback slots, and requests unsubscribe for remaining active routes.
 5. Stop the platform/dispatcher and then destroy providers.
