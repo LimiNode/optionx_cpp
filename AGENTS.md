@@ -14,6 +14,10 @@
   по платформам, модулям, событиям, DTO, storage и bridge API.
 - [API and header contracts](guides/api-and-header-contracts.md) - публичный
   API, include-модель, typed broker results, trade result/history contracts.
+- [Market data router guide](guides/market-data-router.md) - канонический
+  контракт Router, provider registry, replay, ownership и bot-thread dispatch.
+- [Market data router guide RU](guides/market-data-router.ru.md) - русский
+  перевод, обновляемый вместе с каноническим руководством.
 - [Codebase orientation](guides/codebase-orientation.md) - карта проекта,
   DDD-слои, зависимости, расширение и безопасные точки входа.
 - [Build and test](guides/build-and-test.md) - CMake options, зависимости,
@@ -83,3 +87,7 @@
   `guides/bridge-protocol-v1.md`; при изменении её синхронизируй русский
   перевод `guides/bridge-protocol-v1.ru.md`. Не вноси смысловые изменения в
   английский документ, исходя только из русской версии.
+- Для market-data Router каноническая версия - английская
+  `guides/market-data-router.md`. Любое смысловое изменение синхронизируй с
+  `guides/market-data-router.ru.md` в том же PR; русский перевод не является
+  источником обратных изменений английского контракта.
