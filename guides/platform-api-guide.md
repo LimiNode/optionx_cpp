@@ -123,6 +123,9 @@ Subscription rules:
 
 Файл: `include/optionx_cpp/market_data/MarketDataRouter.hpp`.
 
+Полное руководство: [English](market-data-router.md) |
+[Русский](market-data-router.ru.md).
+
 `MarketDataRouter` owns public provider subscriptions and routes each batch or
 status only to the subscriber associated with that concrete subscription. Use it
 when a bot or chart needs RAII lifetime and per-subscription status replay; use
