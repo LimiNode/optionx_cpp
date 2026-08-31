@@ -247,6 +247,12 @@ Contract rules:
   therefore must not be bound to the same provider at the same time.
 - Subscribers remain weakly owned. Providers must outlive the router and any
   pending provider operations.
+- Releasing a route stops event delivery immediately. If physical provider
+  unsubscription is rejected or completes with failure, the Router retains the
+  provider handle and callback binding for cleanup. Check
+  `failed_unsubscribe_count()` and call `retry_failed_unsubscribes()` from the
+  owner loop; new routes through that provider are rejected until cleanup
+  succeeds. `shutdown()` makes a final best-effort attempt.
 
 Future market-data routing work: add `MarketDataSubscriberBase` as convenience
 sugar for bots that want to subscribe from inside their own methods while

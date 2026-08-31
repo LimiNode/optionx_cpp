@@ -128,6 +128,8 @@ namespace optionx::market_data {
         /// \brief Explicitly releases the route and requests provider unsubscription.
         /// \param callback Optional callback receiving the provider unsubscribe result.
         /// \return True when an unsubscribe or pending cancellation was accepted.
+        /// \details The logical route is released even when physical provider cleanup
+        ///          fails. MarketDataRouter retains failed cleanup ownership for retry.
         bool unsubscribe(BaseMarketDataProvider::subscription_callback_t callback = {});
 
         /// \brief Releases the route without an unsubscribe completion callback.
@@ -163,6 +165,11 @@ namespace optionx::market_data {
     ///          under the router mutex. Deterministic replay/live ordering still
     ///          requires subscribe and provider publish calls to use one owner
     ///          loop, such as platform process().
+    ///
+    ///          Releasing a route stops delivery immediately. If the provider rejects
+    ///          or fails physical unsubscription, the router retains that provider
+    ///          handle, keeps the callback binding, and rejects new routes through the
+    ///          affected provider until retry_failed_unsubscribes() succeeds.
     class MarketDataRouter {
     public:
         using SubscriptionHandle = MarketDataRouterSubscription; ///< Move-only route owner.
@@ -221,8 +228,20 @@ namespace optionx::market_data {
                 BarSubscriptionRequest request,
                 subscription_callback_t callback = {});
 
-        /// \brief Returns the number of pending and active logical routes.
+        /// \brief Returns the number of owned provider subscription entries.
+        /// \details Includes pending routes, active routes, and failed physical
+        ///          unsubscriptions retained for cleanup.
         [[nodiscard]] std::size_t subscription_count() const;
+
+        /// \brief Returns the number of failed physical unsubscriptions awaiting retry.
+        [[nodiscard]] std::size_t failed_unsubscribe_count() const;
+
+        /// \brief Retries physical cleanup retained after unsubscribe failures.
+        /// \return Number of retry operations accepted by providers.
+        /// \details Call from the same owner loop used for subscribe and provider
+        ///          publish operations. A provider remains quarantined until every
+        ///          retained cleanup for it completes successfully.
+        std::size_t retry_failed_unsubscribes();
 
         /// \brief Stops all routes and clears provider callback bindings.
         void shutdown() noexcept;
@@ -249,7 +268,8 @@ namespace optionx::market_data {
             enum class EntryPhase {
                 PENDING,
                 ACTIVE,
-                UNSUBSCRIBING
+                UNSUBSCRIBING,
+                CLEANUP_FAILED
             };
 
             struct Entry {
@@ -294,6 +314,8 @@ namespace optionx::market_data {
                     subscription_callback_t callback);
 
             [[nodiscard]] std::size_t subscription_count() const;
+            [[nodiscard]] std::size_t failed_unsubscribe_count() const;
+            std::size_t retry_failed_unsubscribes();
             void shutdown() noexcept;
 
             void route_ticks(
@@ -547,6 +569,19 @@ namespace optionx::market_data {
                     provider_it->second.provider != &provider) {
                     error_message = "Market-data provider binding was released.";
                     return {};
+                }
+
+                for (const auto& [id, existing_entry] : m_entries) {
+                    (void)id;
+                    if (existing_entry->provider_id == provider.provider_id() &&
+                        (existing_entry->phase == EntryPhase::UNSUBSCRIBING ||
+                         existing_entry->phase == EntryPhase::CLEANUP_FAILED)) {
+                        error_message =
+                            "Market-data provider has pending or failed physical "
+                            "subscription cleanup; wait for completion or retry failed "
+                            "unsubscriptions before creating new routes.";
+                        return {};
+                    }
                 }
 
                 auto router_id_value = m_next_router_id++;
@@ -946,24 +981,29 @@ namespace optionx::market_data {
                 MarketDataSubscriptionHandle expected_subscription,
                 MarketDataSubscriptionResult result,
                 subscription_callback_t callback) {
+            if (!result.subscription.valid()) {
+                result.subscription = expected_subscription;
+            }
+
             BaseMarketDataProvider* unbind = nullptr;
-            bool removed = false;
+            bool handled = false;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto it = m_entries.find(router_id);
                 if (it != m_entries.end() &&
                     it->second->phase == EntryPhase::UNSUBSCRIBING) {
-                    set_control_released(it->second->control);
-                    unbind = remove_entry_no_lock(router_id);
-                    removed = true;
+                    if (result.success()) {
+                        set_control_released(it->second->control);
+                        unbind = remove_entry_no_lock(router_id);
+                    } else {
+                        it->second->phase = EntryPhase::CLEANUP_FAILED;
+                    }
+                    handled = true;
                 }
             }
 
-            if (!result.subscription.valid()) {
-                result.subscription = std::move(expected_subscription);
-            }
             if (unbind) unbind_provider(*unbind);
-            if (removed) dispatch_result(std::move(callback), std::move(result));
+            if (handled) dispatch_result(std::move(callback), std::move(result));
         }
 
         inline BaseMarketDataProvider* MarketDataRouterState::remove_entry_no_lock(
@@ -1210,6 +1250,36 @@ namespace optionx::market_data {
             return m_entries.size();
         }
 
+        inline std::size_t MarketDataRouterState::failed_unsubscribe_count() const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return static_cast<std::size_t>(std::count_if(
+                m_entries.begin(),
+                m_entries.end(),
+                [](const auto& item) {
+                    return item.second->phase == EntryPhase::CLEANUP_FAILED;
+                }));
+        }
+
+        inline std::size_t MarketDataRouterState::retry_failed_unsubscribes() {
+            std::vector<std::shared_ptr<MarketDataRouterSubscriptionControl>> controls;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                controls.reserve(m_entries.size());
+                for (const auto& [id, entry] : m_entries) {
+                    (void)id;
+                    if (entry->phase == EntryPhase::CLEANUP_FAILED) {
+                        controls.push_back(entry->control);
+                    }
+                }
+            }
+
+            std::size_t accepted = 0;
+            for (const auto& control : controls) {
+                if (unsubscribe(control, {})) ++accepted;
+            }
+            return accepted;
+        }
+
         inline void MarketDataRouterState::shutdown() noexcept {
             std::vector<BaseMarketDataProvider*> providers;
             std::vector<std::pair<BaseMarketDataProvider*, MarketDataSubscriptionHandle>>
@@ -1367,6 +1437,14 @@ namespace optionx::market_data {
 
     inline std::size_t MarketDataRouter::subscription_count() const {
         return m_state ? m_state->subscription_count() : 0;
+    }
+
+    inline std::size_t MarketDataRouter::failed_unsubscribe_count() const {
+        return m_state ? m_state->failed_unsubscribe_count() : 0;
+    }
+
+    inline std::size_t MarketDataRouter::retry_failed_unsubscribes() {
+        return m_state ? m_state->retry_failed_unsubscribes() : 0;
     }
 
     inline void MarketDataRouter::shutdown() noexcept {

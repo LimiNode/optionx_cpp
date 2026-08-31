@@ -165,6 +165,13 @@ a cached matching stream status synchronously while a new route is accepted;
 callbacks should therefore use the subscription carried by the event rather
 than assume that caller state was already updated after `subscribe_ticks()`.
 
+Logical release and physical provider cleanup are separate. A released route
+stops receiving events immediately. If provider `unsubscribe()` is rejected or
+completes with failure, the Router keeps the physical handle and callback
+binding, reports it through `failed_unsubscribe_count()`, and rejects new routes
+through that provider. Call `retry_failed_unsubscribes()` from the Router owner
+loop; `shutdown()` performs the final best-effort cleanup attempt.
+
 ## Concrete Platforms
 
 ### `platforms::IntradeBarPlatform`

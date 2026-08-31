@@ -13,10 +13,18 @@ namespace {
 
 class FakeMarketDataProvider final : public BaseMarketDataProvider {
 public:
+    enum class UnsubscribeMode {
+        SUCCEED,
+        REJECT,
+        COMPLETE_FAILED,
+        DEFER
+    };
+
     bars_callback_t bars_callback;
     ticks_callback_t ticks_callback;
     status_callback_t status_callback;
     bool defer_subscribe = false;
+    UnsubscribeMode unsubscribe_mode = UnsubscribeMode::SUCCEED;
     std::size_t unsubscribe_calls = 0;
     std::vector<MarketDataSubscriptionHandle> active_subscriptions;
 
@@ -56,6 +64,22 @@ public:
             MarketDataSubscriptionHandle subscription,
             subscription_callback_t callback) override {
         ++unsubscribe_calls;
+        if (unsubscribe_mode == UnsubscribeMode::REJECT) return false;
+        if (unsubscribe_mode == UnsubscribeMode::COMPLETE_FAILED) {
+            if (callback) {
+                callback(MarketDataSubscriptionResult::failed(
+                    std::move(subscription),
+                    MarketDataSubscriptionStatus::FAILED,
+                    "Simulated provider unsubscribe failure."));
+            }
+            return true;
+        }
+        if (unsubscribe_mode == UnsubscribeMode::DEFER) {
+            m_pending_unsubscribe = std::move(subscription);
+            m_pending_unsubscribe_callback = std::move(callback);
+            return true;
+        }
+
         active_subscriptions.erase(
             std::remove_if(
                 active_subscriptions.begin(),
@@ -78,6 +102,22 @@ public:
         callback(MarketDataSubscriptionResult::subscribed(std::move(handle)));
     }
 
+    void complete_pending_unsubscribe() {
+        ASSERT_TRUE(static_cast<bool>(m_pending_unsubscribe_callback));
+        auto callback = std::move(m_pending_unsubscribe_callback);
+        auto subscription = std::move(m_pending_unsubscribe);
+        active_subscriptions.erase(
+            std::remove_if(
+                active_subscriptions.begin(),
+                active_subscriptions.end(),
+                [&subscription](const MarketDataSubscriptionHandle& active) {
+                    return active.id == subscription.id;
+                }),
+            active_subscriptions.end());
+        callback(MarketDataSubscriptionResult::unsubscribed(
+            std::move(subscription)));
+    }
+
     void emit_status(MarketDataStatusUpdate update) {
         ASSERT_TRUE(static_cast<bool>(status_callback));
         status_callback(std::move(update));
@@ -89,6 +129,16 @@ public:
         batch->subscription = std::move(subscription);
         batch->type = MarketDataType::TICKS;
         batch->symbol = batch->subscription.symbol;
+        batch->price_digits = 5;
+        batch->items.emplace_back(1.10000, 1.10002, 0.0, 1.0, 1000, 0, 0);
+        ticks_callback(std::move(batch));
+    }
+
+    void emit_unscoped_ticks(std::string symbol) {
+        ASSERT_TRUE(static_cast<bool>(ticks_callback));
+        auto batch = std::make_unique<TickDataBatch>();
+        batch->type = MarketDataType::TICKS;
+        batch->symbol = std::move(symbol);
         batch->price_digits = 5;
         batch->items.emplace_back(1.10000, 1.10002, 0.0, 1.0, 1000, 0, 0);
         ticks_callback(std::move(batch));
@@ -109,6 +159,8 @@ private:
     SubscriptionId m_next_subscription_id = 1;
     MarketDataSubscriptionHandle m_pending_subscription;
     subscription_callback_t m_pending_callback;
+    MarketDataSubscriptionHandle m_pending_unsubscribe;
+    subscription_callback_t m_pending_unsubscribe_callback;
 
     bool finish_or_defer(
             MarketDataSubscriptionHandle handle,
@@ -366,6 +418,143 @@ TEST(MarketDataRouter, MoveAndResetUnsubscribeExactlyOnce) {
 
     moved.reset();
     EXPECT_EQ(provider.unsubscribe_calls, 1u);
+}
+
+TEST(MarketDataRouter, RetainsCleanupWhenProviderRejectsUnsubscribe) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    MarketDataSubscriptionResult unsubscribe_result;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("EURUSD"));
+    const auto provider_subscription = route.provider_subscription();
+    ASSERT_TRUE(route.active());
+    ASSERT_EQ(provider.active_subscriptions.size(), 1u);
+
+    provider.unsubscribe_mode = FakeMarketDataProvider::UnsubscribeMode::REJECT;
+    EXPECT_FALSE(route.unsubscribe(
+        [&unsubscribe_result](MarketDataSubscriptionResult result) {
+            unsubscribe_result = std::move(result);
+        }));
+
+    EXPECT_FALSE(route.valid());
+    EXPECT_FALSE(unsubscribe_result.success());
+    EXPECT_EQ(provider.active_subscriptions.size(), 1u);
+    EXPECT_EQ(router.subscription_count(), 1u);
+    EXPECT_EQ(router.failed_unsubscribe_count(), 1u);
+    EXPECT_TRUE(static_cast<bool>(provider.on_tick_data()));
+    EXPECT_TRUE(static_cast<bool>(provider.on_bar_data()));
+    EXPECT_TRUE(static_cast<bool>(provider.on_market_data_status()));
+
+    provider.emit_ticks(provider_subscription);
+    provider.emit_unscoped_ticks("EURUSD");
+    EXPECT_TRUE(subscriber->ticks.empty());
+
+    MarketDataSubscriptionResult rejected_result;
+    auto rejected = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("BTCUSDT"),
+        [&rejected_result](MarketDataSubscriptionResult result) {
+            rejected_result = std::move(result);
+        });
+    EXPECT_FALSE(rejected.valid());
+    EXPECT_FALSE(rejected_result.success());
+    EXPECT_NE(rejected_result.error_message.find("retry"), std::string::npos);
+    EXPECT_EQ(provider.active_subscriptions.size(), 1u);
+
+    provider.unsubscribe_mode = FakeMarketDataProvider::UnsubscribeMode::SUCCEED;
+    EXPECT_EQ(router.retry_failed_unsubscribes(), 1u);
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_EQ(router.subscription_count(), 0u);
+    EXPECT_EQ(router.failed_unsubscribe_count(), 0u);
+    EXPECT_FALSE(static_cast<bool>(provider.on_tick_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_bar_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_market_data_status()));
+}
+
+TEST(MarketDataRouter, RetainsCleanupWhenAcceptedUnsubscribeCompletesFailed) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    MarketDataSubscriptionResult unsubscribe_result;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("EURUSD"));
+    ASSERT_TRUE(route.active());
+
+    provider.unsubscribe_mode =
+        FakeMarketDataProvider::UnsubscribeMode::COMPLETE_FAILED;
+    EXPECT_TRUE(route.unsubscribe(
+        [&unsubscribe_result](MarketDataSubscriptionResult result) {
+            unsubscribe_result = std::move(result);
+        }));
+
+    EXPECT_FALSE(route.valid());
+    EXPECT_FALSE(unsubscribe_result.success());
+    EXPECT_EQ(provider.active_subscriptions.size(), 1u);
+    EXPECT_EQ(router.subscription_count(), 1u);
+    EXPECT_EQ(router.failed_unsubscribe_count(), 1u);
+    EXPECT_TRUE(static_cast<bool>(provider.on_tick_data()));
+
+    provider.unsubscribe_mode = FakeMarketDataProvider::UnsubscribeMode::SUCCEED;
+    router.shutdown();
+
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_EQ(router.subscription_count(), 0u);
+    EXPECT_EQ(router.failed_unsubscribe_count(), 0u);
+    EXPECT_FALSE(static_cast<bool>(provider.on_tick_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_bar_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_market_data_status()));
+}
+
+TEST(MarketDataRouter, QuarantinesProviderWhilePhysicalUnsubscribeIsPending) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("EURUSD"));
+    ASSERT_TRUE(route.active());
+
+    provider.unsubscribe_mode = FakeMarketDataProvider::UnsubscribeMode::DEFER;
+    EXPECT_TRUE(route.unsubscribe());
+    EXPECT_FALSE(route.valid());
+    EXPECT_EQ(router.subscription_count(), 1u);
+    EXPECT_EQ(router.failed_unsubscribe_count(), 0u);
+    ASSERT_EQ(provider.active_subscriptions.size(), 1u);
+
+    MarketDataSubscriptionResult rejected_result;
+    auto rejected = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("BTCUSDT"),
+        [&rejected_result](MarketDataSubscriptionResult result) {
+            rejected_result = std::move(result);
+        });
+    EXPECT_FALSE(rejected.valid());
+    EXPECT_FALSE(rejected_result.success());
+    EXPECT_NE(rejected_result.error_message.find("pending"), std::string::npos);
+    EXPECT_EQ(provider.active_subscriptions.size(), 1u);
+
+    provider.complete_pending_unsubscribe();
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_EQ(router.subscription_count(), 0u);
+    EXPECT_FALSE(static_cast<bool>(provider.on_tick_data()));
+
+    provider.unsubscribe_mode = FakeMarketDataProvider::UnsubscribeMode::SUCCEED;
+    auto replacement = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("BTCUSDT"));
+    EXPECT_TRUE(replacement.active());
 }
 
 TEST(MarketDataRouter, PendingHandleCancellationUnsubscribesAfterAcceptance) {
