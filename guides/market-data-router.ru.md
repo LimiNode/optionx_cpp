@@ -338,8 +338,13 @@ tick batches, bar batches и status updates в этот loop. Боты испо�
 Если subscriber уничтожен до выполнения posted subscribe command, команда
 отменяется, а её callbacks не вызываются. Когда настроенный dispatcher начинает
 отклонять работу во время shutdown, новые provider completions и deliveries
-отбрасываются, а не исполняются inline в source thread. Маршрут, completion
-которого был отклонён, остаётся pending до cleanup Router.
+отбрасываются, а не исполняются inline в source thread. Tick, bar и status
+deliveries не требуют физического cleanup и сразу удаляются. Если отклонённый
+completion сообщает об успешном subscribe, Router сохраняет concrete provider
+handle внутри себя, помещает provider в карантин для новых маршрутов и оставляет
+логический маршрут pending. `router.shutdown()` отписывает сохранённый handle из
+owner loop; ни subscription callback, ни callbacks subscriber не выполняются в
+source thread.
 
 Все callbacks Router сериализованы owner loop, но поля, которые напрямую читает
 другой поток бота, всё равно требуют собственного mutex, atomics или очереди
