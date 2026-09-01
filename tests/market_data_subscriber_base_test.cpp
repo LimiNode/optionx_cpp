@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <optionx_cpp/market_data.hpp>
+#include <optionx_cpp/platforms.hpp>
 
 using namespace optionx;
 using namespace optionx::market_data;
@@ -52,6 +53,17 @@ private:
     mutable std::mutex m_mutex;
     std::deque<MarketDataRouter::owner_task_t> m_tasks;
     bool m_accepting = true;
+};
+
+class TestOwnerPlatform final : public platforms::BaseTradingPlatform {
+public:
+    TestOwnerPlatform()
+        : platforms::BaseTradingPlatform(
+              std::make_shared<platforms::intrade_bar::AccountInfoData>()) {}
+
+    PlatformType platform_type() const override {
+        return PlatformType::INTRADE_BAR;
+    }
 };
 
 class FakeMarketDataProvider final : public BaseMarketDataProvider {
@@ -719,6 +731,50 @@ TEST(MarketDataSubscriberBase, RetainsRejectedSubscribeCompletionsForShutdownCle
     EXPECT_TRUE(provider.active_subscriptions.empty());
     EXPECT_EQ(provider.unsubscribe_thread, owner_thread);
     EXPECT_EQ(completion_callbacks, 0u);
+}
+
+TEST(MarketDataSubscriberBase, RetainsAcceptedCompletionCancelledByPlatformShutdown) {
+    FakeMarketDataProvider provider;
+    provider.defer_ticks = true;
+    TestOwnerPlatform platform;
+    MarketDataRouter router(
+        [&platform](MarketDataRouter::owner_task_t task) {
+            return platform.post_task(std::move(task));
+        });
+    auto bot = std::make_shared<TestBot>(router);
+    std::size_t completion_callbacks = 0;
+
+    const auto route = bot->start_ticks(
+        provider,
+        "EURUSD",
+        [&completion_callbacks](MarketDataSubscriptionResult) {
+            ++completion_callbacks;
+        });
+    ASSERT_TRUE(route.valid());
+    ASSERT_EQ(router.subscription_count(), 1u);
+
+    std::thread source_thread([&]() {
+        provider.complete_pending_tick();
+    });
+    source_thread.join();
+
+    ASSERT_EQ(provider.active_subscriptions.size(), 1u);
+    EXPECT_EQ(completion_callbacks, 0u);
+    EXPECT_FALSE(bot->subscription(route).valid());
+
+    const auto owner_thread = std::this_thread::get_id();
+    router.shutdown();
+
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_EQ(provider.unsubscribe_thread, owner_thread);
+
+    platform.shutdown();
+
+    EXPECT_EQ(completion_callbacks, 0u);
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    EXPECT_TRUE(bot->ticks.empty());
+    EXPECT_TRUE(bot->statuses.empty());
 }
 
 TEST(MarketDataSubscriberBase, RejectsPostedCommandsWithoutAnOwnerDispatcher) {

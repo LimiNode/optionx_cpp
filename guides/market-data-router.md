@@ -315,9 +315,13 @@ md::MarketDataRouter router(
 The dispatcher contract is:
 
 - it is safe to call from provider, websocket, and bot threads;
-- accepted tasks are processed FIFO by one owner loop;
+- tasks that reach execution are processed FIFO by one owner loop;
 - it never executes a foreign caller's task inline;
 - it remains available until subscriber cleanup and Router shutdown finish.
+
+Queue acceptance is not an execution guarantee. In particular,
+`BaseTradingPlatform::post_task()` may cancel accepted tasks that remain queued
+when platform shutdown begins.
 
 With a dispatcher configured, Router marshals provider subscription completions,
 tick batches, bar batches, and status updates into that loop. Bots use:
@@ -338,12 +342,17 @@ If the subscriber expires before a posted subscribe command runs, the command is
 cancelled and its callbacks are not invoked. Once a configured dispatcher starts
 rejecting work during shutdown, new provider completions and deliveries are
 dropped rather than being invoked inline on the source thread. Tick, bar, and
-status deliveries need no physical cleanup and are discarded immediately. If a
-rejected completion reports a successful subscribe, Router retains its concrete
-provider handle internally, quarantines that provider from new routes, and keeps
-the logical route pending. `router.shutdown()` unsubscribes the retained handle
-from the owner loop; neither the subscription callback nor subscriber callbacks
-run on the source thread.
+status deliveries need no physical cleanup and are discarded immediately.
+
+A successful subscribe completion reserves its concrete provider handle in
+Router state before the completion task is posted. The owner task must atomically
+claim that reservation before promoting the route from pending to active. If the
+task is rejected, the reservation remains with the pending route and Router
+quarantines that provider from new routes. If the task is accepted but later
+cancelled during owner shutdown, the reservation likewise remains available to
+`router.shutdown()`. In both cases shutdown unsubscribes the retained handle from
+the owner loop; neither the subscription callback nor subscriber callbacks run
+on the source thread.
 
 All Router callbacks are serialized by the owner loop, but fields read directly
 from a different bot thread still require the bot's own mutex, atomics, or

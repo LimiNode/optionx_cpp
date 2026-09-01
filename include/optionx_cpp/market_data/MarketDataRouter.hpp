@@ -444,6 +444,7 @@ namespace optionx::market_data {
                 std::shared_ptr<MarketDataRouterSubscriptionControl> control;
                 StreamDescriptor stream;
                 MarketDataSubscriptionHandle retained_cleanup_subscription;
+                bool subscribe_completion_posted = false;
                 EntryPhase phase = EntryPhase::PENDING;
                 bool release_requested = false;
                 subscription_callback_t release_callback;
@@ -630,10 +631,18 @@ namespace optionx::market_data {
                     MarketDataSubscriptionResult result);
 
             bool dispatch_or_run(MarketDataRouter::owner_task_t task) const;
-            void retain_rejected_subscribe_cleanup(
+            bool reserve_subscribe_completion(
                     RoutedSubscriptionId router_id,
                     BaseMarketDataProvider& provider,
-                    MarketDataSubscriptionResult& result);
+                    const MarketDataSubscriptionResult& result);
+            void mark_subscribe_completion_posted(
+                    RoutedSubscriptionId router_id,
+                    const MarketDataSubscriptionHandle& subscription);
+            void dispatch_subscribe_completion(
+                    RoutedSubscriptionId router_id,
+                    BaseMarketDataProvider& provider,
+                    MarketDataSubscriptionResult result,
+                    subscription_callback_t callback);
 
             friend class ::optionx::market_data::MarketDataRouterSubscription;
         };
@@ -659,14 +668,14 @@ namespace optionx::market_data {
             return post_to_owner(std::move(task));
         }
 
-        inline void MarketDataRouterState::retain_rejected_subscribe_cleanup(
+        inline bool MarketDataRouterState::reserve_subscribe_completion(
                 RoutedSubscriptionId router_id,
                 BaseMarketDataProvider& provider,
-                MarketDataSubscriptionResult& result) {
+                const MarketDataSubscriptionResult& result) {
             if (!result.success() ||
                 !result.subscription.valid() ||
                 result.subscription.provider_id != provider.provider_id()) {
-                return;
+                return false;
             }
 
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -676,11 +685,72 @@ namespace optionx::market_data {
                 entry_it->second->provider != &provider ||
                 entry_it->second->phase != EntryPhase::PENDING ||
                 entry_it->second->retained_cleanup_subscription.valid()) {
-                return;
+                return false;
             }
 
             entry_it->second->retained_cleanup_subscription =
-                std::move(result.subscription);
+                result.subscription;
+            entry_it->second->subscribe_completion_posted = false;
+            return true;
+        }
+
+        inline void MarketDataRouterState::mark_subscribe_completion_posted(
+                RoutedSubscriptionId router_id,
+                const MarketDataSubscriptionHandle& subscription) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto entry_it = m_entries.find(router_id);
+            if (entry_it == m_entries.end() ||
+                entry_it->second->phase != EntryPhase::PENDING) {
+                return;
+            }
+
+            const auto& reservation =
+                entry_it->second->retained_cleanup_subscription;
+            if (reservation.valid() &&
+                reservation.provider_id == subscription.provider_id &&
+                reservation.id == subscription.id) {
+                entry_it->second->subscribe_completion_posted = true;
+            }
+        }
+
+        inline void MarketDataRouterState::dispatch_subscribe_completion(
+                RoutedSubscriptionId router_id,
+                BaseMarketDataProvider& provider,
+                MarketDataSubscriptionResult result,
+                subscription_callback_t callback) {
+            if (result.success() &&
+                (!result.subscription.valid() ||
+                 result.subscription.provider_id != provider.provider_id())) {
+                result = MarketDataSubscriptionResult::failed(
+                    std::move(result.subscription),
+                    MarketDataSubscriptionStatus::FAILED,
+                    "Market-data provider returned an invalid subscription handle.");
+            }
+
+            if (result.success() &&
+                !reserve_subscribe_completion(router_id, provider, result)) {
+                return;
+            }
+
+            const auto subscription = result.subscription;
+            auto pending = std::make_shared<MarketDataSubscriptionResult>(
+                std::move(result));
+            const auto state = shared_from_this();
+            const bool posted = dispatch_or_run(
+                [state,
+                 router_id,
+                 provider = &provider,
+                 callback = std::move(callback),
+                 pending]() mutable {
+                    state->complete_subscribe(
+                        router_id,
+                        *provider,
+                        std::move(*pending),
+                        std::move(callback));
+                });
+            if (posted && subscription.valid()) {
+                mark_subscribe_completion_posted(router_id, subscription);
+            }
         }
 
         inline MarketDataRouterState::StreamDescriptor
@@ -984,7 +1054,8 @@ namespace optionx::market_data {
                     if (existing_entry->provider_id == provider.provider_id() &&
                         (existing_entry->phase == EntryPhase::UNSUBSCRIBING ||
                          existing_entry->phase == EntryPhase::CLEANUP_FAILED ||
-                         existing_entry->retained_cleanup_subscription.valid())) {
+                         (existing_entry->retained_cleanup_subscription.valid() &&
+                          !existing_entry->subscribe_completion_posted))) {
                         error_message =
                             "Market-data provider has pending or failed physical "
                             "subscription cleanup; wait for completion or retry failed "
@@ -1056,26 +1127,11 @@ namespace optionx::market_data {
                     std::move(request),
                     [state, router_id, &provider, callback](
                             MarketDataSubscriptionResult result) mutable {
-                        auto pending = std::make_shared<MarketDataSubscriptionResult>(
-                            std::move(result));
-                        const bool dispatched = state->dispatch_or_run(
-                            [state,
-                             router_id,
-                             provider = &provider,
-                             callback = std::move(callback),
-                             pending]() mutable {
-                                state->complete_subscribe(
-                                    router_id,
-                                    *provider,
-                                    std::move(*pending),
-                                    std::move(callback));
-                            });
-                        if (!dispatched) {
-                            state->retain_rejected_subscribe_cleanup(
-                                router_id,
-                                provider,
-                                *pending);
-                        }
+                        state->dispatch_subscribe_completion(
+                            router_id,
+                            provider,
+                            std::move(result),
+                            std::move(callback));
                     });
             } catch (const std::exception& exception) {
                 fail_pending_subscribe(
@@ -1210,26 +1266,11 @@ namespace optionx::market_data {
                     std::move(request),
                     [state, router_id, &provider, callback](
                             MarketDataSubscriptionResult result) mutable {
-                        auto pending = std::make_shared<MarketDataSubscriptionResult>(
-                            std::move(result));
-                        const bool dispatched = state->dispatch_or_run(
-                            [state,
-                             router_id,
-                             provider = &provider,
-                             callback = std::move(callback),
-                             pending]() mutable {
-                                state->complete_subscribe(
-                                    router_id,
-                                    *provider,
-                                    std::move(*pending),
-                                    std::move(callback));
-                            });
-                        if (!dispatched) {
-                            state->retain_rejected_subscribe_cleanup(
-                                router_id,
-                                provider,
-                                *pending);
-                        }
+                        state->dispatch_subscribe_completion(
+                            router_id,
+                            provider,
+                            std::move(result),
+                            std::move(callback));
                     });
             } catch (const std::exception& exception) {
                 fail_pending_subscribe(
@@ -1334,7 +1375,6 @@ namespace optionx::market_data {
             bool release_requested = false;
             subscription_callback_t release_callback;
             BaseMarketDataProvider* unbind = nullptr;
-            bool cleanup_orphan = false;
 
             if (result.success() &&
                 (!result.subscription.valid() ||
@@ -1348,15 +1388,25 @@ namespace optionx::market_data {
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto entry_it = m_entries.find(router_id);
-                if (entry_it == m_entries.end() || m_shutdown) {
-                    cleanup_orphan = result.success() && result.subscription.valid();
-                } else if (!result.success()) {
+                if (entry_it == m_entries.end() || m_shutdown) return;
+
+                if (!result.success()) {
                     entry = entry_it->second;
                     set_control_released(entry->control);
                     release_callback = std::move(entry->release_callback);
                     unbind = remove_entry_no_lock(router_id);
                 } else {
                     entry = entry_it->second;
+                    const auto& reservation =
+                        entry->retained_cleanup_subscription;
+                    if (!reservation.valid() ||
+                        reservation.provider_id != result.subscription.provider_id ||
+                        reservation.id != result.subscription.id) {
+                        return;
+                    }
+
+                    entry->retained_cleanup_subscription = {};
+                    entry->subscribe_completion_posted = false;
                     entry->stream = stream_from(result.subscription);
                     entry->phase = EntryPhase::ACTIVE;
                     set_control_active(entry->control, result.subscription);
@@ -1378,17 +1428,6 @@ namespace optionx::market_data {
             if (unbind) unbind_provider(*unbind);
             dispatch_result(callback, result);
 
-            if (cleanup_orphan) {
-                try {
-                    provider.unsubscribe(std::move(result.subscription), {});
-                } catch (...) {
-                }
-                return;
-            }
-            if (!entry) {
-                if (release_callback) dispatch_result(std::move(release_callback), result);
-                return;
-            }
             if (release_requested && result.success()) {
                 unsubscribe(entry->control, std::move(release_callback));
                 return;
@@ -1421,7 +1460,9 @@ namespace optionx::market_data {
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto it = m_entries.find(router_id);
-                pending = it != m_entries.end() && it->second->phase == EntryPhase::PENDING;
+                pending = it != m_entries.end() &&
+                          it->second->phase == EntryPhase::PENDING &&
+                          !it->second->retained_cleanup_subscription.valid();
             }
             if (pending) {
                 complete_subscribe(
