@@ -315,9 +315,13 @@ md::MarketDataRouter router(
 Контракт dispatcher:
 
 - его безопасно вызывать из provider, websocket и bot threads;
-- принятые задачи обрабатываются FIFO одним owner loop;
+- дошедшие до исполнения задачи обрабатываются FIFO одним owner loop;
 - задача foreign caller никогда не выполняется inline;
 - dispatcher доступен до завершения cleanup subscribers и shutdown Router.
+
+Принятие задачи очередью не гарантирует её выполнение. В частности,
+`BaseTradingPlatform::post_task()` может отменить принятые задачи, оставшиеся в
+очереди к моменту начала shutdown платформы.
 
 При наличии dispatcher Router переносит provider subscription completions,
 tick batches, bar batches и status updates в этот loop. Боты используют:
@@ -339,10 +343,15 @@ tick batches, bar batches и status updates в этот loop. Боты испо�
 отменяется, а её callbacks не вызываются. Когда настроенный dispatcher начинает
 отклонять работу во время shutdown, новые provider completions и deliveries
 отбрасываются, а не исполняются inline в source thread. Tick, bar и status
-deliveries не требуют физического cleanup и сразу удаляются. Если отклонённый
-completion сообщает об успешном subscribe, Router сохраняет concrete provider
-handle внутри себя, помещает provider в карантин для новых маршрутов и оставляет
-логический маршрут pending. `router.shutdown()` отписывает сохранённый handle из
+deliveries не требуют физического cleanup и сразу удаляются.
+
+Успешный subscribe completion резервирует concrete provider handle в состоянии
+Router до постановки completion task в очередь. Owner task должен атомарно
+забрать эту reservation перед переводом маршрута из pending в active. Если задача
+отклонена, reservation остаётся у pending маршрута, а Router помещает provider в
+карантин для новых routes. Если задача принята, но позднее отменена во время
+shutdown owner loop, reservation также остаётся доступной для
+`router.shutdown()`. В обоих случаях shutdown отписывает сохранённый handle из
 owner loop; ни subscription callback, ни callbacks subscriber не выполняются в
 source thread.
 
