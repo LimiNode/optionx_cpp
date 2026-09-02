@@ -777,6 +777,51 @@ TEST(MarketDataSubscriberBase, RetainsAcceptedCompletionCancelledByPlatformShutd
     EXPECT_TRUE(bot->statuses.empty());
 }
 
+TEST(MarketDataSubscriberBase, DrainsLateSubscribeOnThePlatformOwnerLoop) {
+    FakeMarketDataProvider provider;
+    provider.defer_ticks = true;
+    TestOwnerPlatform platform;
+    MarketDataRouter router(
+        [&platform](MarketDataRouter::owner_task_t task) {
+            return platform.post_task(std::move(task));
+        });
+    auto bot = std::make_shared<TestBot>(router);
+    std::size_t completion_callbacks = 0;
+
+    const auto route = bot->start_ticks(
+        provider,
+        "EURUSD",
+        [&completion_callbacks](MarketDataSubscriptionResult) {
+            ++completion_callbacks;
+        });
+    ASSERT_TRUE(route.valid());
+
+    router.shutdown();
+    ASSERT_FALSE(router.is_shutdown_complete());
+
+    std::thread source_thread([&]() {
+        provider.complete_pending_tick();
+    });
+    source_thread.join();
+
+    ASSERT_EQ(provider.active_subscriptions.size(), 1u);
+    EXPECT_EQ(provider.unsubscribe_calls, 0u);
+    EXPECT_EQ(completion_callbacks, 0u);
+
+    const auto owner_thread = std::this_thread::get_id();
+    platform.process();
+
+    EXPECT_TRUE(router.is_shutdown_complete());
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_EQ(provider.unsubscribe_thread, owner_thread);
+    EXPECT_EQ(completion_callbacks, 0u);
+    EXPECT_TRUE(bot->ticks.empty());
+    EXPECT_TRUE(bot->statuses.empty());
+
+    platform.shutdown();
+}
+
 TEST(MarketDataSubscriberBase, RejectsPostedCommandsWithoutAnOwnerDispatcher) {
     MarketDataRouter router;
     auto bot = std::make_shared<TestBot>(router);

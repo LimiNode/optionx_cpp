@@ -172,8 +172,9 @@ if (router.failed_unsubscribe_count() != 0) {
 
 Исходный unsubscribe callback получает ошибку один раз; внутренний retry не
 восстанавливает уже использованный публичный handle. Для постоянных ошибок
-применяй backoff на уровне приложения. `shutdown()` делает последнюю
-best-effort попытку cleanup перед освобождением состояния Router.
+применяй backoff на уровне приложения. `shutdown()` повторяет cleanup entries,
+которые уже один раз завершились ошибкой, но повторная ошибка оставляет Router в
+состоянии draining до retry приложения или будущей явной abandon policy.
 
 Необязательный subscription callback сообщает о принятии desired state
 провайдером. Это не callback готовности транспорта:
@@ -341,19 +342,24 @@ tick batches, bar batches и status updates в этот loop. Боты испо�
 
 Если subscriber уничтожен до выполнения posted subscribe command, команда
 отменяется, а её callbacks не вызываются. Когда настроенный dispatcher начинает
-отклонять работу во время shutdown, новые provider completions и deliveries
-отбрасываются, а не исполняются inline в source thread. Tick, bar и status
-deliveries не требуют физического cleanup и сразу удаляются.
+отклонять работу во время shutdown, новые tick, bar и status deliveries
+отбрасываются, а не исполняются inline в source thread. Эти deliveries не
+требуют физического cleanup и сразу удаляются.
 
-Успешный subscribe completion резервирует concrete provider handle в состоянии
-Router до постановки completion task в очередь. Owner task должен атомарно
-забрать эту reservation перед переводом маршрута из pending в active. Если задача
-отклонена, reservation остаётся у pending маршрута, а Router помещает provider в
-карантин для новых routes. Если задача принята, но позднее отменена во время
-shutdown owner loop, reservation также остаётся доступной для
-`router.shutdown()`. В обоих случаях shutdown отписывает сохранённый handle из
-owner loop; ни subscription callback, ни callbacks subscriber не выполняются в
-source thread.
+Subscribe и unsubscribe completions записываются в состояние Router до
+постановки owner task. Успешный subscribe result резервирует concrete provider
+handle; owner task атомарно забирает reservation перед переводом route из pending
+в active. Поэтому отклонённая или позднее отменённая owner task не владеет
+единственной копией physical handle или completion result.
+
+`process()` продвигает принадлежащую Router deferred lifecycle work в owner
+thread. При обычной работе posted completion tasks применяют transitions
+напрямую, поэтому Router не требует отдельной прокачки. После начала draining
+через `shutdown()` поздние provider completions остаются в состоянии Router, а
+`process()` превращает каждый поздний успешный subscribe в physical unsubscribe
+без user callbacks и replay. Метод не опрашивает providers или transports; в
+ручном режиме платформы сначала вызывай `platform.process()`, чтобы provider
+смог сформировать completion.
 
 Все callbacks Router сериализованы owner loop, но поля, которые напрямую читает
 другой поток бота, всё равно требуют собственного mutex, atomics или очереди
@@ -369,18 +375,26 @@ provider и owner dispatcher
         который живёт дольше subscribers и posted cleanup work
 ```
 
-Используй такой порядок остановки:
+`shutdown()` — идемпотентный запрос остановки, а не безусловное утверждение, что
+все асинхронные provider operations завершились до возврата метода. Он сам
+выполняет один проход `process()`, поэтому синхронный cleanup по-прежнему
+завершается внутри вызова. Используй такой порядок остановки:
 
 1. Прекрати создавать новые команды в потоках ботов.
 2. Запроси unsubscribe или уничтожь subscribers, пока dispatcher принимает
    работу.
-3. Продолжай обработку owner loop, пока не завершатся unsubscribe commands и
-   вложенные provider completion callbacks. Проверь
-   `failed_unsubscribe_count()` и выполни retry по политике приложения, пока
-   owner loop и providers ещё доступны.
-4. Вызови `router.shutdown()` из owner loop. Метод идемпотентен, освобождает
-   callback slots провайдера и запрашивает unsubscribe оставшихся маршрутов.
-5. Останови platform/dispatcher, затем уничтожай providers.
+3. Вызови `router.shutdown()` из owner loop. Новые routes и user delivery
+   прекращаются сразу; pending provider operations остаются cleanup tombstones.
+4. Оставь provider и owner loop работающими, пока
+   `router.is_shutdown_complete()` не вернёт true. В ручном режиме каждый host
+   tick вызывает `platform.process()`, а затем `router.process()`.
+5. Проверяй `failed_unsubscribe_count()` и выполняй retry с backoff приложения,
+   пока owner loop и providers доступны. Failed cleanup не позволяет
+   `is_shutdown_complete()` стать true.
+6. Останови platform/dispatcher, затем уничтожай providers.
+
+Если приложение объединяет несколько process/shutdown modules, этот drain loop
+должен находиться в lifecycle supervisor, а не в Router-specific business code.
 
 Не откладывай уничтожение subscriber до момента, когда dispatcher уже закрыт.
 Обычно `MarketDataSubscriberBase` отправляет оставшиеся handles одной cleanup

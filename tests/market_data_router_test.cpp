@@ -751,6 +751,134 @@ TEST(MarketDataRouter, ShutdownUnsubscribesAndReleasesProviderCallbacks) {
     EXPECT_FALSE(static_cast<bool>(provider.on_market_data_status()));
 }
 
+TEST(MarketDataRouter, ProcessesLateSuccessfulSubscribeDuringShutdown) {
+    FakeMarketDataProvider provider;
+    provider.defer_subscribe = true;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    std::size_t completion_callbacks = 0;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("EURUSD"),
+        [&completion_callbacks](MarketDataSubscriptionResult) {
+            ++completion_callbacks;
+        });
+    ASSERT_TRUE(route.pending());
+
+    router.shutdown();
+    router.shutdown();
+
+    EXPECT_FALSE(router.is_shutdown_complete());
+    EXPECT_EQ(router.subscription_count(), 1u);
+    EXPECT_EQ(provider.unsubscribe_calls, 0u);
+
+    provider.complete_pending_subscribe();
+
+    ASSERT_EQ(provider.active_subscriptions.size(), 1u);
+    EXPECT_EQ(completion_callbacks, 0u);
+
+    router.process();
+
+    EXPECT_TRUE(router.is_shutdown_complete());
+    EXPECT_EQ(router.subscription_count(), 0u);
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_FALSE(route.valid());
+    EXPECT_EQ(completion_callbacks, 0u);
+    EXPECT_TRUE(subscriber->ticks.empty());
+    EXPECT_TRUE(subscriber->statuses.empty());
+    EXPECT_FALSE(static_cast<bool>(provider.on_tick_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_bar_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_market_data_status()));
+
+    router.process();
+    router.shutdown();
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+}
+
+TEST(MarketDataRouter, ProcessesDeferredUnsubscribeDuringShutdown) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("EURUSD"));
+    ASSERT_TRUE(route.active());
+    provider.unsubscribe_mode = FakeMarketDataProvider::UnsubscribeMode::DEFER;
+
+    router.shutdown();
+
+    EXPECT_FALSE(router.is_shutdown_complete());
+    EXPECT_EQ(router.subscription_count(), 1u);
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    EXPECT_FALSE(route.valid());
+    EXPECT_TRUE(static_cast<bool>(provider.on_tick_data()));
+
+    provider.complete_pending_unsubscribe();
+    EXPECT_FALSE(router.is_shutdown_complete());
+
+    router.process();
+
+    EXPECT_TRUE(router.is_shutdown_complete());
+    EXPECT_EQ(router.subscription_count(), 0u);
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_FALSE(static_cast<bool>(provider.on_tick_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_bar_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_market_data_status()));
+}
+
+TEST(MarketDataRouter, KeepsLateShutdownCleanupFailureRetryable) {
+    FakeMarketDataProvider provider;
+    provider.defer_subscribe = true;
+    provider.unsubscribe_mode =
+        FakeMarketDataProvider::UnsubscribeMode::COMPLETE_FAILED;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    std::size_t completion_callbacks = 0;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        TickSubscriptionRequest("EURUSD"),
+        [&completion_callbacks](MarketDataSubscriptionResult) {
+            ++completion_callbacks;
+        });
+    ASSERT_TRUE(route.pending());
+
+    router.shutdown();
+    provider.complete_pending_subscribe();
+    router.process();
+
+    EXPECT_FALSE(router.is_shutdown_complete());
+    EXPECT_EQ(router.subscription_count(), 1u);
+    EXPECT_EQ(router.failed_unsubscribe_count(), 1u);
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+    ASSERT_EQ(provider.active_subscriptions.size(), 1u);
+    EXPECT_EQ(completion_callbacks, 0u);
+
+    router.shutdown();
+    EXPECT_EQ(router.failed_unsubscribe_count(), 1u);
+    EXPECT_EQ(provider.unsubscribe_calls, 1u);
+
+    provider.unsubscribe_mode = FakeMarketDataProvider::UnsubscribeMode::SUCCEED;
+    EXPECT_EQ(router.retry_failed_unsubscribes(), 1u);
+    EXPECT_TRUE(provider.active_subscriptions.empty());
+    EXPECT_FALSE(router.is_shutdown_complete());
+
+    router.process();
+
+    EXPECT_TRUE(router.is_shutdown_complete());
+    EXPECT_EQ(router.subscription_count(), 0u);
+    EXPECT_EQ(router.failed_unsubscribe_count(), 0u);
+    EXPECT_EQ(provider.unsubscribe_calls, 2u);
+    EXPECT_FALSE(route.valid());
+    EXPECT_EQ(completion_callbacks, 0u);
+}
+
 TEST(MarketDataRouter, RejectsProvidersWithAnExistingCallbackOwner) {
     FakeMarketDataProvider provider;
     provider.on_tick_data() = [](std::unique_ptr<TickDataBatch>) {};
