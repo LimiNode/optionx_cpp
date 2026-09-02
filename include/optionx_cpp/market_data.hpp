@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "lifecycle.hpp"
 #include "data.hpp"
 #include "market_data/enums.hpp"
 #include "market_data/MarketDataSubscription.hpp"

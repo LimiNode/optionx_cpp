@@ -397,6 +397,10 @@ Applications that compose several process/shutdown modules should put this
 drain loop in their lifecycle supervisor rather than special-case Router in
 business code.
 
+The optional [`LifecycleStack`](lifecycle-stack.md) provides that supervisor.
+Register the platform/executor before Router; it processes them forward and
+keeps the executor alive while stopping Router first in reverse order.
+
 Do not defer subscriber destruction until after the dispatcher is closed.
 `MarketDataSubscriberBase` normally posts remaining handles as one cleanup task;
 if posting is no longer possible, its destructor falls back to synchronous

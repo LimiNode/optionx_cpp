@@ -62,6 +62,16 @@ private:
 
 } // namespace
 
+TEST(BaseTradingPlatformLifecycle, ImplementsCommonLifecycleModule) {
+    TestPlatform platform;
+    optionx::lifecycle::ILifecycleModule& module = platform;
+
+    EXPECT_FALSE(module.is_stopped());
+    module.process();
+    module.shutdown();
+    EXPECT_TRUE(module.is_stopped());
+}
+
 TEST(BaseTradingPlatformLifecycle, RepeatedRunDoesNotDuplicateLifecycleTasks) {
     TestPlatform platform;
 

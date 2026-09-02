@@ -9,7 +9,10 @@ namespace optionx::platforms {
 
     /// \class BaseTradingPlatform
     /// \brief Base endpoint facade for trading platforms, account data, lifecycle, and connection state.
-    class BaseTradingPlatform : public BaseEndpoint, public BaseTradingApi {
+    class BaseTradingPlatform
+            : public BaseEndpoint,
+              public BaseTradingApi,
+              public lifecycle::ILifecycleModule {
     public:
         BaseTradingPlatform(std::shared_ptr<BaseAccountInfoData> account_info)
             : m_account_info(std::move(account_info)),
@@ -240,6 +243,11 @@ namespace optionx::platforms {
             m_running.store(false, std::memory_order_release);
             m_stopped.store(true, std::memory_order_release);
         };
+
+        /// \brief Returns true after the platform lifecycle has stopped.
+        [[nodiscard]] bool is_stopped() const noexcept override {
+            return m_stopped.load(std::memory_order_acquire);
+        }
 
         /// \brief Returns a reference to the event bus.
         utils::EventBus& event_bus() { return m_event_bus; }

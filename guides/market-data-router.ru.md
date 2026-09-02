@@ -396,6 +396,10 @@ provider и owner dispatcher
 Если приложение объединяет несколько process/shutdown modules, этот drain loop
 должен находиться в lifecycle supervisor, а не в Router-specific business code.
 
+Необязательный [`LifecycleStack`](lifecycle-stack.ru.md) предоставляет такой
+supervisor. Зарегистрируй platform/executor перед Router: process пойдёт вперёд,
+а при обратном shutdown executor останется жив до полной остановки Router.
+
 Не откладывай уничтожение subscriber до момента, когда dispatcher уже закрыт.
 Обычно `MarketDataSubscriberBase` отправляет оставшиеся handles одной cleanup
 задачей; если posting уже невозможен, destructor переходит к синхронному

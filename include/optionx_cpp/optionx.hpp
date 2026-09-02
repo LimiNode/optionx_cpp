@@ -6,6 +6,7 @@
 /// \brief Includes core headers for the OptionX library.
 
 #include "utils.hpp"
+#include "lifecycle.hpp"
 #include "data.hpp"
 #include "market_data.hpp"
 #include "storages.hpp"
