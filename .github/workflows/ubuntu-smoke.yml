@@ -32,6 +32,14 @@ jobs:
       - name: Configure
         run: cmake -S . -B build-linux -DOPTIONX_BUILD_DEPS=ON -DOPTIONX_BUILD_TESTS=ON -DOPTIONX_BUILD_EXAMPLES=ON
 
+      - name: Build lifecycle stack test and example
+        run: cmake --build build-linux --target lifecycle_stack_test lifecycle_stack_example -j
+
+      - name: Run lifecycle stack test and example
+        run: |
+          ./build-linux/lifecycle_stack_test --gtest_brief=1
+          ./build-linux/lifecycle_stack_example
+
       - name: Build trade_record_db_test
         run: cmake --build build-linux --target trade_record_db_test -j
 

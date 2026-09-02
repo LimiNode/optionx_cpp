@@ -160,6 +160,11 @@ Router waits for late provider completions and physical unsubscribe results.
 `LifecycleStack` is also an `ILifecycleModule`, so stacks may be nested when a
 larger application has independently composed subsystems.
 
+Nested lifecycle stacks must form an acyclic dependency graph. `add_module()`
+rejects self-registration and duplicate references, but it does not detect an
+indirect cycle such as `stack_a -> stack_b -> stack_a`; the application must
+avoid such registrations.
+
 ## Failures And Limits
 
 The stack does not invent retry, timeout, or abandon policies. For example, a

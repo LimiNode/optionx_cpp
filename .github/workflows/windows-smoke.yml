@@ -32,6 +32,18 @@ jobs:
           -DOPTIONX_BUILD_EXAMPLES=ON
           -DOPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS=ON
 
+      - name: Build lifecycle stack test and example
+        run: >
+          cmake --build build-windows --config Debug --target
+          lifecycle_stack_test lifecycle_stack_example
+
+      - name: Run lifecycle stack test and example
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\build-windows\bin;$PWD\build-windows\Debug;$env:PATH"
+          .\build-windows\Debug\lifecycle_stack_test.exe --gtest_brief=1
+          .\build-windows\Debug\lifecycle_stack_example.exe
+
       - name: Build MetaTrader path discovery test
         run: cmake --build build-windows --config Debug --target metatrader_paths_test
 
