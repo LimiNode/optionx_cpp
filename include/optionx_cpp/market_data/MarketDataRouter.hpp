@@ -403,7 +403,19 @@ namespace optionx::market_data {
         ///          retained cleanup for it completes successfully.
         std::size_t retry_failed_unsubscribes();
 
-        /// \brief Stops all routes and clears provider callback bindings.
+        /// \brief Advances deferred Router lifecycle work on the owner loop.
+        /// \details Processes provider completions retained during shutdown and
+        ///          starts or completes physical subscription cleanup. This method
+        ///          does not poll providers or transport data.
+        void process();
+
+        /// \brief Returns true after shutdown drained every provider operation.
+        [[nodiscard]] bool is_shutdown_complete() const noexcept;
+
+        /// \brief Starts an idempotent graceful shutdown.
+        /// \details New routes and user delivery stop immediately. Pending provider
+        ///          operations remain owned until later process() calls finish their
+        ///          physical cleanup on the owner loop.
         void shutdown() noexcept;
 
     private:
@@ -444,7 +456,10 @@ namespace optionx::market_data {
                 std::shared_ptr<MarketDataRouterSubscriptionControl> control;
                 StreamDescriptor stream;
                 MarketDataSubscriptionHandle retained_cleanup_subscription;
+                MarketDataSubscriptionResult unsubscribe_completion;
                 bool subscribe_completion_posted = false;
+                bool subscribe_completion_received = false;
+                bool unsubscribe_completion_received = false;
                 EntryPhase phase = EntryPhase::PENDING;
                 bool release_requested = false;
                 subscription_callback_t release_callback;
@@ -526,6 +541,8 @@ namespace optionx::market_data {
             [[nodiscard]] std::size_t subscription_count() const;
             [[nodiscard]] std::size_t failed_unsubscribe_count() const;
             std::size_t retry_failed_unsubscribes();
+            void process();
+            [[nodiscard]] bool is_shutdown_complete() const noexcept;
             void shutdown() noexcept;
 
             bool post_to_owner(MarketDataRouter::owner_task_t task) const;
@@ -559,6 +576,7 @@ namespace optionx::market_data {
                 m_registered_provider_ids;
             std::uint64_t m_next_router_id = 1;
             bool m_shutdown = false;
+            bool m_shutdown_complete = false;
             MarketDataRouter::owner_dispatcher_t m_owner_dispatcher;
 
             static StreamDescriptor stream_from(const TickSubscriptionRequest& request);
@@ -614,6 +632,21 @@ namespace optionx::market_data {
                     MarketDataSubscriptionResult result,
                     subscription_callback_t callback);
 
+            bool start_unsubscribe(
+                    const std::shared_ptr<Entry>& entry,
+                    MarketDataSubscriptionHandle subscription,
+                    subscription_callback_t callback);
+            bool record_unsubscribe_completion(
+                    RoutedSubscriptionId router_id,
+                    const MarketDataSubscriptionHandle& expected_subscription,
+                    const MarketDataSubscriptionResult& result,
+                    bool& shutdown_requested);
+            void dispatch_unsubscribe_completion(
+                    RoutedSubscriptionId router_id,
+                    MarketDataSubscriptionHandle expected_subscription,
+                    MarketDataSubscriptionResult result,
+                    subscription_callback_t callback);
+
             BaseMarketDataProvider* remove_entry_no_lock(RoutedSubscriptionId router_id);
             void cache_status_no_lock(ProviderSlot& slot, MarketDataStatusUpdate update);
             bool replay_status_no_lock(
@@ -631,10 +664,11 @@ namespace optionx::market_data {
                     MarketDataSubscriptionResult result);
 
             bool dispatch_or_run(MarketDataRouter::owner_task_t task) const;
-            bool reserve_subscribe_completion(
+            bool record_subscribe_completion(
                     RoutedSubscriptionId router_id,
                     BaseMarketDataProvider& provider,
-                    const MarketDataSubscriptionResult& result);
+                    const MarketDataSubscriptionResult& result,
+                    bool& shutdown_requested);
             void mark_subscribe_completion_posted(
                     RoutedSubscriptionId router_id,
                     const MarketDataSubscriptionHandle& subscription);
@@ -643,6 +677,7 @@ namespace optionx::market_data {
                     BaseMarketDataProvider& provider,
                     MarketDataSubscriptionResult result,
                     subscription_callback_t callback);
+            void request_process();
 
             friend class ::optionx::market_data::MarketDataRouterSubscription;
         };
@@ -668,29 +703,27 @@ namespace optionx::market_data {
             return post_to_owner(std::move(task));
         }
 
-        inline bool MarketDataRouterState::reserve_subscribe_completion(
+        inline bool MarketDataRouterState::record_subscribe_completion(
                 RoutedSubscriptionId router_id,
                 BaseMarketDataProvider& provider,
-                const MarketDataSubscriptionResult& result) {
-            if (!result.success() ||
-                !result.subscription.valid() ||
-                result.subscription.provider_id != provider.provider_id()) {
-                return false;
-            }
-
+                const MarketDataSubscriptionResult& result,
+                bool& shutdown_requested) {
             std::lock_guard<std::mutex> lock(m_mutex);
             const auto entry_it = m_entries.find(router_id);
-            if (m_shutdown ||
-                entry_it == m_entries.end() ||
+            if (entry_it == m_entries.end() ||
                 entry_it->second->provider != &provider ||
                 entry_it->second->phase != EntryPhase::PENDING ||
-                entry_it->second->retained_cleanup_subscription.valid()) {
+                entry_it->second->subscribe_completion_received) {
                 return false;
             }
 
-            entry_it->second->retained_cleanup_subscription =
-                result.subscription;
+            entry_it->second->subscribe_completion_received = true;
+            if (result.success()) {
+                entry_it->second->retained_cleanup_subscription =
+                    result.subscription;
+            }
             entry_it->second->subscribe_completion_posted = false;
+            shutdown_requested = m_shutdown;
             return true;
         }
 
@@ -727,8 +760,17 @@ namespace optionx::market_data {
                     "Market-data provider returned an invalid subscription handle.");
             }
 
-            if (result.success() &&
-                !reserve_subscribe_completion(router_id, provider, result)) {
+            bool shutdown_requested = false;
+            if (!record_subscribe_completion(
+                    router_id,
+                    provider,
+                    result,
+                    shutdown_requested)) {
+                return;
+            }
+
+            if (shutdown_requested) {
+                request_process();
                 return;
             }
 
@@ -751,6 +793,14 @@ namespace optionx::market_data {
             if (posted && subscription.valid()) {
                 mark_subscribe_completion_posted(router_id, subscription);
             }
+        }
+
+        inline void MarketDataRouterState::request_process() {
+            if (!m_owner_dispatcher) return;
+            const auto state = shared_from_this();
+            post_to_owner([state]() {
+                state->process();
+            });
         }
 
         inline MarketDataRouterState::StreamDescriptor
@@ -1388,7 +1438,11 @@ namespace optionx::market_data {
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto entry_it = m_entries.find(router_id);
-                if (entry_it == m_entries.end() || m_shutdown) return;
+                if (entry_it == m_entries.end() ||
+                    m_shutdown ||
+                    !entry_it->second->subscribe_completion_received) {
+                    return;
+                }
 
                 if (!result.success()) {
                     entry = entry_it->second;
@@ -1407,6 +1461,7 @@ namespace optionx::market_data {
 
                     entry->retained_cleanup_subscription = {};
                     entry->subscribe_completion_posted = false;
+                    entry->subscribe_completion_received = false;
                     entry->stream = stream_from(result.subscription);
                     entry->phase = EntryPhase::ACTIVE;
                     set_control_active(entry->control, result.subscription);
@@ -1456,21 +1511,11 @@ namespace optionx::market_data {
                 BaseMarketDataProvider& provider,
                 MarketDataSubscriptionResult result,
                 subscription_callback_t callback) {
-            bool pending = false;
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                const auto it = m_entries.find(router_id);
-                pending = it != m_entries.end() &&
-                          it->second->phase == EntryPhase::PENDING &&
-                          !it->second->retained_cleanup_subscription.valid();
-            }
-            if (pending) {
-                complete_subscribe(
-                    router_id,
-                    provider,
-                    std::move(result),
-                    std::move(callback));
-            }
+            dispatch_subscribe_completion(
+                router_id,
+                provider,
+                std::move(result),
+                std::move(callback));
         }
 
         inline bool MarketDataRouterState::unsubscribe(
@@ -1501,6 +1546,9 @@ namespace optionx::market_data {
                 entry->phase = EntryPhase::UNSUBSCRIBING;
                 provider = entry->provider;
                 subscription = control->provider_subscription;
+                if (!subscription.valid()) {
+                    subscription = entry->retained_cleanup_subscription;
+                }
                 const auto provider_it = m_providers.find(entry->provider_id);
                 if (provider_it != m_providers.end()) {
                     provider_it->second.provider_routes.erase(subscription.id);
@@ -1519,33 +1567,35 @@ namespace optionx::market_data {
                 return false;
             }
 
+            return start_unsubscribe(
+                entry,
+                std::move(subscription),
+                std::move(callback));
+        }
+
+        inline bool MarketDataRouterState::start_unsubscribe(
+                const std::shared_ptr<Entry>& entry,
+                MarketDataSubscriptionHandle subscription,
+                subscription_callback_t callback) {
+            if (!entry || !entry->provider || !subscription.valid()) return false;
+
             const auto state = shared_from_this();
             bool accepted = false;
             try {
-                accepted = provider->unsubscribe(
+                accepted = entry->provider->unsubscribe(
                     subscription,
                     [state,
                      router_id = entry->router_id,
                      subscription,
-                     callback](
-                            MarketDataSubscriptionResult result) mutable {
-                        auto pending = std::make_shared<MarketDataSubscriptionResult>(
-                            std::move(result));
-                        state->dispatch_or_run(
-                            [state,
-                             router_id,
-                             subscription,
-                             callback = std::move(callback),
-                             pending]() mutable {
-                                state->complete_unsubscribe(
-                                    router_id,
-                                    subscription,
-                                    std::move(*pending),
-                                    std::move(callback));
-                            });
+                     callback](MarketDataSubscriptionResult result) mutable {
+                        state->dispatch_unsubscribe_completion(
+                            router_id,
+                            subscription,
+                            std::move(result),
+                            std::move(callback));
                     });
             } catch (const std::exception& exception) {
-                complete_unsubscribe(
+                dispatch_unsubscribe_completion(
                     entry->router_id,
                     subscription,
                     MarketDataSubscriptionResult::failed(
@@ -1556,7 +1606,7 @@ namespace optionx::market_data {
                     std::move(callback));
                 return false;
             } catch (...) {
-                complete_unsubscribe(
+                dispatch_unsubscribe_completion(
                     entry->router_id,
                     subscription,
                     MarketDataSubscriptionResult::failed(
@@ -1568,7 +1618,7 @@ namespace optionx::market_data {
             }
 
             if (!accepted) {
-                complete_unsubscribe(
+                dispatch_unsubscribe_completion(
                     entry->router_id,
                     subscription,
                     MarketDataSubscriptionResult::failed(
@@ -1578,6 +1628,73 @@ namespace optionx::market_data {
                     std::move(callback));
             }
             return accepted;
+        }
+
+        inline bool MarketDataRouterState::record_unsubscribe_completion(
+                RoutedSubscriptionId router_id,
+                const MarketDataSubscriptionHandle& expected_subscription,
+                const MarketDataSubscriptionResult& result,
+                bool& shutdown_requested) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto it = m_entries.find(router_id);
+            if (it == m_entries.end() ||
+                it->second->phase != EntryPhase::UNSUBSCRIBING ||
+                it->second->unsubscribe_completion_received) {
+                return false;
+            }
+
+            const auto actual_subscription = result.subscription.valid()
+                ? result.subscription
+                : expected_subscription;
+            if (!actual_subscription.valid() ||
+                actual_subscription.provider_id != expected_subscription.provider_id ||
+                actual_subscription.id != expected_subscription.id) {
+                return false;
+            }
+
+            it->second->unsubscribe_completion = result;
+            if (!it->second->unsubscribe_completion.subscription.valid()) {
+                it->second->unsubscribe_completion.subscription = expected_subscription;
+            }
+            it->second->unsubscribe_completion_received = true;
+            shutdown_requested = m_shutdown;
+            return true;
+        }
+
+        inline void MarketDataRouterState::dispatch_unsubscribe_completion(
+                RoutedSubscriptionId router_id,
+                MarketDataSubscriptionHandle expected_subscription,
+                MarketDataSubscriptionResult result,
+                subscription_callback_t callback) {
+            bool shutdown_requested = false;
+            if (!record_unsubscribe_completion(
+                    router_id,
+                    expected_subscription,
+                    result,
+                    shutdown_requested)) {
+                return;
+            }
+
+            if (shutdown_requested) {
+                request_process();
+                return;
+            }
+
+            auto pending = std::make_shared<MarketDataSubscriptionResult>(
+                std::move(result));
+            const auto state = shared_from_this();
+            dispatch_or_run(
+                [state,
+                 router_id,
+                 expected_subscription,
+                 callback = std::move(callback),
+                 pending]() mutable {
+                    state->complete_unsubscribe(
+                        router_id,
+                        expected_subscription,
+                        std::move(*pending),
+                        std::move(callback));
+                });
         }
 
         inline void MarketDataRouterState::complete_unsubscribe(
@@ -1591,11 +1708,16 @@ namespace optionx::market_data {
 
             BaseMarketDataProvider* unbind = nullptr;
             bool handled = false;
+            bool notify_callback = false;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto it = m_entries.find(router_id);
                 if (it != m_entries.end() &&
-                    it->second->phase == EntryPhase::UNSUBSCRIBING) {
+                    it->second->phase == EntryPhase::UNSUBSCRIBING &&
+                    (!expected_subscription.valid() ||
+                     it->second->unsubscribe_completion_received)) {
+                    it->second->unsubscribe_completion_received = false;
+                    it->second->unsubscribe_completion = {};
                     if (result.success()) {
                         set_control_released(it->second->control);
                         unbind = remove_entry_no_lock(router_id);
@@ -1603,11 +1725,14 @@ namespace optionx::market_data {
                         it->second->phase = EntryPhase::CLEANUP_FAILED;
                     }
                     handled = true;
+                    notify_callback = !m_shutdown;
                 }
             }
 
             if (unbind) unbind_provider(*unbind);
-            if (handled) dispatch_result(std::move(callback), std::move(result));
+            if (handled && notify_callback) {
+                dispatch_result(std::move(callback), std::move(result));
+            }
         }
 
         inline BaseMarketDataProvider* MarketDataRouterState::remove_entry_no_lock(
@@ -1884,51 +2009,144 @@ namespace optionx::market_data {
             return accepted;
         }
 
+        inline void MarketDataRouterState::process() {
+            struct PendingCompletion {
+                RoutedSubscriptionId router_id;
+                MarketDataSubscriptionHandle subscription;
+                MarketDataSubscriptionResult result;
+            };
+            struct CleanupRequest {
+                std::shared_ptr<Entry> entry;
+                MarketDataSubscriptionHandle subscription;
+            };
+
+            for (;;) {
+                std::vector<PendingCompletion> completions;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (!m_shutdown || m_shutdown_complete) return;
+
+                    completions.reserve(m_entries.size());
+                    for (const auto& [id, entry] : m_entries) {
+                        if (entry->phase != EntryPhase::UNSUBSCRIBING ||
+                            !entry->unsubscribe_completion_received) {
+                            continue;
+                        }
+                        completions.push_back(PendingCompletion{
+                            id,
+                            entry->unsubscribe_completion.subscription,
+                            entry->unsubscribe_completion});
+                    }
+                }
+
+                for (auto& completion : completions) {
+                    complete_unsubscribe(
+                        completion.router_id,
+                        std::move(completion.subscription),
+                        std::move(completion.result),
+                        {});
+                }
+
+                std::vector<RoutedSubscriptionId> failed_subscribes;
+                std::vector<CleanupRequest> cleanup_requests;
+                std::vector<BaseMarketDataProvider*> unbind_providers;
+                bool shutdown_complete = false;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    failed_subscribes.reserve(m_entries.size());
+                    cleanup_requests.reserve(m_entries.size());
+
+                    for (const auto& [id, entry] : m_entries) {
+                        MarketDataSubscriptionHandle subscription;
+                        if (entry->phase == EntryPhase::PENDING &&
+                            entry->subscribe_completion_received) {
+                            if (!entry->retained_cleanup_subscription.valid()) {
+                                failed_subscribes.push_back(id);
+                                continue;
+                            }
+                            subscription = entry->retained_cleanup_subscription;
+                        } else if (entry->phase == EntryPhase::ACTIVE) {
+                            subscription = entry->control->provider_subscription;
+                        } else {
+                            continue;
+                        }
+
+                        if (!entry->provider || !subscription.valid()) {
+                            entry->phase = EntryPhase::CLEANUP_FAILED;
+                            continue;
+                        }
+                        entry->phase = EntryPhase::UNSUBSCRIBING;
+                        const auto provider_it = m_providers.find(entry->provider_id);
+                        if (provider_it != m_providers.end()) {
+                            provider_it->second.provider_routes.erase(subscription.id);
+                        }
+                        cleanup_requests.push_back(CleanupRequest{
+                            entry,
+                            std::move(subscription)});
+                    }
+
+                    for (const auto id : failed_subscribes) {
+                        const auto entry_it = m_entries.find(id);
+                        if (entry_it == m_entries.end()) continue;
+                        set_control_released(entry_it->second->control);
+                        if (auto* provider = remove_entry_no_lock(id)) {
+                            unbind_providers.push_back(provider);
+                        }
+                    }
+
+                    if (m_entries.empty()) {
+                        m_registered_providers.clear();
+                        m_provider_aliases.clear();
+                        m_registered_provider_ids.clear();
+                        m_shutdown_complete = true;
+                        shutdown_complete = true;
+                    }
+                }
+
+                for (auto* provider : unbind_providers) {
+                    if (provider) unbind_provider(*provider);
+                }
+                for (auto& request : cleanup_requests) {
+                    start_unsubscribe(
+                        request.entry,
+                        std::move(request.subscription),
+                        {});
+                }
+
+                if (shutdown_complete) return;
+                if (completions.empty() &&
+                    failed_subscribes.empty() &&
+                    cleanup_requests.empty()) {
+                    return;
+                }
+            }
+        }
+
+        inline bool MarketDataRouterState::is_shutdown_complete() const noexcept {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_shutdown_complete;
+        }
+
         inline void MarketDataRouterState::shutdown() noexcept {
-            std::vector<BaseMarketDataProvider*> providers;
-            std::vector<std::pair<BaseMarketDataProvider*, MarketDataSubscriptionHandle>>
-                subscriptions;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_shutdown_complete) return;
                 if (m_shutdown) return;
                 m_shutdown = true;
-
-                providers.reserve(m_providers.size());
-                for (const auto& [id, slot] : m_providers) {
-                    (void)id;
-                    if (slot.provider) providers.push_back(slot.provider);
-                }
                 for (const auto& [id, entry] : m_entries) {
                     (void)id;
                     set_control_released(entry->control);
-                    const auto subscription = entry->control->provider_subscription;
-                    if (entry->provider && subscription.valid()) {
-                        subscriptions.emplace_back(entry->provider, subscription);
-                    }
-                    if (entry->provider &&
-                        entry->retained_cleanup_subscription.valid()) {
-                        subscriptions.emplace_back(
-                            entry->provider,
-                            std::move(entry->retained_cleanup_subscription));
+                    entry->subscriber.reset();
+                    entry->release_callback = {};
+                    if (entry->phase == EntryPhase::CLEANUP_FAILED) {
+                        entry->phase = entry->retained_cleanup_subscription.valid()
+                            ? EntryPhase::PENDING
+                            : EntryPhase::ACTIVE;
                     }
                 }
-                m_entries.clear();
-                m_providers.clear();
-                m_registered_providers.clear();
-                m_provider_aliases.clear();
-                m_registered_provider_ids.clear();
             }
 
-            for (auto* provider : providers) {
-                if (provider) unbind_provider(*provider);
-            }
-            for (auto& [provider, subscription] : subscriptions) {
-                if (!provider) continue;
-                try {
-                    provider->unsubscribe(std::move(subscription), {});
-                } catch (...) {
-                }
-            }
+            process();
         }
 
     } // namespace detail
@@ -2207,6 +2425,14 @@ namespace optionx::market_data {
 
     inline std::size_t MarketDataRouter::retry_failed_unsubscribes() {
         return m_state ? m_state->retry_failed_unsubscribes() : 0;
+    }
+
+    inline void MarketDataRouter::process() {
+        if (m_state) m_state->process();
+    }
+
+    inline bool MarketDataRouter::is_shutdown_complete() const noexcept {
+        return !m_state || m_state->is_shutdown_complete();
     }
 
     inline void MarketDataRouter::shutdown() noexcept {

@@ -172,8 +172,9 @@ if (router.failed_unsubscribe_count() != 0) {
 
 The original unsubscribe callback receives the failure once; internal retries
 do not resurrect the consumed public handle. Apply application-level backoff
-before retrying persistent failures. `shutdown()` makes one final best-effort
-cleanup attempt before releasing Router state.
+before retrying persistent failures. `shutdown()` retries cleanup entries that
+had already failed once, but a repeated failure keeps Router in its draining
+state until the application retries or applies a future explicit abandon policy.
 
 The optional subscription callback reports desired-state acceptance by the
 provider. It is not a transport-readiness callback:
@@ -340,19 +341,25 @@ transport is ready. Those stages are observed separately:
 
 If the subscriber expires before a posted subscribe command runs, the command is
 cancelled and its callbacks are not invoked. Once a configured dispatcher starts
-rejecting work during shutdown, new provider completions and deliveries are
-dropped rather than being invoked inline on the source thread. Tick, bar, and
-status deliveries need no physical cleanup and are discarded immediately.
+rejecting work during shutdown, new tick, bar, and status deliveries are dropped
+rather than being invoked inline on the source thread. Those deliveries need no
+physical cleanup and are discarded immediately.
 
-A successful subscribe completion reserves its concrete provider handle in
-Router state before the completion task is posted. The owner task must atomically
-claim that reservation before promoting the route from pending to active. If the
-task is rejected, the reservation remains with the pending route and Router
-quarantines that provider from new routes. If the task is accepted but later
-cancelled during owner shutdown, the reservation likewise remains available to
-`router.shutdown()`. In both cases shutdown unsubscribes the retained handle from
-the owner loop; neither the subscription callback nor subscriber callbacks run
-on the source thread.
+Subscribe and unsubscribe completions are recorded in Router state before an
+owner task is posted. A successful subscribe result reserves its concrete
+provider handle; the owner task atomically claims that reservation before
+promoting the route from pending to active. Rejected or later-cancelled owner
+tasks therefore do not own the only copy of a physical handle or completion
+result.
+
+`process()` advances Router-owned deferred lifecycle work on the owner thread.
+During normal operation posted completion tasks apply their transitions
+directly, so Router does not require a separate pump. After `shutdown()` starts
+draining, late provider completions remain in Router state and `process()` turns
+every late successful subscribe into a physical unsubscribe without invoking
+user callbacks or replay. It does not poll providers or transports; in manual
+platform mode call `platform.process()` first so the provider can produce its
+completion.
 
 All Router callbacks are serialized by the owner loop, but fields read directly
 from a different bot thread still require the bot's own mutex, atomics, or
@@ -368,18 +375,27 @@ provider and owner dispatcher
         outlives subscribers and posted cleanup work
 ```
 
-Use this shutdown order:
+`shutdown()` is an idempotent request to stop, not an unconditional assertion
+that every asynchronous provider operation finished before it returned. It
+performs one `process()` pass itself, so synchronous cleanup still completes in
+the call. Use this shutdown order:
 
 1. Stop producing new commands from bot threads.
 2. Request unsubscribe or destroy subscribers while the dispatcher still accepts
    work.
-3. Keep processing the owner loop until unsubscribe commands and any nested
-   provider completion callbacks are drained. Inspect
-   `failed_unsubscribe_count()` and retry according to the application policy
-   while the owner loop and providers are still available.
-4. Call `router.shutdown()` from the owner loop. It is idempotent, releases
-   provider callback slots, and requests unsubscribe for remaining active routes.
-5. Stop the platform/dispatcher and then destroy providers.
+3. Call `router.shutdown()` from the owner loop. New routes and user delivery
+   stop immediately; pending provider operations remain as cleanup tombstones.
+4. Keep the provider and owner loop running until
+   `router.is_shutdown_complete()` is true. In manual mode each host tick calls
+   `platform.process()` and then `router.process()`.
+5. Inspect `failed_unsubscribe_count()` and retry with application-level backoff
+   while the owner loop and providers remain available. Failed cleanup prevents
+   `is_shutdown_complete()` from becoming true.
+6. Stop the platform/dispatcher and then destroy providers.
+
+Applications that compose several process/shutdown modules should put this
+drain loop in their lifecycle supervisor rather than special-case Router in
+business code.
 
 Do not defer subscriber destruction until after the dispatcher is closed.
 `MarketDataSubscriberBase` normally posts remaining handles as one cleanup task;
