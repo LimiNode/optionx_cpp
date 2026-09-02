@@ -298,6 +298,131 @@ TEST(MarketDataRouter, UsesStrongRoutedSubscriptionIds) {
     EXPECT_NE(eur.router_id().value(), 0u);
 }
 
+TEST(MarketDataRouter, RoutesRegisteredProvidersByStableIdAndAlias) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    const MarketDataProviderId provider_id{1001};
+    auto tick_subscriber = std::make_shared<RecordingSubscriber>();
+    auto bar_subscriber = std::make_shared<RecordingSubscriber>();
+
+    ASSERT_TRUE(router.register_provider(
+        provider_id,
+        provider,
+        {"intrade", "intrade-bar"}));
+    EXPECT_EQ(router.registered_provider_count(), 1u);
+    EXPECT_FALSE(static_cast<bool>(provider.on_tick_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_bar_data()));
+    EXPECT_FALSE(static_cast<bool>(provider.on_market_data_status()));
+
+    auto ticks = router.subscribe_ticks(
+        provider_id,
+        tick_subscriber,
+        TickSubscriptionRequest("EURUSD"));
+    auto bars = router.subscribe_bars(
+        "intrade-bar",
+        bar_subscriber,
+        BarSubscriptionRequest("EURUSD", 60));
+
+    ASSERT_TRUE(ticks.active());
+    ASSERT_TRUE(bars.active());
+    EXPECT_EQ(ticks.registered_provider_id(), provider_id);
+    EXPECT_EQ(bars.registered_provider_id(), provider_id);
+    EXPECT_EQ(
+        router.registered_provider_id(provider.provider_id()),
+        provider_id);
+    EXPECT_EQ(router.provider_aliases(provider_id).size(), 2u);
+
+    provider.emit_ticks(ticks.provider_subscription());
+    provider.emit_unscoped_bars("EURUSD", 60);
+    ASSERT_EQ(tick_subscriber->ticks.size(), 1u);
+    ASSERT_EQ(bar_subscriber->bars.size(), 1u);
+}
+
+TEST(MarketDataRouter, RejectsProviderRegistrationCollisions) {
+    FakeMarketDataProvider first;
+    FakeMarketDataProvider second;
+    MarketDataRouter router;
+    const MarketDataProviderId first_id{1001};
+    const MarketDataProviderId second_id{2001};
+
+    ASSERT_TRUE(router.register_provider(first_id, first, {"primary"}));
+    EXPECT_FALSE(router.register_provider(first_id, second, {"secondary"}));
+    EXPECT_FALSE(router.register_provider(second_id, first, {"secondary"}));
+    EXPECT_FALSE(router.register_provider(second_id, second, {"primary"}));
+    EXPECT_FALSE(router.register_provider(second_id, second, {"", "secondary"}));
+    EXPECT_FALSE(router.register_provider(
+        second_id,
+        second,
+        {"secondary", "secondary"}));
+    EXPECT_EQ(router.registered_provider_count(), 1u);
+
+    EXPECT_TRUE(router.add_provider_alias(first_id, "main"));
+    EXPECT_TRUE(router.add_provider_alias(first_id, "main"));
+    EXPECT_FALSE(router.add_provider_alias(second_id, "secondary"));
+    EXPECT_EQ(router.provider_aliases(first_id).size(), 2u);
+}
+
+TEST(MarketDataRouter, ReportsUnknownRegisteredProviderSelections) {
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    MarketDataSubscriptionResult numeric_result;
+    MarketDataSubscriptionResult alias_result;
+
+    auto numeric = router.subscribe_ticks(
+        MarketDataProviderId{1001},
+        subscriber,
+        TickSubscriptionRequest("EURUSD"),
+        [&numeric_result](MarketDataSubscriptionResult result) {
+            numeric_result = std::move(result);
+        });
+    auto alias = router.subscribe_ticks(
+        "missing",
+        subscriber,
+        TickSubscriptionRequest("BTCUSDT"),
+        [&alias_result](MarketDataSubscriptionResult result) {
+            alias_result = std::move(result);
+        });
+
+    EXPECT_FALSE(numeric.valid());
+    EXPECT_FALSE(alias.valid());
+    EXPECT_EQ(numeric_result.status, MarketDataSubscriptionStatus::FAILED);
+    EXPECT_EQ(alias_result.status, MarketDataSubscriptionStatus::FAILED);
+    EXPECT_NE(numeric_result.error_message.find("ID"), std::string::npos);
+    EXPECT_NE(alias_result.error_message.find("alias"), std::string::npos);
+}
+
+TEST(MarketDataRouter, UnregistersOnlyIdleProvidersAndReleasesAliases) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    const MarketDataProviderId provider_id{1001};
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    ASSERT_TRUE(router.register_provider(provider_id, provider, {"intrade"}));
+    auto route = router.subscribe_ticks(
+        "intrade",
+        subscriber,
+        TickSubscriptionRequest("EURUSD"));
+    ASSERT_TRUE(route.active());
+    EXPECT_FALSE(router.unregister_provider(provider_id));
+
+    route.reset();
+    EXPECT_TRUE(router.unregister_provider(provider_id));
+    EXPECT_EQ(router.registered_provider_count(), 0u);
+    EXPECT_FALSE(router.registered_provider_id(provider.provider_id()).valid());
+    EXPECT_TRUE(router.provider_aliases(provider_id).empty());
+
+    MarketDataSubscriptionResult result;
+    auto missing = router.subscribe_ticks(
+        "intrade",
+        subscriber,
+        TickSubscriptionRequest("EURUSD"),
+        [&result](MarketDataSubscriptionResult update) {
+            result = std::move(update);
+        });
+    EXPECT_FALSE(missing.valid());
+    EXPECT_EQ(result.status, MarketDataSubscriptionStatus::FAILED);
+}
+
 TEST(MarketDataRouter, RoutesEventsToTheirConcreteSubscriptions) {
     FakeMarketDataProvider provider;
     MarketDataRouter router;
