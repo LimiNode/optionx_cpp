@@ -24,10 +24,16 @@ broker API и bridges. Основной сценарий: пользовател
 
 ## Public Include Surface
 
+`optionx_cpp/lifecycle.hpp` exposes the optional `ILifecycleModule` and
+`LifecycleStack` API for applications that compose platform, Router, bot, and
+node lifecycles. See [English](lifecycle-stack.md) or
+[Русский](lifecycle-stack.ru.md).
+
 | Include | Что открывает | Когда использовать |
 |---|---|---|
 | `optionx_cpp/optionx.hpp` | Все основные subsystems | В приложениях и examples, когда нужен полный API |
 | `optionx_cpp/utils.hpp` | Pub-sub, tasks, crypto, strings, time, ids | Для инфраструктурного кода и новых components |
+| `optionx_cpp/lifecycle.hpp` | `ILifecycleModule`, `LifecycleStack` | Для необязательной общей обработки и staged shutdown модулей |
 | `optionx_cpp/data.hpp` | DTO, events, enums, account/symbol/tick/bar/trading data | Для API boundary и сообщений |
 | `optionx_cpp/components.hpp` | `BaseComponent`, HTTP и trade execution base classes | Для нового manager/component |
 | `optionx_cpp/market_data.hpp` | Market-data provider role, subscription DTOs and statuses | Для live tick/bar subscriptions и history API contracts |

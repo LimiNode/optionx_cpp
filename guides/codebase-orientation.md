@@ -24,8 +24,8 @@
 ## Public Include Points
 
 Главная include-точка - `include/optionx_cpp/optionx.hpp`. Она включает
-`utils.hpp`, `data.hpp`, `storages.hpp`, `components.hpp`, `platforms.hpp`,
-`bridges.hpp`.
+`utils.hpp`, `lifecycle.hpp`, `data.hpp`, `storages.hpp`, `components.hpp`,
+`platforms.hpp`, `bridges.hpp`.
 
 Aggregate headers в корне `include/optionx_cpp` - часть публичной поверхности.
 Если добавляешь новый публичный DTO/component/platform, проверь соответствующий

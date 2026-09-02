@@ -227,7 +227,7 @@ namespace optionx::market_data {
     ///          or fails physical unsubscription, the router retains that provider
     ///          handle, keeps the callback binding, and rejects new routes through the
     ///          affected provider until retry_failed_unsubscribes() succeeds.
-    class MarketDataRouter {
+    class MarketDataRouter : public lifecycle::ILifecycleModule {
     public:
         using SubscriptionHandle = MarketDataRouterSubscription; ///< Move-only route owner.
         using subscription_callback_t = BaseMarketDataProvider::subscription_callback_t; ///< Operation callback.
@@ -254,8 +254,9 @@ namespace optionx::market_data {
         /// \brief Move assignment is disabled because handles refer to one router state.
         MarketDataRouter& operator=(MarketDataRouter&&) = delete;
 
-        /// \brief Stops routed subscriptions and releases provider callbacks.
-        ~MarketDataRouter();
+        /// \brief Requests shutdown for any routes still owned by this instance.
+        /// \details Drain asynchronous provider operations before destruction.
+        ~MarketDataRouter() override;
 
         /// \brief Adds a non-owning provider registration with stable aliases.
         /// \details Registration does not bind provider callbacks. Aliases are
@@ -407,16 +408,21 @@ namespace optionx::market_data {
         /// \details Processes provider completions retained during shutdown and
         ///          starts or completes physical subscription cleanup. This method
         ///          does not poll providers or transport data.
-        void process();
+        void process() override;
 
         /// \brief Returns true after shutdown drained every provider operation.
         [[nodiscard]] bool is_shutdown_complete() const noexcept;
+
+        /// \brief Returns the common lifecycle terminal state.
+        [[nodiscard]] bool is_stopped() const noexcept override {
+            return is_shutdown_complete();
+        }
 
         /// \brief Starts an idempotent graceful shutdown.
         /// \details New routes and user delivery stop immediately. Pending provider
         ///          operations remain owned until later process() calls finish their
         ///          physical cleanup on the owner loop.
-        void shutdown() noexcept;
+        void shutdown() noexcept override;
 
     private:
         std::shared_ptr<detail::MarketDataRouterState> m_state;

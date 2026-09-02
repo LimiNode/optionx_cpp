@@ -50,6 +50,19 @@ Lifecycle:
 - Registered components хранятся как raw pointers; concrete platform должна
   владеть ими как fields и гарантировать lifetime.
 
+### Optional Application Lifecycle Stack
+
+`lifecycle::LifecycleStack` composes top-level modules without replacing their
+direct APIs. Register dependencies first. Normal processing runs forward;
+shutdown is staged in reverse and does not stop a lower-level executor until
+the current dependent module reports `is_stopped()`.
+
+The stack is non-owning and owner-loop confined. It intentionally does not call
+`initialize()` or `run()` because existing platform, component, Router, and bot
+startup contracts are not equivalent. Keep startup explicit and use the stack
+only when common processing and shutdown are useful. The canonical contract is
+in [lifecycle-stack.md](lifecycle-stack.md).
+
 ### IntradeBar Delayed Retry Lifecycle Note
 
 Do not report a use-after-free risk for the current IntradeBar settings-switch

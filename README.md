@@ -5,3 +5,5 @@ OptionX is a C++ library for working with APIs of various brokers and trading pl
 
 - Market-data routing, provider selection, replay, and bot threads:
   [English](guides/market-data-router.md) | [Русский](guides/market-data-router.ru.md)
+- Optional common module processing and staged shutdown:
+  [English](guides/lifecycle-stack.md) | [Русский](guides/lifecycle-stack.ru.md)

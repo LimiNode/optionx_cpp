@@ -119,6 +119,19 @@ Subscription rules:
   websocket feeds may still run for trade lifecycle needs even when there are
   no public subscribers.
 
+## `lifecycle::LifecycleStack`
+
+Файлы: `include/optionx_cpp/lifecycle/ILifecycleModule.hpp` и
+`include/optionx_cpp/lifecycle/LifecycleStack.hpp`.
+
+Полное руководство: [English](lifecycle-stack.md) |
+[Русский](lifecycle-stack.ru.md).
+
+Это необязательный application-level supervisor для модулей с `process()`,
+`shutdown()` и terminal predicate `is_stopped()`. Зависимости регистрируются
+первыми, обычный process идёт вперёд, а shutdown выполняется по одной стадии в
+обратном порядке. Startup остаётся явным.
+
 ## `market_data::MarketDataRouter`
 
 Файл: `include/optionx_cpp/market_data/MarketDataRouter.hpp`.
