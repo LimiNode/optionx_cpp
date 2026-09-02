@@ -62,8 +62,7 @@ namespace optionx::market_data {
         ///          later `FINALIZED` snapshot arrives.
         /// \return Mutable callback reference, or a null callback if live bars are unsupported.
         virtual bars_callback_t& on_bar_data() {
-            static bars_callback_t null_callback;
-            return null_callback;
+            return m_bar_data_callback;
         }
 
         /// \brief Returns a reference to the live tick-data callback.
@@ -72,8 +71,7 @@ namespace optionx::market_data {
         ///          from a low-level event-bus drain.
         /// \return Mutable callback reference, or a null callback if live ticks are unsupported.
         virtual ticks_callback_t& on_tick_data() {
-            static ticks_callback_t null_callback;
-            return null_callback;
+            return m_tick_data_callback;
         }
 
         /// \brief Returns a reference to the market-data stream status callback.
@@ -83,8 +81,7 @@ namespace optionx::market_data {
         ///          READY status to late subscribers.
         /// \return Mutable callback reference, or a null callback if status updates are unsupported.
         virtual status_callback_t& on_market_data_status() {
-            static status_callback_t null_callback;
-            return null_callback;
+            return m_status_callback;
         }
 
         /// \brief Requests a live tick stream subscription.
@@ -278,6 +275,9 @@ namespace optionx::market_data {
 
     private:
         ProviderInstanceId m_provider_id = kInvalidProviderInstanceId; ///< Runtime provider instance ID.
+        bars_callback_t m_bar_data_callback; ///< Per-instance default live bar callback slot.
+        ticks_callback_t m_tick_data_callback; ///< Per-instance default live tick callback slot.
+        status_callback_t m_status_callback; ///< Per-instance default stream status callback slot.
 
         /// \brief Returns the next non-zero provider instance ID.
         static ProviderInstanceId next_provider_instance_id() {

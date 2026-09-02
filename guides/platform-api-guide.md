@@ -118,6 +118,60 @@ Subscription rules:
   websocket feeds may still run for trade lifecycle needs even when there are
   no public subscribers.
 
+## `market_data::MarketDataRouter`
+
+Файл: `include/optionx_cpp/market_data/MarketDataRouter.hpp`.
+
+`MarketDataRouter` owns public provider subscriptions and routes each batch or
+status only to the subscriber associated with that concrete subscription. Use it
+when a bot or chart needs RAII lifetime and per-subscription status replay; use
+`MarketDataHub` when simple stream-level broadcast without subscription
+ownership is sufficient.
+
+```cpp
+class MyBot final : public market_data::IMarketDataSubscriber {
+public:
+    void on_tick_data(const market_data::TickDataBatch& batch) override {
+        consume_ticks(batch.subscription, batch.items);
+    }
+
+    void on_market_data_status(
+            const market_data::MarketDataStatusUpdate& update) override {
+        log_status(update.subscription, update.status);
+    }
+};
+
+market_data::MarketDataRouter router;
+auto bot = std::make_shared<MyBot>();
+
+auto eur = router.subscribe_ticks(
+    platform,
+    bot,
+    market_data::TickSubscriptionRequest("EURUSD"));
+
+if (!eur.valid()) {
+    // The Router rejected the logical route.
+}
+```
+
+The returned `MarketDataRouterSubscription` is move-only. Its destructor,
+`reset()`, and `unsubscribe()` release the provider subscription. Subscriber
+objects are weakly held, while the provider must outlive the router and pending
+provider operations. Do not bind a `MarketDataHub` or assign the provider's
+live-data callbacks while Router routes for that provider are active.
+`TickDataBatch::subscription` and `MarketDataStatusUpdate::subscription` identify
+the concrete provider subscription delivered to the bot. The Router may replay
+a cached matching stream status synchronously while a new route is accepted;
+callbacks should therefore use the subscription carried by the event rather
+than assume that caller state was already updated after `subscribe_ticks()`.
+
+Logical release and physical provider cleanup are separate. A released route
+stops receiving events immediately. If provider `unsubscribe()` is rejected or
+completes with failure, the Router keeps the physical handle and callback
+binding, reports it through `failed_unsubscribe_count()`, and rejects new routes
+through that provider. Call `retry_failed_unsubscribes()` from the Router owner
+loop; `shutdown()` performs the final best-effort cleanup attempt.
+
 ## Concrete Platforms
 
 ### `platforms::IntradeBarPlatform`

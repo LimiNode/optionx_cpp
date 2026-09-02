@@ -10,10 +10,12 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -25,5 +27,6 @@
 #include "market_data/MarketDataContinuityService.hpp"
 #include "market_data/IMarketDataSubscriber.hpp"
 #include "market_data/MarketDataHub.hpp"
+#include "market_data/MarketDataRouter.hpp"
 
 #endif // OPTIONX_HEADER_MARKET_DATA_HPP_INCLUDED
