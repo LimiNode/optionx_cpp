@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "lifecycle.hpp"
+#include "utils/fixed_point.hpp"
 #include "data/market.hpp"
 #include "data/bars.hpp"
 #include "data/ticks.hpp"
