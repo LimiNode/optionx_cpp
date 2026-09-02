@@ -21,7 +21,9 @@
 #include <vector>
 
 #include "lifecycle.hpp"
-#include "data.hpp"
+#include "data/market.hpp"
+#include "data/bars.hpp"
+#include "data/ticks.hpp"
 #include "market_data/enums.hpp"
 #include "market_data/MarketDataSubscription.hpp"
 #include "market_data/MarketDataBatch.hpp"
