@@ -253,7 +253,13 @@ Contract rules:
   provider handle and callback binding for cleanup. Check
   `failed_unsubscribe_count()` and call `retry_failed_unsubscribes()` from the
   owner loop; new routes through that provider are rejected until cleanup
-  succeeds. `shutdown()` makes a final best-effort attempt.
+  succeeds.
+- Router shutdown is two-phase. `shutdown()` stops new routes and user delivery,
+  retains tombstones for pending provider operations, and performs one immediate
+  `process()` pass. Keep the provider and owner loop alive and call Router
+  `process()` until `is_shutdown_complete()` becomes true. Late successful
+  subscribes are physically unsubscribed without user callbacks or replay;
+  failed cleanup remains retryable and prevents shutdown completion.
 - `register_provider()` adds a non-owning provider reference under a stable,
   application-assigned `MarketDataProviderId` and optional exact string aliases.
   Registration is a selection catalog only and does not bind live callbacks.
@@ -264,6 +270,18 @@ Contract rules:
 - `ProviderInstanceId` remains the runtime identity carried by provider handles.
   `registered_provider_id()` maps it back to the stable application ID while the
   provider remains registered; aliases are not copied into live batches.
+- Router synchronous subscribe/unsubscribe methods are owner-loop operations.
+  A Router constructed with `owner_dispatcher_t` exposes `post_to_owner()` and
+  marshals provider completions plus tick/bar/status delivery through that same
+  FIFO dispatcher. The dispatcher must be thread-safe, must not execute foreign
+  calls inline, and must remain available through Router shutdown. Once a
+  configured dispatcher starts rejecting work, Router drops new provider
+  delivery instead of invoking subscriber code in the foreign source thread.
+- `BaseTradingPlatform::post_task()` is the standard adapter for using the
+  platform TaskManager as that owner loop. Shutdown may cancel accepted tasks,
+  so provider operation results are retained in Router state rather than owned
+  only by posted tasks. Router and subscriber cleanup must be drained before
+  stopping the platform.
 
 `MarketDataSubscriberBase` is optional convenience sugar over Router. A bot can
 derive from it, call protected `subscribe_ticks()`/`subscribe_bars()` from its
@@ -274,7 +292,11 @@ during destruction. Default-constructed route IDs represent failure and expose
 `valid()`/boolean checks instead of a public sentinel constant. Derived objects
 must be created through `std::shared_ptr` before subscribing;
 `IMarketDataSubscriber` remains the pure receiving interface for applications
-that prefer explicit ownership elsewhere.
+that prefer explicit ownership elsewhere. Bots running on another thread use
+`post_subscribe_ticks()`, `post_subscribe_bars()`, `post_unsubscribe()` and
+`post_unsubscribe_all()`. These methods report command acceptance immediately;
+route/provider callbacks arrive later from the configured owner loop. Subscriber
+destruction moves remaining handles into one owner-loop cleanup task.
 
 ## Trading Condition Subscriber Contract
 

@@ -45,6 +45,7 @@
 | `shutdown()` | Остановить tasks/components и drain events | Idempotent; вызывается в destructor |
 | `event_bus()` | Доступ к внутренней шине | Не используй для обхода готовых facade методов без причины |
 | `register_component(BaseComponent*)` | Включить component в lifecycle | Следи, чтобы lifetime component был дольше регистрации |
+| `post_task(callback)` | Queue cross-thread work in the platform owner loop | Accepted work can be cancelled by shutdown before execution |
 | `platform_type()` | Platform identity | Pure virtual |
 
 Особенности:
@@ -122,6 +123,9 @@ Subscription rules:
 
 Файл: `include/optionx_cpp/market_data/MarketDataRouter.hpp`.
 
+Полное руководство: [English](market-data-router.md) |
+[Русский](market-data-router.ru.md).
+
 `MarketDataRouter` owns public provider subscriptions and routes each batch or
 status only to the subscriber associated with that concrete subscription. Use it
 when a bot or chart needs RAII lifetime and per-subscription status replay; use
@@ -197,9 +201,15 @@ happens only while creating a route; live delivery continues through numeric
 provider and subscription IDs.
 
 `MarketDataSubscriberBase` adds protected self-subscription helpers for bots
-that should own their routes internally:
+that should own their routes internally. A Router used by bot threads is wired
+to the platform loop once during application composition:
 
 ```cpp
+market_data::MarketDataRouter router(
+    [&platform](market_data::MarketDataRouter::owner_task_t task) {
+        return platform.post_task(std::move(task));
+    });
+
 class MyBot : public market_data::MarketDataSubscriberBase {
 public:
     MyBot(
@@ -207,25 +217,30 @@ public:
         market_data::MarketDataProviderId provider_id)
         : MarketDataSubscriberBase(router), provider_id(provider_id) {}
 
-    void start() {
-        eur_route = subscribe_ticks(
+    bool request_start() {
+        return post_subscribe_ticks(
             provider_id,
-            market_data::TickSubscriptionRequest("EURUSD"));
-        btc_route = subscribe_ticks(
-            "intrade",
-            market_data::TickSubscriptionRequest("BTCUSDT"));
+            market_data::TickSubscriptionRequest("EURUSD"),
+            [this](market_data::RoutedSubscriptionId route) {
+                eur_route = route;
+            });
+    }
+
+    bool request_stop() {
+        return post_unsubscribe(eur_route);
     }
 
 private:
     market_data::MarketDataProviderId provider_id;
     market_data::RoutedSubscriptionId eur_route;
-    market_data::RoutedSubscriptionId btc_route;
 };
 
 const market_data::MarketDataProviderId intrade_id{1001};
 router.register_provider(intrade_id, platform, {"intrade"});
 auto bot = std::make_shared<MyBot>(router, intrade_id);
-bot->start();
+
+// May run in a dedicated bot thread.
+const bool command_accepted = bot->request_start();
 ```
 
 The base stores Router handles, returns strong route IDs, and unsubscribes on
@@ -235,6 +250,16 @@ required. The object must already be owned by `std::shared_ptr` when a subscribe
 helper is called. Direct provider-reference overloads remain available for
 low-level composition, while stable IDs and aliases let the bot avoid depending
 on a concrete provider type.
+
+Synchronous `subscribe_*()`/`unsubscribe*()` helpers are for code already
+running in the owner loop. `post_subscribe_*()` and `post_unsubscribe*()` are
+the cross-thread command API: their boolean result means that the command was
+queued, not that the provider accepted the subscription. The route callback
+runs later in the owner loop after the base stores its pending handle. Provider
+completions and incoming tick/bar/status callbacks are also marshalled through
+that dispatcher. Once the dispatcher rejects work during shutdown, new provider
+events are dropped rather than delivered inline in the source thread. Bot fields
+read concurrently from another thread still need the bot's own synchronization.
 
 ## Concrete Platforms
 
