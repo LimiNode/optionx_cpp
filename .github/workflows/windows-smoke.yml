@@ -93,6 +93,11 @@ jobs:
       - name: Build Telegram live bridge smoke example
         run: cmake --build build-windows --config Debug --target telegram_live_bridge_smoke
 
+      - name: Build market data continuity test and example
+        run: >
+          cmake --build build-windows --config Debug --target
+          market_data_continuity_test market_data_continuity_example
+
       - name: Build TradingView extension bridge smoke example
         run: cmake --build build-windows --config Debug --target tradingview_extension_bridge_smoke
 
@@ -113,6 +118,8 @@ jobs:
           .\build-windows\Debug\telegram_signal_bridge_test.exe --gtest_brief=1
           .\build-windows\Debug\telegram_worker_source_test.exe --gtest_brief=1
           .\build-windows\Debug\trading_view_bridge_test.exe --gtest_brief=1
+          .\build-windows\Debug\market_data_continuity_test.exe --gtest_brief=1
+          .\build-windows\Debug\market_data_continuity_example.exe
           .\build-windows\Debug\metatrader_file_bridge_smoke.exe --self-test
           .\build-windows\Debug\metatrader_file_command_writer_smoke.exe --self-test
           .\build-windows\Debug\metatrader_file_end_to_end_smoke.exe --self-test

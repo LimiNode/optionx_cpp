@@ -319,8 +319,10 @@ The options have these meanings:
 - `LIVE_ONLY` leaves live delivery unchanged. `PREFILL` requests
   `prefill_bars` before the first live delivery. `PREFILL_AND_RECOVER` does
   both and also repairs timestamp gaps.
-- `prefill_bars` is the count-based initial history depth. A `PREFILL` request
-  must specify a positive count. `PREFILL_AND_RECOVER` may use zero when the
+- `prefill_bars` is the count-based initial history depth. Router builds an
+  inclusive timeframe range for that many slots; a provider may still return
+  fewer bars when part of the range has no data. A `PREFILL` request must
+  specify a positive count. `PREFILL_AND_RECOVER` may use zero when the
   application wants recovery only.
 - `max_backfill_bars` bounds one gap request. Zero means that the provider
   request is not count-bounded by Router.

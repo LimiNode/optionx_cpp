@@ -48,7 +48,9 @@ namespace optionx::market_data {
         /// \brief Builds a count-based prefill request for a bar subscription.
         /// \param request Live bar subscription whose symbol and timeframe are reused.
         /// \param now_ms Current Unix timestamp in milliseconds.
-        /// \param bars Number of bars requested before the live boundary.
+        /// \param bars Number of inclusive timeframe slots requested before
+        ///        the live boundary. Providers may return fewer bars when
+        ///        data is unavailable for part of the requested range.
         /// \return A provider history request using Unix-second boundaries.
         static BarHistoryRequest make_prefill_request(
                 const BarSubscriptionRequest& request,
@@ -56,7 +58,9 @@ namespace optionx::market_data {
                 std::size_t bars) {
             const auto timeframe_ms = safe_multiply(
                 static_cast<std::uint64_t>(request.timeframe), 1000U);
-            const auto depth_ms = safe_multiply(timeframe_ms, bars);
+            const auto depth_ms = safe_multiply(
+                timeframe_ms,
+                bars > 0 ? bars - 1 : 0);
             const auto from_ms = now_ms > depth_ms ? now_ms - depth_ms : 1U;
 
             return make_history_request(request, from_ms, now_ms);

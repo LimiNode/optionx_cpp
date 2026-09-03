@@ -76,6 +76,10 @@ namespace optionx::market_data {
                 std::size_t requested_items = 0;
             };
 
+            struct ContinuityOperation {
+                bool completed = false;
+            };
+
             struct CachedStatus {
                 MarketDataStatusUpdate update;
                 std::uint64_t sequence = 0;
@@ -207,6 +211,7 @@ namespace optionx::market_data {
             std::uint64_t m_next_router_id = 1;
             bool m_shutdown = false;
             bool m_shutdown_complete = false;
+            std::size_t m_continuity_operations_in_flight = 0;
             MarketDataRouter::owner_dispatcher_t m_owner_dispatcher;
 
             static StreamDescriptor stream_from(const TickSubscriptionRequest& request);
@@ -351,6 +356,8 @@ namespace optionx::market_data {
                     BaseMarketDataProvider& provider,
                     const MarketDataSubscriptionResult& result,
                     bool& shutdown_requested);
+            bool record_continuity_completion(
+                    const std::shared_ptr<ContinuityOperation>& operation);
             void mark_subscribe_completion_posted(
                     RoutedSubscriptionId router_id,
                     const MarketDataSubscriptionHandle& subscription);
@@ -483,6 +490,19 @@ namespace optionx::market_data {
             post_to_owner([state]() {
                 state->process();
             });
+        }
+
+        inline bool MarketDataRouterState::record_continuity_completion(
+                const std::shared_ptr<ContinuityOperation>& operation) {
+            if (!operation) return false;
+
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (operation->completed) return false;
+            operation->completed = true;
+            if (m_continuity_operations_in_flight > 0) {
+                --m_continuity_operations_in_flight;
+            }
+            return true;
         }
 
         inline MarketDataRouterState::StreamDescriptor
@@ -1241,6 +1261,7 @@ namespace optionx::market_data {
                 std::uint64_t to_time_ms,
                 std::size_t requested_items) {
             BaseMarketDataProvider* provider = nullptr;
+            auto operation = std::make_shared<ContinuityOperation>();
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto entry_it = m_entries.find(router_id);
@@ -1250,6 +1271,7 @@ namespace optionx::market_data {
                     return;
                 }
                 provider = entry_it->second->provider;
+                if (provider) ++m_continuity_operations_in_flight;
             }
             if (!provider) return;
 
@@ -1278,6 +1300,7 @@ namespace optionx::market_data {
 
             const auto state = shared_from_this();
             auto complete_on_owner = [state,
+                                            operation,
                                             router_id,
                                             subscription,
                                             request,
@@ -1285,6 +1308,8 @@ namespace optionx::market_data {
                                             from_time_ms,
                                             to_time_ms,
                                             requested_items](BarHistoryResult result) mutable {
+                if (!state->record_continuity_completion(operation)) return;
+
                 auto task = [state,
                              router_id,
                              subscription,
@@ -1335,6 +1360,7 @@ namespace optionx::market_data {
                 std::uint64_t to_time_ms,
                 std::size_t requested_items,
                 BarHistoryResult result) {
+            StreamDescriptor expected_stream;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto entry_it = m_entries.find(router_id);
@@ -1343,6 +1369,7 @@ namespace optionx::market_data {
                     !entry_it->second->continuity_request_in_flight) {
                     return;
                 }
+                expected_stream = entry_it->second->stream;
                 entry_it->second->continuity_request_in_flight = false;
                 entry_it->second->continuity_flushing = true;
             }
@@ -1351,17 +1378,24 @@ namespace optionx::market_data {
             std::size_t delivered_history_items = 0;
             BarDataBatch history_batch;
             bool has_history_batch = false;
+            bool history_stream_matches = false;
             if (history_success) {
                 history_batch = *MarketDataContinuityService::make_bar_batch(
                     std::move(result.sequence),
                     request,
                     subscription,
                     operation_status == MarketDataContinuityStatus::GAP_DETECTED);
-                delivered_history_items = history_batch.items.size();
-                has_history_batch = !history_batch.items.empty();
+                history_stream_matches = batch_matches_stream(
+                    history_batch,
+                    expected_stream);
+                if (history_stream_matches) {
+                    delivered_history_items = history_batch.items.size();
+                    has_history_batch = !history_batch.items.empty();
+                }
             }
 
             const bool usable_history = history_success &&
+                history_stream_matches &&
                 (operation_status != MarketDataContinuityStatus::GAP_DETECTED ||
                  delivered_history_items > 0);
             if (!usable_history) {
@@ -1375,9 +1409,11 @@ namespace optionx::market_data {
                         requested_items,
                         0,
                         result.error_desc.empty()
-                            ? (history_success
-                                ? "No bars were returned for the detected gap."
-                                : "Historical market-data continuity request failed.")
+                            ? (!history_success
+                                ? "Historical market-data continuity request failed."
+                                : !history_stream_matches
+                                ? "Historical bar response does not match the subscribed stream."
+                                : "No bars were returned for the detected gap.")
                             : result.error_desc));
             }
 
@@ -2232,7 +2268,8 @@ namespace optionx::market_data {
                         }
                     }
 
-                    if (m_entries.empty()) {
+                    if (m_entries.empty() &&
+                        m_continuity_operations_in_flight == 0) {
                         m_registered_providers.clear();
                         m_provider_aliases.clear();
                         m_registered_provider_ids.clear();

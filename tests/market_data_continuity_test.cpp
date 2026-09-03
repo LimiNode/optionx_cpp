@@ -324,6 +324,107 @@ TEST(MarketDataContinuity, HistoryFailureKeepsLiveRouteUsable) {
     EXPECT_EQ(subscriber->bars.size(), 2U);
 }
 
+TEST(MarketDataContinuity, ShutdownWaitsForDeferredHistoryOperation) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL));
+    ASSERT_TRUE(route.active());
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+
+    router.shutdown();
+    EXPECT_FALSE(router.is_shutdown_complete());
+
+    provider.complete_history(make_history({100000}));
+    router.process();
+
+    EXPECT_TRUE(router.is_shutdown_complete());
+    EXPECT_TRUE(subscriber->bars.empty());
+    ASSERT_EQ(subscriber->continuity.size(), 1U);
+    EXPECT_EQ(
+        subscriber->continuity.front().status,
+        MarketDataContinuityStatus::PREFILLING);
+}
+
+TEST(MarketDataContinuity, ShutdownWaitsForFailedHistoryOperation) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL));
+    ASSERT_TRUE(route.active());
+
+    router.shutdown();
+    EXPECT_FALSE(router.is_shutdown_complete());
+
+    provider.fail_history("history endpoint unavailable");
+    router.process();
+
+    EXPECT_TRUE(router.is_shutdown_complete());
+    EXPECT_TRUE(subscriber->bars.empty());
+    ASSERT_EQ(subscriber->continuity.size(), 1U);
+    EXPECT_EQ(
+        subscriber->continuity.front().status,
+        MarketDataContinuityStatus::PREFILLING);
+}
+
+TEST(MarketDataContinuity, RejectsHistoryResponseFromAnotherStream) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+
+    auto wrong_stream = make_history({100000});
+    wrong_stream.symbol = "BTCUSDT";
+    wrong_stream.timeframe = 300;
+    provider.complete_history(std::move(wrong_stream));
+
+    EXPECT_TRUE(subscriber->bars.empty());
+    ASSERT_EQ(subscriber->continuity.size(), 3U);
+    EXPECT_EQ(
+        subscriber->continuity[1].status,
+        MarketDataContinuityStatus::FAILED);
+    EXPECT_EQ(
+        subscriber->continuity[1].message,
+        "Historical bar response does not match the subscribed stream.");
+    EXPECT_EQ(
+        subscriber->continuity[2].status,
+        MarketDataContinuityStatus::LIVE);
+
+    provider.emit_live_bar(280000);
+    EXPECT_EQ(provider.history_requests.size(), 1U);
+    ASSERT_EQ(subscriber->bars.size(), 1U);
+    EXPECT_EQ(subscriber->bars.front().items.front().time_ms, 280000U);
+}
+
+TEST(MarketDataContinuity, PrefillRequestUsesInclusiveBarCountRange) {
+    BarSubscriptionRequest request(
+        "EURUSD",
+        60,
+        BarPriceSource::MID,
+        MarketDataTransport::WEBSOCKET);
+
+    const auto history = MarketDataContinuityService::make_prefill_request(
+        request,
+        600000,
+        3);
+
+    EXPECT_EQ(history.from_ts, 480);
+    EXPECT_EQ(history.to_ts, 600);
+}
+
 TEST(MarketDataContinuity, UnsubscribeDuringHistoryDropsLateDelivery) {
     FakeHistoryProvider provider;
     MarketDataRouter router;
