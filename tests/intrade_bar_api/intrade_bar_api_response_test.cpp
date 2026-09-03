@@ -91,6 +91,13 @@ events::TickUpdateBatch make_market_data_batch(
         tick.volume_digits);
 }
 
+std::uint64_t current_bar_bucket_ms(std::int64_t timeframe_sec = 60) {
+    const auto timeframe_ms =
+        static_cast<std::uint64_t>(timeframe_sec) * time_shield::MS_PER_SEC;
+    const auto now_ms = static_cast<std::uint64_t>(OPTIONX_TIMESTAMP_MS);
+    return (now_ms / timeframe_ms) * timeframe_ms;
+}
+
 void publish_account_status(
         IntradeBarPlatform& platform,
         AccountUpdateStatus status) {
@@ -1027,12 +1034,13 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionAggregatesTickUpdates) {
     EXPECT_EQ(result.subscription.stream_type, market_data::MarketDataType::BARS);
     EXPECT_EQ(result.subscription.timeframe, 60);
 
+    const auto bucket_ms = current_bar_bucket_ms() + time_shield::MS_PER_MIN;
     auto first_batch = make_market_data_batch("EURUSD", 1.10000, 1.10020);
-    first_batch.items[0].time_ms = 120000;
+    first_batch.items[0].time_ms = bucket_ms;
     auto second_batch = make_market_data_batch("EURUSD", 1.10040, 1.10060);
-    second_batch.items[0].time_ms = 121000;
+    second_batch.items[0].time_ms = bucket_ms + 1000;
     auto third_batch = make_market_data_batch("EURUSD", 1.09980, 1.10000);
-    third_batch.items[0].time_ms = 180000;
+    third_batch.items[0].time_ms = bucket_ms + time_shield::MS_PER_MIN;
 
     std::vector<events::TickUpdateBatch> event_ticks;
     event_ticks.push_back(std::move(first_batch));
@@ -1050,7 +1058,7 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionAggregatesTickUpdates) {
     EXPECT_EQ(delivered_batch.subscription.id, result.subscription.id);
 
     const auto& first_update = delivered_batch.items[0];
-    EXPECT_EQ(first_update.time_ms, 120000u);
+    EXPECT_EQ(first_update.time_ms, bucket_ms);
     EXPECT_DOUBLE_EQ(first_update.open, 1.10010);
     EXPECT_DOUBLE_EQ(first_update.high, 1.10010);
     EXPECT_DOUBLE_EQ(first_update.low, 1.10010);
@@ -1061,7 +1069,7 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionAggregatesTickUpdates) {
     EXPECT_EQ(first_update.price_type(), MarketPriceType::MID);
 
     const auto& second_update = delivered_batch.items[1];
-    EXPECT_EQ(second_update.time_ms, 120000u);
+    EXPECT_EQ(second_update.time_ms, bucket_ms);
     EXPECT_DOUBLE_EQ(second_update.open, 1.10010);
     EXPECT_DOUBLE_EQ(second_update.high, 1.10050);
     EXPECT_DOUBLE_EQ(second_update.low, 1.10010);
@@ -1069,13 +1077,13 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionAggregatesTickUpdates) {
     EXPECT_TRUE(second_update.has_flag(MarketDataFlags::INCOMPLETE));
 
     const auto& finalized = delivered_batch.items[2];
-    EXPECT_EQ(finalized.time_ms, 120000u);
+    EXPECT_EQ(finalized.time_ms, bucket_ms);
     EXPECT_DOUBLE_EQ(finalized.close, 1.10050);
     EXPECT_TRUE(finalized.has_flag(MarketDataFlags::FINALIZED));
     EXPECT_FALSE(finalized.has_flag(MarketDataFlags::INCOMPLETE));
 
     const auto& next_bar = delivered_batch.items[3];
-    EXPECT_EQ(next_bar.time_ms, 180000u);
+    EXPECT_EQ(next_bar.time_ms, bucket_ms + time_shield::MS_PER_MIN);
     EXPECT_DOUBLE_EQ(next_bar.open, 1.09990);
     EXPECT_DOUBLE_EQ(next_bar.close, 1.09990);
     EXPECT_TRUE(next_bar.has_flag(MarketDataFlags::INCOMPLETE));
@@ -1110,12 +1118,13 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionIgnoresPreviousBucketTicks
 
     ASSERT_TRUE(result);
 
+    const auto bucket_ms = current_bar_bucket_ms() + time_shield::MS_PER_MIN;
     auto first_batch = make_market_data_batch("EURUSD", 1.10000, 1.10020);
-    first_batch.items[0].time_ms = 120000;
+    first_batch.items[0].time_ms = bucket_ms;
     auto next_batch = make_market_data_batch("EURUSD", 1.10040, 1.10060);
-    next_batch.items[0].time_ms = 180000;
+    next_batch.items[0].time_ms = bucket_ms + time_shield::MS_PER_MIN;
     auto late_batch = make_market_data_batch("EURUSD", 1.20000, 1.20020);
-    late_batch.items[0].time_ms = 120500;
+    late_batch.items[0].time_ms = bucket_ms + 500;
 
     std::vector<events::TickUpdateBatch> event_ticks;
     event_ticks.push_back(std::move(first_batch));
@@ -1128,10 +1137,12 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionIgnoresPreviousBucketTicks
 
     ASSERT_EQ(bar_callback_count, 1);
     ASSERT_EQ(delivered_batch.items.size(), 3u);
-    EXPECT_EQ(delivered_batch.items[0].time_ms, 120000u);
-    EXPECT_EQ(delivered_batch.items[1].time_ms, 120000u);
+    EXPECT_EQ(delivered_batch.items[0].time_ms, bucket_ms);
+    EXPECT_EQ(delivered_batch.items[1].time_ms, bucket_ms);
     EXPECT_TRUE(delivered_batch.items[1].has_flag(MarketDataFlags::FINALIZED));
-    EXPECT_EQ(delivered_batch.items[2].time_ms, 180000u);
+    EXPECT_EQ(
+        delivered_batch.items[2].time_ms,
+        bucket_ms + time_shield::MS_PER_MIN);
     EXPECT_DOUBLE_EQ(delivered_batch.items[2].open, 1.10050);
     EXPECT_DOUBLE_EQ(delivered_batch.items[2].close, 1.10050);
     EXPECT_DOUBLE_EQ(delivered_batch.items[2].high, 1.10050);
@@ -1167,10 +1178,11 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionKeepsCloseFromLatestTickIn
 
     ASSERT_TRUE(result);
 
+    const auto bucket_ms = current_bar_bucket_ms() + time_shield::MS_PER_MIN;
     auto later_batch = make_market_data_batch("EURUSD", 1.10040, 1.10060);
-    later_batch.items[0].time_ms = 121000;
+    later_batch.items[0].time_ms = bucket_ms + 1000;
     auto earlier_batch = make_market_data_batch("EURUSD", 1.10000, 1.10020);
-    earlier_batch.items[0].time_ms = 120000;
+    earlier_batch.items[0].time_ms = bucket_ms;
 
     std::vector<events::TickUpdateBatch> event_ticks;
     event_ticks.push_back(std::move(later_batch));
@@ -1183,13 +1195,95 @@ TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionKeepsCloseFromLatestTickIn
     ASSERT_EQ(bar_callback_count, 1);
     ASSERT_EQ(delivered_batch.items.size(), 2u);
     const auto& updated = delivered_batch.items[1];
-    EXPECT_EQ(updated.time_ms, 120000u);
+    EXPECT_EQ(updated.time_ms, bucket_ms);
     EXPECT_DOUBLE_EQ(updated.open, 1.10010);
     EXPECT_DOUBLE_EQ(updated.close, 1.10050);
     EXPECT_DOUBLE_EQ(updated.high, 1.10050);
     EXPECT_DOUBLE_EQ(updated.low, 1.10010);
     EXPECT_TRUE(updated.has_flag(MarketDataFlags::INCOMPLETE));
 
+    platform.shutdown();
+}
+
+TEST(IntradeBarApiResponses, IntradeBarBarSubscriptionFinalizesElapsedBucketWithoutNextTick) {
+    IntradeBarPlatform platform;
+    platform.run(false);
+    std::vector<market_data::BarDataBatch> delivered_batches;
+    market_data::MarketDataSubscriptionResult result;
+
+    platform.on_bar_data() =
+        [&delivered_batches](std::unique_ptr<market_data::BarDataBatch> batch) {
+            if (batch) {
+                delivered_batches.push_back(std::move(*batch));
+            }
+        };
+
+    ASSERT_TRUE(platform.subscribe_bars(
+        market_data::BarSubscriptionRequest(
+            "EUR/USD",
+            60,
+            BarPriceSource::MID,
+            market_data::MarketDataTransport::POLLING),
+        [&result](market_data::MarketDataSubscriptionResult subscription_result) {
+            result = std::move(subscription_result);
+        }));
+    ASSERT_TRUE(result);
+
+    const auto elapsed_bucket_ms =
+        current_bar_bucket_ms() - time_shield::MS_PER_MIN;
+    auto first_batch = make_market_data_batch("EURUSD", 1.10000, 1.10020);
+    first_batch.items[0].time_ms = elapsed_bucket_ms;
+    first_batch.price_digits = 5;
+    first_batch.volume_digits = 2;
+    std::vector<events::TickUpdateBatch> first_event_ticks;
+    first_event_ticks.push_back(std::move(first_batch));
+    platform.event_bus().notify_async(
+        std::make_unique<events::PriceUpdateEvent>(
+            std::move(first_event_ticks)));
+    pump_platform(platform);
+
+    ASSERT_EQ(delivered_batches.size(), 1u);
+    ASSERT_EQ(delivered_batches[0].items.size(), 2u);
+    EXPECT_EQ(delivered_batches[0].price_digits, 5u);
+    EXPECT_EQ(delivered_batches[0].volume_digits, 2u);
+    const auto& incomplete = delivered_batches[0].items[0];
+    const auto& finalized = delivered_batches[0].items[1];
+    EXPECT_TRUE(incomplete.has_flag(MarketDataFlags::INCOMPLETE));
+    EXPECT_FALSE(incomplete.has_flag(MarketDataFlags::FINALIZED));
+    EXPECT_FALSE(finalized.has_flag(MarketDataFlags::INCOMPLETE));
+    EXPECT_TRUE(finalized.has_flag(MarketDataFlags::FINALIZED));
+
+    auto late_batch = make_market_data_batch("EURUSD", 1.20000, 1.20020);
+    late_batch.items[0].time_ms = elapsed_bucket_ms + 500;
+    std::vector<events::TickUpdateBatch> late_event_ticks;
+    late_event_ticks.push_back(std::move(late_batch));
+    platform.event_bus().notify_async(
+        std::make_unique<events::PriceUpdateEvent>(
+            std::move(late_event_ticks)));
+    pump_platform(platform);
+
+    EXPECT_EQ(delivered_batches.size(), 1u);
+
+    pump_platform(platform);
+    EXPECT_EQ(delivered_batches.size(), 1u);
+
+    const auto later_bucket_ms =
+        elapsed_bucket_ms + (2 * time_shield::MS_PER_MIN);
+    auto later_batch = make_market_data_batch("EURUSD", 1.10100, 1.10120);
+    later_batch.items[0].time_ms = later_bucket_ms + 500;
+    std::vector<events::TickUpdateBatch> later_event_ticks;
+    later_event_ticks.push_back(std::move(later_batch));
+    platform.event_bus().notify_async(
+        std::make_unique<events::PriceUpdateEvent>(
+            std::move(later_event_ticks)));
+    pump_platform(platform);
+
+    ASSERT_EQ(delivered_batches.size(), 2u);
+    ASSERT_EQ(delivered_batches[1].items.size(), 1u);
+    const auto& later_bar = delivered_batches[1].items[0];
+    EXPECT_EQ(later_bar.time_ms, later_bucket_ms);
+    EXPECT_TRUE(later_bar.has_flag(MarketDataFlags::INCOMPLETE));
+    EXPECT_FALSE(later_bar.has_flag(MarketDataFlags::FINALIZED));
     platform.shutdown();
 }
 
