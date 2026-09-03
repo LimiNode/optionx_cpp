@@ -326,6 +326,14 @@ The options have these meanings:
   application wants recovery only.
 - `max_backfill_bars` bounds one gap request. Zero means that the provider
   request is not count-bounded by Router.
+- `bar_policy` defaults to `KEEP_ALL`, preserving provider revisions. Set it to
+  `DROP_NON_MONOTONIC` when the consumer requires strictly increasing bar
+  timestamps; repeated and out-of-order bars are then discarded per route.
+- `retry.max_attempts` is the total number of attempts, including the initial
+  request. `retry.initial_backoff_ms` starts a capped exponential backoff, and
+  `retry.max_backoff_ms` limits it. The default is one attempt, preserving the
+  existing `FAILED -> LIVE` behavior. Retries are advanced by periodic
+  `MarketDataRouter::process()` calls on the owner loop.
 
 For initial prefill, the delivery order is:
 
@@ -372,14 +380,14 @@ request for the next remaining gap. An empty successful response for a detected
 gap is treated as a failed recovery, so Router releases the queued live data
 once instead of retrying the same range forever.
 
-If a history request fails or is rejected, Router emits `FAILED`, releases any
-buffered live batches, and then emits `LIVE`. The route stays usable and live
-delivery continues, but the missing historical range is not reconstructed.
-Applications that require a complete time series should record the failure and
-apply their own retry policy. A provider may return overlapping snapshots for
-an in-progress bar; this first continuity layer does not impose a universal
-payload deduplication policy, so consumers should correlate bars by stream and
-`time_ms` according to their finalized/incomplete-bar policy.
+If a history request fails or is rejected and attempts remain, Router emits
+`RETRYING`, keeps buffered live batches, and waits for a later owner-loop
+`process()` call. After the retry budget is exhausted, Router emits `FAILED`,
+releases any buffered live batches, and then emits `LIVE`. The route stays usable
+and live delivery continues, but an unrecovered historical range is reported to
+the consumer. A provider may return overlapping snapshots for an in-progress
+bar; `KEEP_ALL` preserves those revisions, while `DROP_NON_MONOTONIC` provides
+a strict timestamp filter for consumers that need one.
 
 `MarketDataContinuityService` is the lower-level helper for applications that
 want to request history directly. It converts a `BarHistoryResult` into a

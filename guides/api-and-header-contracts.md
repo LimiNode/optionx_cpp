@@ -257,13 +257,22 @@ Contract rules:
   optional timestamp-gap recovery. Router buffers live batches until the
   corresponding history operation completes and reports route-scoped progress
   through `IMarketDataSubscriber::on_market_data_continuity()`.
+- `MarketDataContinuityOptions::retry` bounds failed history requests with a
+  capped exponential backoff. Retries are scheduled by the periodic Router
+  `process()` call, so no continuity timer thread is created. Buffered live
+  batches remain withheld while retrying.
+- `MarketDataContinuityOptions::bar_policy` defaults to `KEEP_ALL`, preserving
+  provider revisions and overlapping snapshots. `DROP_NON_MONOTONIC` instead
+  filters zero, repeated, and out-of-order timestamps per route for both
+  history and live batches. Gap detection runs after this filtering.
 - Continuity updates carry the concrete provider subscription handle and must
   not be confused with stream-level `MarketDataStatusUpdate`. History failure
   does not terminate the live route: Router reports `FAILED`, releases buffered
-  live batches, and returns to `LIVE`.
-- Generic history continuity is currently defined for bars only. Tick history,
-  provider-aware retries, and a universal overlap-deduplication policy remain
-  separate contracts.
+  live batches, and returns to `LIVE` after the retry budget is exhausted.
+- Generic history continuity is currently defined for bars only. Tick history
+  remains a separate provider contract. The strict bar policy is a route-local
+  timestamp filter, not a universal semantic deduplication rule for all
+  providers.
 
 `MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 

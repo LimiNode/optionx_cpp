@@ -43,6 +43,8 @@ namespace optionx::market_data {
                 CLEANUP_FAILED
             };
 
+            struct PendingContinuityRequest;
+
             struct Entry {
                 RoutedSubscriptionId router_id;
                 ProviderInstanceId provider_id = kInvalidProviderInstanceId;
@@ -56,6 +58,8 @@ namespace optionx::market_data {
                 bool continuity_flushing = false;
                 std::deque<BarDataBatch> continuity_buffer;
                 std::uint64_t last_bar_time_ms = 0;
+                std::shared_ptr<PendingContinuityRequest> continuity_retry_request;
+                std::uint64_t continuity_retry_at_ms = 0;
                 MarketDataSubscriptionHandle retained_cleanup_subscription;
                 MarketDataSubscriptionResult unsubscribe_completion;
                 bool subscribe_completion_posted = false;
@@ -74,6 +78,7 @@ namespace optionx::market_data {
                 std::uint64_t from_time_ms = 0;
                 std::uint64_t to_time_ms = 0;
                 std::size_t requested_items = 0;
+                std::size_t attempt = 1;
             };
 
             struct ContinuityOperation {
@@ -276,7 +281,8 @@ namespace optionx::market_data {
                     MarketDataContinuityStatus status,
                     std::uint64_t from_time_ms,
                     std::uint64_t to_time_ms,
-                    std::size_t requested_items);
+                    std::size_t requested_items,
+                    std::size_t attempt);
             void complete_continuity(
                     RoutedSubscriptionId router_id,
                     MarketDataSubscriptionHandle subscription,
@@ -285,6 +291,7 @@ namespace optionx::market_data {
                     std::uint64_t from_time_ms,
                     std::uint64_t to_time_ms,
                     std::size_t requested_items,
+                    std::size_t attempt,
                     BarHistoryResult result);
             void notify_continuity(
                     RoutedSubscriptionId router_id,
@@ -306,6 +313,9 @@ namespace optionx::market_data {
                     std::vector<PendingContinuityRequest>& continuity_requests,
                     bool process_buffered = false,
                     bool allow_gap_recovery = true);
+            static void apply_bar_policy(
+                    const Entry& entry,
+                    BarDataBatch& batch);
 
             void fail_pending_subscribe(
                     RoutedSubscriptionId router_id,
@@ -1249,7 +1259,8 @@ namespace optionx::market_data {
                 pending.status,
                 pending.from_time_ms,
                 pending.to_time_ms,
-                pending.requested_items);
+                pending.requested_items,
+                1);
         }
 
         inline void MarketDataRouterState::request_continuity_history(
@@ -1259,13 +1270,15 @@ namespace optionx::market_data {
                 MarketDataContinuityStatus status,
                 std::uint64_t from_time_ms,
                 std::uint64_t to_time_ms,
-                std::size_t requested_items) {
+                std::size_t requested_items,
+                std::size_t attempt) {
             BaseMarketDataProvider* provider = nullptr;
             auto operation = std::make_shared<ContinuityOperation>();
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto entry_it = m_entries.find(router_id);
-                if (entry_it == m_entries.end() ||
+                if (m_shutdown ||
+                    entry_it == m_entries.end() ||
                     entry_it->second->phase != EntryPhase::ACTIVE ||
                     !entry_it->second->continuity_request_in_flight) {
                     return;
@@ -1307,7 +1320,8 @@ namespace optionx::market_data {
                                             status,
                                             from_time_ms,
                                             to_time_ms,
-                                            requested_items](BarHistoryResult result) mutable {
+                                            requested_items,
+                                            attempt](BarHistoryResult result) mutable {
                 if (!state->record_continuity_completion(operation)) return;
 
                 auto task = [state,
@@ -1318,6 +1332,7 @@ namespace optionx::market_data {
                              from_time_ms,
                              to_time_ms,
                              requested_items,
+                             attempt,
                              result = std::move(result)]() mutable {
                     state->complete_continuity(
                         router_id,
@@ -1327,6 +1342,7 @@ namespace optionx::market_data {
                         from_time_ms,
                         to_time_ms,
                         requested_items,
+                        attempt,
                         std::move(result));
                 };
                 state->dispatch_or_run(std::move(task));
@@ -1359,6 +1375,7 @@ namespace optionx::market_data {
                 std::uint64_t from_time_ms,
                 std::uint64_t to_time_ms,
                 std::size_t requested_items,
+                std::size_t attempt,
                 BarHistoryResult result) {
             StreamDescriptor expected_stream;
             {
@@ -1389,6 +1406,13 @@ namespace optionx::market_data {
                     history_batch,
                     expected_stream);
                 if (history_stream_matches) {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    const auto entry_it = m_entries.find(router_id);
+                    if (entry_it == m_entries.end() ||
+                        entry_it->second->phase != EntryPhase::ACTIVE) {
+                        return;
+                    }
+                    apply_bar_policy(*entry_it->second, history_batch);
                     delivered_history_items = history_batch.items.size();
                     has_history_batch = !history_batch.items.empty();
                 }
@@ -1398,6 +1422,62 @@ namespace optionx::market_data {
                 history_stream_matches &&
                 (operation_status != MarketDataContinuityStatus::GAP_DETECTED ||
                  delivered_history_items > 0);
+
+            bool retry_scheduled = false;
+            if (!usable_history) {
+                std::shared_ptr<PendingContinuityRequest> retry_request;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    const auto entry_it = m_entries.find(router_id);
+                    if (entry_it == m_entries.end() ||
+                        entry_it->second->phase != EntryPhase::ACTIVE) {
+                        return;
+                    }
+
+                    const auto& entry = entry_it->second;
+                    if (attempt < entry->continuity.retry.max_attempts) {
+                        retry_request = std::make_shared<PendingContinuityRequest>();
+                        retry_request->router_id = router_id;
+                        retry_request->subscription = subscription;
+                        retry_request->request = request;
+                        retry_request->status = operation_status;
+                        retry_request->from_time_ms = from_time_ms;
+                        retry_request->to_time_ms = to_time_ms;
+                        retry_request->requested_items = requested_items;
+                        retry_request->attempt = attempt + 1;
+
+                        const auto delay_ms = entry->continuity.retry
+                            .delay_after_attempt(attempt);
+                        auto retry_at_ms = static_cast<std::uint64_t>(
+                            OPTIONX_TIMESTAMP_MS);
+                        if (retry_at_ms >
+                            std::numeric_limits<std::uint64_t>::max() - delay_ms) {
+                            retry_at_ms = std::numeric_limits<std::uint64_t>::max();
+                        } else {
+                            retry_at_ms += delay_ms;
+                        }
+                        entry->continuity_retry_request = std::move(retry_request);
+                        entry->continuity_retry_at_ms = retry_at_ms;
+                        entry->continuity_flushing = false;
+                        retry_scheduled = true;
+                    }
+                }
+
+                if (retry_scheduled) {
+                    notify_continuity(
+                        router_id,
+                        make_continuity_update(
+                            subscription,
+                            MarketDataContinuityStatus::RETRYING,
+                            from_time_ms,
+                            to_time_ms,
+                            requested_items,
+                            0,
+                            "Retrying historical market-data continuity request."));
+                    return;
+                }
+            }
+
             if (!usable_history) {
                 notify_continuity(
                     router_id,
@@ -1484,7 +1564,8 @@ namespace optionx::market_data {
                         pending.status,
                         pending.from_time_ms,
                         pending.to_time_ms,
-                        pending.requested_items);
+                        pending.requested_items,
+                        pending.attempt);
                     return;
                 }
 
@@ -1890,6 +1971,26 @@ namespace optionx::market_data {
             if (subscriber) subscriber->on_market_data_continuity(update);
         }
 
+        inline void MarketDataRouterState::apply_bar_policy(
+                const Entry& entry,
+                BarDataBatch& batch) {
+            if (entry.continuity.bar_policy !=
+                    MarketDataContinuityBarPolicy::DROP_NON_MONOTONIC) {
+                return;
+            }
+
+            auto previous_time_ms = entry.last_bar_time_ms;
+            auto output = batch.items.begin();
+            for (const auto& bar : batch.items) {
+                if (bar.time_ms == 0 || bar.time_ms <= previous_time_ms) {
+                    continue;
+                }
+                previous_time_ms = bar.time_ms;
+                *output++ = bar;
+            }
+            batch.items.erase(output, batch.items.end());
+        }
+
         inline bool MarketDataRouterState::route_bar_to_entry_no_lock(
                 const std::shared_ptr<Entry>& entry,
                 const BarDataBatch& batch,
@@ -1909,6 +2010,8 @@ namespace optionx::market_data {
 
             auto routed = batch;
             routed.subscription = entry->control->provider_subscription;
+            apply_bar_policy(*entry, routed);
+            if (routed.items.empty()) return false;
 
             if (entry->continuity.enabled() && !process_buffered &&
                 (!entry->continuity_ready || entry->continuity_flushing)) {
@@ -1923,8 +2026,8 @@ namespace optionx::market_data {
                 const auto timeframe_ms =
                     static_cast<std::uint64_t>(entry->stream.timeframe) * 1000U;
                 std::uint64_t previous_time_ms = entry->last_bar_time_ms;
-                for (std::size_t index = 0; index < batch.items.size(); ++index) {
-                    const auto& bar = batch.items[index];
+                for (std::size_t index = 0; index < routed.items.size(); ++index) {
+                    const auto& bar = routed.items[index];
                     if (bar.time_ms == 0) continue;
                     const auto expected_time_ms = previous_time_ms >
                             std::numeric_limits<std::uint64_t>::max() - timeframe_ms
@@ -1964,7 +2067,7 @@ namespace optionx::market_data {
                                      ++prefix_index) {
                                     entry->last_bar_time_ms = std::max(
                                         entry->last_bar_time_ms,
-                                        batch.items[prefix_index].time_ms);
+                                        routed.items[prefix_index].time_ms);
                                 }
                             }
 
@@ -1989,7 +2092,8 @@ namespace optionx::market_data {
                                 MarketDataContinuityStatus::GAP_DETECTED,
                                 gap_from_ms,
                                 gap_to_ms,
-                                requested_items});
+                                requested_items,
+                                1});
                             return false;
                         }
                     }
@@ -2057,7 +2161,8 @@ namespace optionx::market_data {
                     request.status,
                     request.from_time_ms,
                     request.to_time_ms,
-                    request.requested_items);
+                    request.requested_items,
+                    request.attempt);
             }
         }
 
@@ -2195,22 +2300,62 @@ namespace optionx::market_data {
             };
 
             for (;;) {
+                std::vector<PendingContinuityRequest> retry_requests;
                 std::vector<PendingCompletion> completions;
+                bool shutting_down = false;
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
-                    if (!m_shutdown || m_shutdown_complete) return;
+                    if (m_shutdown_complete) return;
+                    shutting_down = m_shutdown;
 
-                    completions.reserve(m_entries.size());
-                    for (const auto& [id, entry] : m_entries) {
-                        if (entry->phase != EntryPhase::UNSUBSCRIBING ||
-                            !entry->unsubscribe_completion_received) {
-                            continue;
+                    if (!shutting_down) {
+                        const auto now_ms = static_cast<std::uint64_t>(
+                            OPTIONX_TIMESTAMP_MS);
+                        for (const auto& [id, entry] : m_entries) {
+                            (void)id;
+                            if (entry->phase != EntryPhase::ACTIVE ||
+                                entry->continuity_request_in_flight ||
+                                !entry->continuity_retry_request ||
+                                entry->continuity_retry_at_ms > now_ms) {
+                                continue;
+                            }
+                            retry_requests.push_back(
+                                *entry->continuity_retry_request);
+                            entry->continuity_retry_request.reset();
+                            entry->continuity_request_in_flight = true;
                         }
-                        completions.push_back(PendingCompletion{
-                            id,
-                            entry->unsubscribe_completion.subscription,
-                            entry->unsubscribe_completion});
                     }
+
+                    if (shutting_down) {
+                        completions.reserve(m_entries.size());
+                        for (const auto& [id, entry] : m_entries) {
+                            if (entry->phase != EntryPhase::UNSUBSCRIBING ||
+                                !entry->unsubscribe_completion_received) {
+                                continue;
+                            }
+                            completions.push_back(PendingCompletion{
+                                id,
+                                entry->unsubscribe_completion.subscription,
+                                entry->unsubscribe_completion});
+                        }
+                    }
+                }
+
+                for (auto& retry : retry_requests) {
+                    request_continuity_history(
+                        retry.router_id,
+                        std::move(retry.subscription),
+                        std::move(retry.request),
+                        retry.status,
+                        retry.from_time_ms,
+                        retry.to_time_ms,
+                        retry.requested_items,
+                        retry.attempt);
+                }
+
+                if (!shutting_down) {
+                    if (retry_requests.empty()) return;
+                    continue;
                 }
 
                 for (auto& completion : completions) {

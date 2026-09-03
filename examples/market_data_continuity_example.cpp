@@ -139,6 +139,11 @@ int main() {
     request.continuity.mode = md::MarketDataContinuityMode::PREFILL_AND_RECOVER;
     request.continuity.prefill_bars = 2;
     request.continuity.max_backfill_bars = 10;
+    request.continuity.bar_policy =
+        md::MarketDataContinuityBarPolicy::DROP_NON_MONOTONIC;
+    request.continuity.retry.max_attempts = 3;
+    request.continuity.retry.initial_backoff_ms = 100;
+    request.continuity.retry.max_backoff_ms = 1000;
 
     auto route = router.subscribe_bars(provider, chart, request);
     if (!route.active()) {

@@ -18,6 +18,7 @@ namespace optionx::market_data {
         PREFILLING,       ///< Historical initialization is being requested.
         GAP_DETECTED,     ///< A timestamp gap was found in the live stream.
         BACKFILLING,      ///< Historical bars are being loaded for a gap.
+        RETRYING,         ///< A failed history request will be attempted again.
         LIVE,             ///< Live delivery is current, with no pending history work.
         FAILED            ///< History work failed; live delivery continues without it.
     };
@@ -31,6 +32,8 @@ namespace optionx::market_data {
             return "GAP_DETECTED";
         case MarketDataContinuityStatus::BACKFILLING:
             return "BACKFILLING";
+        case MarketDataContinuityStatus::RETRYING:
+            return "RETRYING";
         case MarketDataContinuityStatus::LIVE:
             return "LIVE";
         case MarketDataContinuityStatus::FAILED:
