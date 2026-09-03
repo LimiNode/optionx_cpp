@@ -9,6 +9,16 @@ namespace optionx::market_data {
 
     namespace detail {
 
+        struct MarketDataRouterSubscriptionControl {
+            mutable std::mutex mutex;
+            RoutedSubscriptionId router_id;
+            MarketDataProviderId registered_provider_id;
+            MarketDataSubscriptionHandle provider_subscription;
+            std::weak_ptr<MarketDataRouterState> router;
+            bool active = false;
+            bool released = false;
+        };
+
         class MarketDataRouterState final
                 : public std::enable_shared_from_this<MarketDataRouterState> {
         public:
@@ -119,6 +129,18 @@ namespace optionx::market_data {
                     BarSubscriptionRequest request,
                     subscription_callback_t callback);
 
+            template <typename Request, typename SubscribeOperation>
+            MarketDataRouterSubscription subscribe_impl(
+                    BaseMarketDataProvider& provider,
+                    std::weak_ptr<IMarketDataSubscriber> subscriber,
+                    Request request,
+                    subscription_callback_t callback,
+                    MarketDataProviderId registered_provider_id,
+                    SubscribeOperation subscribe_operation,
+                    const char* invalid_request_message,
+                    const char* operation_name,
+                    const char* not_accepted_message);
+
             bool unsubscribe(
                     const std::shared_ptr<MarketDataRouterSubscriptionControl>& control,
                     subscription_callback_t callback);
@@ -144,6 +166,13 @@ namespace optionx::market_data {
             void route_status(
                     ProviderInstanceId provider_id,
                     MarketDataStatusUpdate update);
+
+            template <typename Batch, typename MatchesStream, typename Deliver>
+            void route_batch(
+                    ProviderInstanceId provider_id,
+                    std::unique_ptr<Batch> batch,
+                    MatchesStream matches_stream,
+                    Deliver deliver);
 
         private:
             mutable std::mutex m_mutex;
@@ -720,19 +749,25 @@ namespace optionx::market_data {
             return control;
         }
 
-        inline MarketDataRouterSubscription MarketDataRouterState::subscribe_ticks(
+        template <typename Request, typename SubscribeOperation>
+        inline MarketDataRouterSubscription
+        MarketDataRouterState::subscribe_impl(
                 BaseMarketDataProvider& provider,
                 std::weak_ptr<IMarketDataSubscriber> subscriber,
-                TickSubscriptionRequest request,
+                Request request,
                 subscription_callback_t callback,
-                MarketDataProviderId registered_provider_id) {
+                MarketDataProviderId registered_provider_id,
+                SubscribeOperation subscribe_operation,
+                const char* invalid_request_message,
+                const char* operation_name,
+                const char* not_accepted_message) {
             if (!request.valid()) {
                 dispatch_result(
                     std::move(callback),
                     MarketDataSubscriptionResult::failed(
                         std::move(request),
                         MarketDataSubscriptionStatus::INVALID_REQUEST,
-                        "Invalid tick subscription request."));
+                        invalid_request_message));
                 return {};
             }
 
@@ -758,7 +793,8 @@ namespace optionx::market_data {
             const auto state = shared_from_this();
             bool accepted = false;
             try {
-                accepted = provider.subscribe_ticks(
+                accepted = subscribe_operation(
+                    provider,
                     std::move(request),
                     [state, router_id, &provider, callback](
                             MarketDataSubscriptionResult result) mutable {
@@ -775,8 +811,7 @@ namespace optionx::market_data {
                     MarketDataSubscriptionResult::failed(
                         request_for_failure,
                         MarketDataSubscriptionStatus::FAILED,
-                        std::string("Market-data provider tick subscription threw: ") +
-                            exception.what()),
+                        std::string(operation_name) + " threw: " + exception.what()),
                     std::move(callback));
                 return MarketDataRouterSubscription(std::move(control));
             } catch (...) {
@@ -786,7 +821,7 @@ namespace optionx::market_data {
                     MarketDataSubscriptionResult::failed(
                         request_for_failure,
                         MarketDataSubscriptionStatus::FAILED,
-                        "Market-data provider tick subscription threw."),
+                        std::string(operation_name) + " threw."),
                     std::move(callback));
                 return MarketDataRouterSubscription(std::move(control));
             }
@@ -798,10 +833,34 @@ namespace optionx::market_data {
                     MarketDataSubscriptionResult::failed(
                         request_for_failure,
                         MarketDataSubscriptionStatus::FAILED,
-                        "Market-data provider did not accept the tick subscription operation."),
+                        not_accepted_message),
                     std::move(callback));
             }
             return MarketDataRouterSubscription(std::move(control));
+        }
+
+        inline MarketDataRouterSubscription MarketDataRouterState::subscribe_ticks(
+                BaseMarketDataProvider& provider,
+                std::weak_ptr<IMarketDataSubscriber> subscriber,
+                TickSubscriptionRequest request,
+                subscription_callback_t callback,
+                MarketDataProviderId registered_provider_id) {
+            return subscribe_impl(
+                provider,
+                std::move(subscriber),
+                std::move(request),
+                std::move(callback),
+                registered_provider_id,
+                [](BaseMarketDataProvider& provider,
+                   TickSubscriptionRequest request,
+                   subscription_callback_t operation_callback) {
+                    return provider.subscribe_ticks(
+                        std::move(request),
+                        std::move(operation_callback));
+                },
+                "Invalid tick subscription request.",
+                "Market-data provider tick subscription",
+                "Market-data provider did not accept the tick subscription operation.");
         }
 
         inline MarketDataRouterSubscription MarketDataRouterState::subscribe_ticks(
@@ -865,82 +924,22 @@ namespace optionx::market_data {
                 BarSubscriptionRequest request,
                 subscription_callback_t callback,
                 MarketDataProviderId registered_provider_id) {
-            if (!request.valid()) {
-                dispatch_result(
-                    std::move(callback),
-                    MarketDataSubscriptionResult::failed(
-                        std::move(request),
-                        MarketDataSubscriptionStatus::INVALID_REQUEST,
-                        "Invalid bar subscription request."));
-                return {};
-            }
-
-            const auto request_for_failure = request;
-            std::string error_message;
-            auto control = add_pending_entry(
+            return subscribe_impl(
                 provider,
                 std::move(subscriber),
-                stream_from(request),
+                std::move(request),
+                std::move(callback),
                 registered_provider_id,
-                error_message);
-            if (!control) {
-                dispatch_result(
-                    std::move(callback),
-                    MarketDataSubscriptionResult::failed(
-                        request_for_failure,
-                        MarketDataSubscriptionStatus::FAILED,
-                        std::move(error_message)));
-                return {};
-            }
-
-            const auto router_id = control->router_id;
-            const auto state = shared_from_this();
-            bool accepted = false;
-            try {
-                accepted = provider.subscribe_bars(
-                    std::move(request),
-                    [state, router_id, &provider, callback](
-                            MarketDataSubscriptionResult result) mutable {
-                        state->dispatch_subscribe_completion(
-                            router_id,
-                            provider,
-                            std::move(result),
-                            std::move(callback));
-                    });
-            } catch (const std::exception& exception) {
-                fail_pending_subscribe(
-                    router_id,
-                    provider,
-                    MarketDataSubscriptionResult::failed(
-                        request_for_failure,
-                        MarketDataSubscriptionStatus::FAILED,
-                        std::string("Market-data provider bar subscription threw: ") +
-                            exception.what()),
-                    std::move(callback));
-                return MarketDataRouterSubscription(std::move(control));
-            } catch (...) {
-                fail_pending_subscribe(
-                    router_id,
-                    provider,
-                    MarketDataSubscriptionResult::failed(
-                        request_for_failure,
-                        MarketDataSubscriptionStatus::FAILED,
-                        "Market-data provider bar subscription threw."),
-                    std::move(callback));
-                return MarketDataRouterSubscription(std::move(control));
-            }
-
-            if (!accepted) {
-                fail_pending_subscribe(
-                    router_id,
-                    provider,
-                    MarketDataSubscriptionResult::failed(
-                        request_for_failure,
-                        MarketDataSubscriptionStatus::FAILED,
-                        "Market-data provider did not accept the bar subscription operation."),
-                    std::move(callback));
-            }
-            return MarketDataRouterSubscription(std::move(control));
+                [](BaseMarketDataProvider& provider,
+                   BarSubscriptionRequest request,
+                   subscription_callback_t operation_callback) {
+                    return provider.subscribe_bars(
+                        std::move(request),
+                        std::move(operation_callback));
+                },
+                "Invalid bar subscription request.",
+                "Market-data provider bar subscription",
+                "Market-data provider did not accept the bar subscription operation.");
         }
 
         inline MarketDataRouterSubscription MarketDataRouterState::subscribe_bars(
@@ -1374,15 +1373,30 @@ namespace optionx::market_data {
             return true;
         }
 
-        inline void MarketDataRouterState::route_ticks(
+        template <typename Batch, typename MatchesStream, typename Deliver>
+        inline void MarketDataRouterState::route_batch(
                 ProviderInstanceId provider_id,
-                std::unique_ptr<TickDataBatch> batch) {
+                std::unique_ptr<Batch> batch,
+                MatchesStream matches_stream,
+                Deliver deliver) {
             if (!batch) return;
-            std::vector<std::pair<std::shared_ptr<IMarketDataSubscriber>, TickDataBatch>> deliveries;
+            std::vector<std::pair<std::shared_ptr<IMarketDataSubscriber>, Batch>> deliveries;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto provider_it = m_providers.find(provider_id);
                 if (provider_it == m_providers.end()) return;
+
+                auto add_delivery = [&](const std::shared_ptr<Entry>& entry) {
+                    if (entry->phase != EntryPhase::ACTIVE ||
+                        !matches_stream(*batch, entry->stream)) {
+                        return;
+                    }
+                    auto subscriber = entry->subscriber.lock();
+                    if (!subscriber) return;
+                    auto routed = *batch;
+                    routed.subscription = entry->control->provider_subscription;
+                    deliveries.emplace_back(std::move(subscriber), std::move(routed));
+                };
 
                 if (batch->subscription.valid()) {
                     if (batch->subscription.provider_id != provider_id) return;
@@ -1391,85 +1405,48 @@ namespace optionx::market_data {
                     if (route_it == provider_it->second.provider_routes.end()) return;
                     const auto entry_it = m_entries.find(route_it->second);
                     if (entry_it == m_entries.end()) return;
-                    const auto& entry = entry_it->second;
-                    auto subscriber = entry->subscriber.lock();
-                    if (!subscriber ||
-                        entry->phase != EntryPhase::ACTIVE ||
-                        !batch_matches_stream(*batch, entry->stream)) {
-                        return;
-                    }
-                    auto routed = *batch;
-                    routed.subscription = entry->control->provider_subscription;
-                    deliveries.emplace_back(std::move(subscriber), std::move(routed));
+                    add_delivery(entry_it->second);
                 } else {
                     for (const auto& [id, entry] : m_entries) {
                         (void)id;
-                        if (entry->provider_id != provider_id ||
-                            entry->phase != EntryPhase::ACTIVE ||
-                            !batch_matches_stream(*batch, entry->stream)) {
-                            continue;
+                        if (entry->provider_id == provider_id) {
+                            add_delivery(entry);
                         }
-                        auto subscriber = entry->subscriber.lock();
-                        if (!subscriber) continue;
-                        auto routed = *batch;
-                        routed.subscription = entry->control->provider_subscription;
-                        deliveries.emplace_back(std::move(subscriber), std::move(routed));
                     }
                 }
             }
 
             for (auto& delivery : deliveries) {
-                delivery.first->on_tick_data(delivery.second);
+                deliver(*delivery.first, delivery.second);
             }
+        }
+
+        inline void MarketDataRouterState::route_ticks(
+                ProviderInstanceId provider_id,
+                std::unique_ptr<TickDataBatch> batch) {
+            route_batch(
+                provider_id,
+                std::move(batch),
+                [this](const TickDataBatch& data, const StreamDescriptor& stream) {
+                    return batch_matches_stream(data, stream);
+                },
+                [](IMarketDataSubscriber& subscriber, TickDataBatch& data) {
+                    subscriber.on_tick_data(data);
+                });
         }
 
         inline void MarketDataRouterState::route_bars(
                 ProviderInstanceId provider_id,
                 std::unique_ptr<BarDataBatch> batch) {
-            if (!batch) return;
-            std::vector<std::pair<std::shared_ptr<IMarketDataSubscriber>, BarDataBatch>> deliveries;
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                const auto provider_it = m_providers.find(provider_id);
-                if (provider_it == m_providers.end()) return;
-
-                if (batch->subscription.valid()) {
-                    if (batch->subscription.provider_id != provider_id) return;
-                    const auto route_it = provider_it->second.provider_routes.find(
-                        batch->subscription.id);
-                    if (route_it == provider_it->second.provider_routes.end()) return;
-                    const auto entry_it = m_entries.find(route_it->second);
-                    if (entry_it == m_entries.end()) return;
-                    const auto& entry = entry_it->second;
-                    auto subscriber = entry->subscriber.lock();
-                    if (!subscriber ||
-                        entry->phase != EntryPhase::ACTIVE ||
-                        !batch_matches_stream(*batch, entry->stream)) {
-                        return;
-                    }
-                    auto routed = *batch;
-                    routed.subscription = entry->control->provider_subscription;
-                    deliveries.emplace_back(std::move(subscriber), std::move(routed));
-                } else {
-                    for (const auto& [id, entry] : m_entries) {
-                        (void)id;
-                        if (entry->provider_id != provider_id ||
-                            entry->phase != EntryPhase::ACTIVE ||
-                            !batch_matches_stream(*batch, entry->stream)) {
-                            continue;
-                        }
-                        auto subscriber = entry->subscriber.lock();
-                        if (!subscriber) continue;
-                        auto routed = *batch;
-                        routed.subscription = entry->control->provider_subscription;
-                        deliveries.emplace_back(std::move(subscriber), std::move(routed));
-                    }
-                }
-            }
-
-            for (auto& delivery : deliveries) {
-                delivery.first->on_bar_data(delivery.second);
-            }
+            route_batch(
+                provider_id,
+                std::move(batch),
+                [this](const BarDataBatch& data, const StreamDescriptor& stream) {
+                    return batch_matches_stream(data, stream);
+                },
+                [](IMarketDataSubscriber& subscriber, BarDataBatch& data) {
+                    subscriber.on_bar_data(data);
+                });
         }
 
         inline void MarketDataRouterState::route_status(
