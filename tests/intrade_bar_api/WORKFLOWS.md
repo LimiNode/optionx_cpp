@@ -105,7 +105,7 @@ counters are event-loop-owned state.
 
 Started after `AccountInfoUpdateEvent::CONNECTED`.
 
-1. `PriceManager` calls `request_price` every second.
+1. `PriceManager` calls batch-native `request_price_batches` every second.
 2. Failed price request slows the task to five minutes.
 3. Successful price request restores the one-second period and publishes
    `PriceUpdateEvent`.

@@ -183,6 +183,9 @@ Contract rules:
   Shared stream metadata (`symbol`, `timeframe`, digits, subscription handle)
   lives on the batch; individual `Tick`/`Bar` payloads keep only price/time data
   plus compact `flags`.
+- Intrade websocket parsers and polling managers exchange
+  `events::TickUpdateBatch` directly. `SingleTick` remains only in the legacy
+  `request_price()` and typed `PriceSnapshot` compatibility surface.
 - Live data callbacks are flushed from the provider/platform lifecycle
   (`process()` or the worker loop started by `run()`), after queued price events
   are routed and coalesced. Calling `event_bus().drain()` alone is an internal

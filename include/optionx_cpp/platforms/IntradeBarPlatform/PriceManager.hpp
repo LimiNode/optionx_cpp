@@ -45,7 +45,7 @@ namespace optionx::platforms::intrade_bar {
     private:
         RequestManager&    m_request_manager; ///< Reference to the request manager.
         utils::TaskManager m_task_manager;    ///< Task manager for handling asynchronous tasks.
-        std::unordered_map<std::string, SingleTick> m_ticks; ///< Stores the latest tick data for each symbol.
+        std::unordered_map<std::string, Tick> m_ticks; ///< Latest tick payload by symbol.
         bool m_has_price_update = false; ///< Flag indicating whether a price update is in progress.
 
         /// \brief Initiates the process of retrieving price updates.
@@ -127,9 +127,9 @@ namespace optionx::platforms::intrade_bar {
         if (m_has_price_update) return;
         m_has_price_update = true;
         LOGIT_DEBUG("Intrade Bar price: requesting price snapshot.");
-        m_request_manager.request_price([this, task](
+        m_request_manager.request_price_batches([this, task](
                 bool success,
-                std::vector<SingleTick> ticks) {
+                std::vector<events::TickUpdateBatch> batches) {
             m_has_price_update = false;
             if (task->is_shutdown()) {
                 m_ticks.clear();
@@ -142,35 +142,34 @@ namespace optionx::platforms::intrade_bar {
             }
 
             task->set_period(time_shield::MS_PER_SEC);
-            LOGIT_DEBUG("Intrade Bar price: snapshot received. ticks=", ticks.size());
+            LOGIT_DEBUG("Intrade Bar price: snapshot received. batches=", batches.size());
 
-            for (auto& tick : ticks) {
-                auto it = m_ticks.find(tick.symbol);
-                if (it == m_ticks.end()) {
-                    tick.tick.set_flag(TickUpdateFlags::ASK_UPDATED);
-                    tick.tick.set_flag(TickUpdateFlags::BID_UPDATED);
-                    m_ticks[tick.symbol] = tick;
-                } else {
-                    if (!utils::compare_with_precision(it->second.tick.ask, tick.tick.ask, tick.price_digits)) {
-                        tick.tick.set_flag(TickUpdateFlags::ASK_UPDATED);
+            for (auto& batch : batches) {
+                for (auto& tick : batch.items) {
+                    auto it = m_ticks.find(batch.symbol);
+                    if (it == m_ticks.end()) {
+                        tick.set_flag(TickUpdateFlags::ASK_UPDATED);
+                        tick.set_flag(TickUpdateFlags::BID_UPDATED);
+                        m_ticks[batch.symbol] = tick;
+                        continue;
                     }
-                    if (!utils::compare_with_precision(it->second.tick.bid, tick.tick.bid, tick.price_digits)) {
-                        tick.tick.set_flag(TickUpdateFlags::BID_UPDATED);
+
+                    if (!utils::compare_with_precision(
+                            it->second.ask,
+                            tick.ask,
+                            batch.price_digits)) {
+                        tick.set_flag(TickUpdateFlags::ASK_UPDATED);
+                    }
+                    if (!utils::compare_with_precision(
+                            it->second.bid,
+                            tick.bid,
+                            batch.price_digits)) {
+                        tick.set_flag(TickUpdateFlags::BID_UPDATED);
                     }
                     it->second = tick;
                 }
             }
 
-            std::vector<events::TickUpdateBatch> batches;
-            batches.reserve(ticks.size());
-            for (const auto& tick : ticks) {
-                batches.push_back(events::PriceUpdateEvent::make_tick_batch(
-                    tick.tick,
-                    tick.symbol,
-                    tick.provider,
-                    tick.price_digits,
-                    tick.volume_digits));
-            }
             notify(events::PriceUpdateEvent(std::move(batches), MarketDataUpdateSource::POLLING));
         });
     }

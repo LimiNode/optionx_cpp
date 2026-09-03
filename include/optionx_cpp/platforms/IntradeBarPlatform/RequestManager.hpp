@@ -221,12 +221,20 @@ namespace optionx::platforms::intrade_bar {
         void request_switch_currency_result(
             std::function<void(SettingsSwitchResult)> switch_callback);
 
-        /// \brief Requests the latest price updates.
-        /// \param price_callback Callback function to receive tick data.
+        /// \brief Requests the latest prices through the legacy per-tick DTO API.
+        /// \param price_callback Callback function to receive `SingleTick` values.
+        /// \note New internal consumers should use `request_price_batches()`.
         void request_price(
             std::function<void(
                 bool success,
                 std::vector<SingleTick> ticks)> price_callback);
+
+        /// \brief Requests the latest prices grouped by source metadata.
+        /// \param price_callback Callback function to receive source tick batches.
+        void request_price_batches(
+            std::function<void(
+                bool success,
+                std::vector<events::TickUpdateBatch> batches)> price_callback);
 
         /// \brief Typed variant of request_price.
         void request_price_result(
@@ -943,6 +951,40 @@ namespace optionx::platforms::intrade_bar {
             std::function<void(
                 bool success,
                 std::vector<SingleTick> ticks)> price_callback) {
+        request_price_batches(
+            [price_callback = std::move(price_callback)](
+                    bool success,
+                    std::vector<events::TickUpdateBatch> batches) mutable {
+                if (!success) {
+                    price_callback(false, {});
+                    return;
+                }
+
+                std::size_t tick_count = 0;
+                for (const auto& batch : batches) {
+                    tick_count += batch.items.size();
+                }
+
+                std::vector<SingleTick> ticks;
+                ticks.reserve(tick_count);
+                for (auto& batch : batches) {
+                    for (auto& tick : batch.items) {
+                        ticks.emplace_back(
+                            std::move(tick),
+                            batch.symbol,
+                            batch.provider,
+                            batch.price_digits,
+                            batch.volume_digits);
+                    }
+                }
+                price_callback(true, std::move(ticks));
+            });
+    }
+
+    inline void RequestManager::request_price_batches(
+            std::function<void(
+                bool success,
+                std::vector<events::TickUpdateBatch> batches)> price_callback) {
         // Отправка GET-запроса
         auto future = get_http_client().get(
             "/price_now",
@@ -958,33 +1000,11 @@ namespace optionx::platforms::intrade_bar {
                 return;
             }
 
-            using json = nlohmann::json;
-            int64_t received_ms = OPTIONX_TIMESTAMP_MS;
-            std::vector<SingleTick> ticks;
             try {
-                json j = json::parse(response->content); // Парсинг JSON
-                for (auto& el : j.items()) {
-                    const std::string symbol_name = el.key();
-                    SingleTick tick;
-                    tick.provider = to_str(PlatformType::INTRADE_BAR);
-                    tick.symbol = normalize_symbol_name(symbol_name);
-                    tick.volume_digits = 0;
-
-                    tick.price_digits = price_digits_for_symbol(tick.symbol);
-
-                    tick.tick.ask = el.value()["ask"];
-                    tick.tick.bid = el.value()["bid"];
-                    tick.tick.last = 0.0;
-                    tick.tick.time_ms = el.value()["Updates"];
-                    tick.tick.time_ms = time_shield::sec_to_ms(tick.tick.time_ms);
-                    tick.tick.received_ms = received_ms;
-                    tick.tick.set_flag(TickUpdateFlags::NONE);
-                    tick.tick.set_flag(MarketDataFlags::INITIALIZED);
-                    tick.tick.set_flag(MarketDataFlags::REALTIME);
-                    ticks.push_back(std::move(tick));
-                }
-
-                price_callback(true, std::move(ticks));
+                auto batches = parse_price_snapshot_response(
+                    response->content,
+                    static_cast<std::uint64_t>(OPTIONX_TIMESTAMP_MS));
+                price_callback(true, std::move(batches));
             } catch (const std::exception& ex) {
                 LOGIT_ERROR("Error parsing price response: ", ex.what());
                 price_callback(false, {});

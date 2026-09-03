@@ -28,11 +28,6 @@ namespace optionx::platforms::intrade_bar {
             subscribe<events::AutoDomainSelectedEvent>();
             platform.register_component(this);
 
-            m_tick_data.resize(1);
-            m_tick_data[0].price_digits  = 2;
-            m_tick_data[0].volume_digits = 5;
-            m_tick_data[0].symbol = "BTCUSDT";
-            m_tick_data[0].provider = to_str(PlatformType::INTRADE_BAR);
             m_websocket_client.set_url(m_ws_host, "/bapi");
             m_websocket_client.set_user_agent(OPTIONX_DEFAULT_BROWSER_USER_AGENT);
             m_websocket_client.set_accept_language(OPTIONX_DEFAULT_ACCEPT_LANGUAGE);
@@ -45,7 +40,6 @@ namespace optionx::platforms::intrade_bar {
                 switch (event->event_type) {
                 case kurlyk::WebSocketEventType::WS_OPEN:
                     LOGIT_INFO(event->status_code, event->error_code);
-                    m_tick_data[0].tick.flags = 0;
                     m_is_error = false;
                     emit_status(market_data::MarketDataStreamStatus::CONNECTED);
                     // `/bapi` is a fixed BTCUSDT stream; no subscribe frame is needed.
@@ -56,14 +50,12 @@ namespace optionx::platforms::intrade_bar {
                     break;
                 case kurlyk::WebSocketEventType::WS_CLOSE:
                     LOGIT_INFO(event->status_code, event->error_code);
-                    m_tick_data[0].tick.flags = 0;
                     m_is_error = false;
                     emit_status(market_data::MarketDataStreamStatus::DISCONNECTED);
                     break;
                 case kurlyk::WebSocketEventType::WS_ERROR:
                     if (m_is_error) return;
                     LOGIT_ERROR(event->status_code, event->error_code);
-                    m_tick_data[0].tick.flags = 0;
                     m_is_error = true;
                     emit_status(
                         market_data::MarketDataStreamStatus::FAILED,
@@ -111,8 +103,7 @@ namespace optionx::platforms::intrade_bar {
     private:
         kurlyk::WebSocketClient m_websocket_client; ///< WebSocket client for BTCUSDT.
         std::string m_ws_host = make_websocket_host(AuthData{}.host); ///< Websocket host.
-        std::vector<SingleTick>   m_tick_data;        ///< Container for tick data.
-        bool                    m_is_error = false; ///< Flag indicating if an error has occurred.
+        bool m_is_error = false; ///< Flag indicating if an error has occurred.
         std::mutex m_source_mutex; ///< Protects subscription-driven source state.
         std::size_t m_market_data_ref_count = 0; ///< Public market-data subscriptions using BTC ticks.
         bool m_platform_connected = false; ///< Whether trading lifecycle wants the BTC stream connected.
@@ -285,14 +276,10 @@ namespace optionx::platforms::intrade_bar {
     }
 
     inline void BtcPriceManager::handle_message(const std::string& message) {
-        if (parse_btcusdt_tick(message, m_tick_data[0])) {
+        events::TickUpdateBatch batch;
+        if (parse_btcusdt_tick(message, batch)) {
             std::vector<events::TickUpdateBatch> batches;
-            batches.push_back(events::PriceUpdateEvent::make_tick_batch(
-                m_tick_data[0].tick,
-                m_tick_data[0].symbol,
-                m_tick_data[0].provider,
-                m_tick_data[0].price_digits,
-                m_tick_data[0].volume_digits));
+            batches.push_back(std::move(batch));
             notify_async(std::make_unique<events::PriceUpdateEvent>(
                 std::move(batches),
                 MarketDataUpdateSource::WEBSOCKET));
@@ -332,7 +319,6 @@ namespace optionx::platforms::intrade_bar {
             m_platform_connected = false;
         }
         m_websocket_client.disconnect_and_wait();
-        m_tick_data[0].tick.flags = 0;
     }
 
     inline bool BtcPriceManager::should_connect_no_lock() const noexcept {
