@@ -352,6 +352,18 @@ Rules:
   status events. Market-data subscriptions report prices; condition subscribers
   report whether and how a trade can currently be opened.
 
+Intrade Bar publishes condition snapshots for every supported symbol/option-type
+scope after the account context becomes known. `TradingConditionManager` also
+re-evaluates the time-dependent session, amount, open-trade and sprint-duration
+limits from the same `AccountInfoData` model used to validate trade requests.
+Only scopes whose values changed are emitted.
+
+Intrade Bar intentionally leaves `TradingConditionUpdate::payout` empty. Its
+payout model depends on the concrete trade amount and duration, but those values
+are not part of the current condition scope. Publishing one payout per symbol
+would therefore be ambiguous. Use `AccountInfoRequest` for the exact prospective
+trade until the condition API gains an amount/duration-aware scope.
+
 ## Typed Broker Result Pattern
 
 Broker HTTP adapters используют typed result wrappers, чтобы не смешивать

@@ -75,19 +75,8 @@ namespace optionx::platforms::intrade_bar {
             switch (request.type) {
             case AccountInfoType::CONNECTION_STATUS:
                 return connect;
-            case AccountInfoType::SYMBOL_AVAILABILITY: {
-                static const std::set<std::string> symbols = {
-                    "AUDCAD","AUDCHF","AUDJPY",
-                    "AUDNZD","AUDUSD","CADJPY",
-                    "EURAUD","EURCAD","EURCHF",
-                    "EURGBP","EURJPY","EURUSD",
-                    "GBPAUD","GBPCHF","GBPJPY",
-                    "GBPNZD","NZDJPY","NZDUSD",
-                    "USDCAD","USDCHF","USDJPY",
-                    "BTCUSDT"
-                };
-                return (symbols.find(normalize_symbol_name(request.symbol)) != symbols.end());
-            }
+            case AccountInfoType::SYMBOL_AVAILABILITY:
+                return is_supported_symbol(request.symbol);
             case AccountInfoType::OPTION_TYPE_AVAILABILITY:
                 if (request.option_type == OptionType::CLASSIC &&
                     is_btc_symbol(request.symbol)) return false;

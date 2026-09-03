@@ -12,6 +12,21 @@
 
 namespace optionx::platforms::intrade_bar {
 
+    /// \brief Returns the symbols supported by the Intrade Bar trading model.
+    /// \return Stable list of normalized broker symbol names.
+    inline const std::array<const char*, 22>& supported_symbols() noexcept {
+        static constexpr std::array<const char*, 22> symbols = {{
+            "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD",
+            "CADJPY",
+            "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURUSD",
+            "GBPAUD", "GBPCHF", "GBPJPY", "GBPNZD",
+            "NZDJPY", "NZDUSD",
+            "USDCAD", "USDCHF", "USDJPY",
+            "BTCUSDT"
+        }};
+        return symbols;
+    }
+
     /// \brief Converts public symbol aliases to broker-side Intrade Bar names.
     /// \param symbol Public or broker symbol name.
     /// \return Normalized broker symbol name.
@@ -36,24 +51,23 @@ namespace optionx::platforms::intrade_bar {
         return normalize_symbol_name(symbol) == "BTCUSDT";
     }
 
+    /// \brief Checks whether a symbol is supported by the Intrade Bar trading model.
+    /// \param symbol Public or broker symbol name.
+    /// \return True for a known FX or BTC symbol.
+    inline bool is_supported_symbol(const std::string& symbol) {
+        const auto normalized = normalize_symbol_name(symbol);
+        for (const auto* item : supported_symbols()) {
+            if (normalized == item) return true;
+        }
+        return false;
+    }
+
     /// \brief Checks whether `/fxconnect` is expected to support this FX symbol.
     /// \param symbol Public or broker symbol name.
     /// \return True for known Intrade Bar FX websocket symbols.
     inline bool is_fxconnect_supported_symbol(const std::string& symbol) {
         const auto normalized = normalize_symbol_name(symbol);
-        static constexpr std::array<const char*, 21> symbols = {{
-            "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD",
-            "CADJPY",
-            "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURUSD",
-            "GBPAUD", "GBPCHF", "GBPJPY", "GBPNZD",
-            "NZDJPY", "NZDUSD",
-            "USDCAD", "USDCHF", "USDJPY"
-        }};
-
-        for (const auto* item : symbols) {
-            if (normalized == item) return true;
-        }
-        return false;
+        return normalized != "BTCUSDT" && is_supported_symbol(normalized);
     }
 
     /// \brief Converts a normalized FX symbol to the `/fxconnect` stream format.
