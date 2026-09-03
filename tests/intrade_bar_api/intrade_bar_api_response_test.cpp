@@ -2258,6 +2258,38 @@ TEST(IntradeBarTradingConditions, OpenTradeLimitUpdatesPlatformBoundHub) {
     platform.shutdown();
 }
 
+TEST(IntradeBarTradingConditions, ShutdownPublishesUnavailableSnapshots) {
+    IntradeBarPlatform platform;
+    std::vector<TradingConditionUpdate> updates;
+    platform.on_trading_condition() =
+        [&updates](const TradingConditionUpdate& update) {
+            updates.push_back(update);
+        };
+
+    auto account = std::make_shared<AccountInfoData>();
+    account->connect = true;
+    account->account_type = AccountType::DEMO;
+    account->currency = CurrencyType::USD;
+    platform.event_bus().notify_async(
+        std::make_unique<events::AccountInfoUpdateEvent>(
+            account,
+            AccountUpdateStatus::CONNECTED));
+    platform.event_bus().drain();
+
+    const auto published_before_shutdown = updates.size();
+    ASSERT_GT(published_before_shutdown, 0U);
+
+    platform.shutdown();
+
+    ASSERT_EQ(updates.size(), published_before_shutdown * 2U);
+    for (std::size_t index = published_before_shutdown;
+         index < updates.size();
+         ++index) {
+        EXPECT_EQ(updates[index].tradable, std::optional<bool>(false));
+        EXPECT_FALSE(updates[index].symbol.empty());
+    }
+}
+
 TEST(IntradeBarAccountInfo, AcceptsBtcAliasAndUsesBtcDurationRules) {
     AccountInfoData account;
     const int64_t day_timestamp = 1712345600;

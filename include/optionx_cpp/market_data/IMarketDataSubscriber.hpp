@@ -36,6 +36,13 @@ namespace optionx::market_data {
         virtual void on_market_data_status(const MarketDataStatusUpdate& update) {
             (void)update;
         }
+
+        /// \brief Receives history prefill or gap-recovery progress for a route.
+        /// \param update Route-scoped continuity status and range information.
+        virtual void on_market_data_continuity(
+                const MarketDataContinuityUpdate& update) {
+            (void)update;
+        }
     };
 
 } // namespace optionx::market_data

@@ -54,8 +54,8 @@ namespace optionx::market_data {
         /// \details The dispatcher must be thread-safe, enqueue tasks in FIFO
         ///          order, and remain available until Router shutdown completes.
         ///          It must not execute posted work inline on a foreign caller.
-        ///          Provider events are dropped if the configured dispatcher
-        ///          rejects them during shutdown.
+        ///          Provider events and history completions are dropped if the
+        ///          configured dispatcher rejects them during shutdown.
         explicit MarketDataRouter(owner_dispatcher_t owner_dispatcher);
 
         /// \brief Copy construction is disabled because provider callbacks are owned.

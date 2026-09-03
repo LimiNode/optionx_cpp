@@ -171,6 +171,7 @@ Market-data APIs are split into DTO/data types and a provider role:
   `MarketDataSubscriptionHandle`, `MarketDataSubscriptionResult`,
   `MarketDataBatch<T>`, `MarketDataHub`, `MarketDataRouter`,
   `MarketDataSubscriberBase`, `IMarketDataSubscriber`, and
+  `MarketDataContinuityOptions`, `MarketDataContinuityUpdate`, and
   `MarketDataContinuityService`.
 
 Contract rules:
@@ -252,6 +253,17 @@ Contract rules:
 - `MarketDataContinuityService` is the thin helper for routing recovered history
   into the same bar batch pipeline. It marks payload bars as
   `HISTORICAL` and, for gap recovery, `BACKFILL`.
+- `BarSubscriptionRequest::continuity` enables Router-owned bar prefill and
+  optional timestamp-gap recovery. Router buffers live batches until the
+  corresponding history operation completes and reports route-scoped progress
+  through `IMarketDataSubscriber::on_market_data_continuity()`.
+- Continuity updates carry the concrete provider subscription handle and must
+  not be confused with stream-level `MarketDataStatusUpdate`. History failure
+  does not terminate the live route: Router reports `FAILED`, releases buffered
+  live batches, and returns to `LIVE`.
+- Generic history continuity is currently defined for bars only. Tick history,
+  provider-aware retries, and a universal overlap-deduplication policy remain
+  separate contracts.
 
 `MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 
@@ -359,7 +371,9 @@ Intrade Bar publishes condition snapshots for every supported symbol/option-type
 scope after the account context becomes known. `TradingConditionManager` also
 re-evaluates the time-dependent session, amount, open-trade and sprint-duration
 limits from the same `AccountInfoData` model used to validate trade requests.
-Only scopes whose values changed are emitted.
+Only scopes whose values changed are emitted. During platform shutdown it emits
+one final `tradable=false` patch for each cached scope before clearing the
+manager, which prevents long-lived hubs from retaining stale availability.
 
 Intrade Bar intentionally leaves `TradingConditionUpdate::payout` empty. Its
 payout model depends on the concrete trade amount and duration, but those values

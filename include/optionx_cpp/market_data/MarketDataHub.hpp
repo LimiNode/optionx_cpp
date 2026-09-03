@@ -23,8 +23,8 @@ namespace optionx::market_data {
     ///
     ///          Status replay is stream-level and happens when a subscriber
     ///          slot is added to the hub. It is not a per-subscription status
-    ///          API; a future router layer should replay status for newly
-    ///          created subscription handles.
+    ///          API; MarketDataRouter adds concrete subscription ownership and
+    ///          replays status for newly created subscription handles.
     ///
     ///          When MarketDataStatusUpdate::subscription is valid, status
     ///          caching keeps that subscription context distinct from other

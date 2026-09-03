@@ -294,6 +294,100 @@ Router не вызывает пользовательский код, удерж
 Предварительная история и заполнение разрывов относятся к
 `MarketDataContinuityService` и history API провайдера.
 
+## Предварительная История И Восстановление Разрывов
+
+`BarSubscriptionRequest` может попросить Router сначала построить поток баров
+из истории, а затем продолжить его live-данными. Первая реализация работает
+только с барами: в `BaseMarketDataProvider` сейчас есть
+`fetch_bar_history(...)`, но нет общего API истории тиков:
+
+```cpp
+md::BarSubscriptionRequest request(
+    "EURUSD",
+    60,
+    md::BarPriceSource::MID,
+    md::MarketDataTransport::WEBSOCKET);
+request.continuity.mode = md::MarketDataContinuityMode::PREFILL_AND_RECOVER;
+request.continuity.prefill_bars = 100;
+request.continuity.max_backfill_bars = 500;
+
+auto route = router.subscribe_bars("intrade", chart, request);
+```
+
+Значения options имеют следующий смысл:
+
+- `LIVE_ONLY` оставляет live-доставку без изменений. `PREFILL` запрашивает
+  `prefill_bars` перед первой live-доставкой. `PREFILL_AND_RECOVER` делает оба
+  действия и дополнительно восстанавливает разрывы по timestamp.
+- `prefill_bars` задаёт глубину начальной истории в барах. Для `PREFILL`
+  требуется положительное значение. `PREFILL_AND_RECOVER` может использовать
+  ноль, если приложению нужно только восстановление разрывов.
+- `max_backfill_bars` ограничивает один запрос для разрыва. Ноль означает,
+  что Router не ограничивает provider request количеством баров.
+
+Для initial prefill порядок доставки такой:
+
+```text
+SUBSCRIBED
+  -> continuity PREFILLING
+  -> исторический BarDataBatch (HISTORICAL)
+  -> накопленный live BarDataBatch (REALTIME)
+  -> continuity LIVE
+```
+
+Live batches, пришедшие пока выполняется history request, удерживаются внутри
+route. Исторический batch получает `HISTORICAL`; initial prefill не получает
+флаг `BACKFILL`. Накопленные live batches доставляются только после завершения
+history operation, поэтому граница history-to-live сохраняется. Затем Router
+проверяет накопленные batches в порядке доставки. Если один batch содержит
+непрерывный prefix, а затем gap, prefix доставляется сразу, а для recovery
+удерживается только suffix. Несколько накопленных gap восстанавливаются
+последовательно, и только после этого route получает финальный `LIVE`.
+
+В режиме `PREFILL_AND_RECOVER` Router сравнивает возрастающие timestamps баров
+с заданным timeframe. Если более поздний бар перескакивает один или несколько
+ожидаемых buckets, возникают события:
+
+```text
+continuity GAP_DETECTED
+  -> continuity BACKFILLING
+  -> исторический BarDataBatch (HISTORICAL | BACKFILL)
+  -> накопленный live BarDataBatch
+  -> continuity LIVE
+```
+
+`MarketDataContinuityUpdate` относится к конкретному route. Его поле
+`subscription` содержит физический provider handle этого route, а
+`from_time_ms`, `to_time_ms`, `requested_items` и `delivered_items` описывают
+текущий history request. Переопредели
+`IMarketDataSubscriber::on_market_data_continuity()`, если графику или боту
+нужно показывать или записывать это состояние. Эти события отделены от
+stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNECTED`.
+
+`max_backfill_bars` ограничивает каждый отдельный provider request, а не весь
+отсутствующий интервал. Если provider вернул неполный, но непустой backfill,
+Router продолжит разбирать очередь live batches и может выполнить следующий
+ограниченный запрос для оставшегося gap. Успешный пустой ответ для найденного
+gap считается failed recovery: Router один раз выпускает накопленные live data и
+не зацикливает запрос того же диапазона.
+
+Если history request завершился ошибкой или provider его отклонил, Router
+публикует `FAILED`, выпускает накопленные live batches, затем публикует `LIVE`.
+Route остаётся пригодным для работы и live-доставка продолжается, но
+отсутствующий исторический диапазон не восстанавливается. Приложение, которому
+нужен полный временной ряд, должно записать ошибку и применить собственную
+политику повторной попытки. Provider может возвращать пересекающиеся snapshots
+для незавершённого бара; этот первый слой continuity не вводит универсальную
+политику deduplication, поэтому consumer должен сам сопоставлять бары по
+stream и `time_ms` с учётом политики `FINALIZED`/незавершённых баров.
+
+`MarketDataContinuityService` остаётся низкоуровневым helper для приложений,
+которые хотят запрашивать историю напрямую. Он превращает `BarHistoryResult` в
+`BarDataBatch` и устанавливает флаги `HISTORICAL`/`BACKFILL`. Router использует
+тот же helper для route-owned prefill и recovery. См. подробный
+`examples/market_data_continuity_example.cpp` с детерминированным provider и
+consumer в стиле графика.
+
 ## Owner Loop И Потоки Ботов
 
 Без owner dispatcher Router сохраняет синхронное поведение. Subscribe,
@@ -322,10 +416,13 @@ md::MarketDataRouter router(
 
 Принятие задачи очередью не гарантирует её выполнение. В частности,
 `BaseTradingPlatform::post_task()` может отменить принятые задачи, оставшиеся в
-очереди к моменту начала shutdown платформы.
+очереди к моменту начала shutdown платформы. Отклонённый history completion
+отбрасывается вместе с остальными provider deliveries и никогда не вызывается
+inline в provider thread.
 
 При наличии dispatcher Router переносит provider subscription completions,
-tick batches, bar batches и status updates в этот loop. Боты используют:
+history completions, tick batches, bar batches и status updates в этот loop.
+Боты используют:
 
 - `post_subscribe_ticks()` и `post_subscribe_bars()`;
 - `post_unsubscribe()` и `post_unsubscribe_all()`.

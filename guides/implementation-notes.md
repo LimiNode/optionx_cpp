@@ -262,6 +262,8 @@ The manager emits only changed scopes. A scope contains the platform, account
 type, currency, option type and normalized symbol. When account identity changes,
 the previous scopes receive a final `tradable=false` patch before the new scopes
 are published.
+The same final unavailable patch is emitted for every cached scope during
+platform shutdown before the manager clears its cache.
 
 Do not fill `payout` from a made-up reference amount or duration. Current Intrade
 payout rules are trade-parameter dependent, while `TradingConditionUpdate` does
