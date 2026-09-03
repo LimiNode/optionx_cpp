@@ -18,6 +18,10 @@
   контракт Router, provider registry, replay, ownership и bot-thread dispatch.
 - [Market data router guide RU](guides/market-data-router.ru.md) - русский
   перевод, обновляемый вместе с каноническим руководством.
+- [Lifecycle stack guide](guides/lifecycle-stack.md) - канонический контракт
+  общего process/shutdown API и staged reverse-order shutdown.
+- [Lifecycle stack guide RU](guides/lifecycle-stack.ru.md) - русский перевод,
+  обновляемый вместе с каноническим руководством.
 - [Codebase orientation](guides/codebase-orientation.md) - карта проекта,
   DDD-слои, зависимости, расширение и безопасные точки входа.
 - [Build and test](guides/build-and-test.md) - CMake options, зависимости,
@@ -90,4 +94,8 @@
 - Для market-data Router каноническая версия - английская
   `guides/market-data-router.md`. Любое смысловое изменение синхронизируй с
   `guides/market-data-router.ru.md` в том же PR; русский перевод не является
+  источником обратных изменений английского контракта.
+- Для общего lifecycle stack каноническая версия - английская
+  `guides/lifecycle-stack.md`. Любое смысловое изменение синхронизируй с
+  `guides/lifecycle-stack.ru.md` в том же PR; русский перевод не является
   источником обратных изменений английского контракта.

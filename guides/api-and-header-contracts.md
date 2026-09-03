@@ -108,6 +108,28 @@ etc.) являются implementation detail конкретной платфор
 метод сначала должен появиться на facade/base contract, а затем делегироваться
 в manager.
 
+## Common Lifecycle Contract
+
+`optionx_cpp/lifecycle.hpp` exposes the optional
+`lifecycle::ILifecycleModule` and `lifecycle::LifecycleStack` API.
+
+- A module implements `process()`, idempotent `shutdown() noexcept`, and the
+  terminal predicate `is_stopped()`.
+- The stack stores non-owning references. Registered modules must outlive the
+  stack and its complete shutdown.
+- Registration order is dependency order. Processing runs forward; shutdown is
+  staged in reverse, one module at a time.
+- Dependencies remain processable until the current dependent module stops.
+- Stack calls are owner-loop confined. The stack does not create threads.
+- Initialization and `run()` remain explicit because existing module startup
+  contracts differ.
+- `MarketDataRouter` and `BaseTradingPlatform` implement the common interface.
+  Direct lifecycle calls remain supported.
+
+See [lifecycle-stack.md](lifecycle-stack.md) for the complete contract and
+[lifecycle-stack.ru.md](lifecycle-stack.ru.md) for the synchronized Russian
+version.
+
 ## Account Info Subscriber Contract
 
 `components::AccountInfoHub` is an optional fan-out adapter for the single

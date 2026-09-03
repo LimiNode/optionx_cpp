@@ -18,6 +18,7 @@
 
 #include "config.hpp"
 #include "utils.hpp"
+#include "lifecycle.hpp"
 #include "data.hpp"
 #include "market_data.hpp"
 #include "storages.hpp"

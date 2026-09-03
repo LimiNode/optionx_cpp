@@ -207,6 +207,7 @@ targets.
 
 - `examples/event_mediator_test.cpp`
 - `examples/intrade_bar_api_example.cpp`
+- `examples/lifecycle_stack_example.cpp`
 - `examples/market_data_router_example.cpp`
 - `examples/market_data_subscriber_base_example.cpp`
 - `examples/task_manager_example.cpp`

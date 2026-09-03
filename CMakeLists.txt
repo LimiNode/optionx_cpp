@@ -455,6 +455,41 @@ if(OPTIONX_BUILD_EXAMPLES)
         )
     endif()
 
+    add_executable(lifecycle_stack_example examples/lifecycle_stack_example.cpp)
+
+    target_include_directories(lifecycle_stack_example PRIVATE
+        ${EXAMPLE_INCLUDE_DIRS}
+        ${EXAMPLE_DEPS_INCLUDE_DIRS}
+    )
+
+    target_link_directories(lifecycle_stack_example PRIVATE ${EXAMPLE_LIBRARY_DIRS})
+    target_compile_definitions(
+        lifecycle_stack_example PRIVATE
+        ${EXAMPLE_DEFINES}
+        LOGIT_BASE_PATH="${LOGIT_BASE_PATH_FWD}"
+    )
+    target_link_libraries(lifecycle_stack_example PRIVATE ${EXAMPLE_LIBS} optionx_cpp)
+
+    if(OPTIONX_BUILD_DEPS)
+        add_dependencies(lifecycle_stack_example mdbx-static AES)
+    endif()
+
+    foreach(dll ${EXAMPLE_DLL_FILES})
+        add_custom_command(TARGET lifecycle_stack_example POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${dll}" "$<TARGET_FILE_DIR:lifecycle_stack_example>"
+        )
+    endforeach()
+
+    if(WIN32)
+        add_custom_command(TARGET lifecycle_stack_example POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                -DOPTIONX_RUNTIME_DLL_DIR="${EXAMPLE_BUILD_LIBS_DIR}/bin"
+                -DOPTIONX_RUNTIME_TARGET_DIR="$<TARGET_FILE_DIR:lifecycle_stack_example>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_runtime_dlls.cmake"
+        )
+    endif()
+
     add_executable(intrade_market_data_example examples/intrade_market_data_example.cpp)
 
     target_include_directories(intrade_market_data_example PRIVATE
@@ -1032,6 +1067,7 @@ if(OPTIONX_BUILD_TESTS)
 
     set(OPTIONX_LIGHTWEIGHT_TESTS
         bridge_host_test
+        lifecycle_stack_test
         metatrader_paths_test
         telegram_dto_test
         telegram_signal_parser_test

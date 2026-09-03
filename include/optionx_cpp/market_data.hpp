@@ -20,7 +20,11 @@
 #include <utility>
 #include <vector>
 
-#include "data.hpp"
+#include "lifecycle.hpp"
+#include "utils/fixed_point.hpp"
+#include "data/market.hpp"
+#include "data/bars.hpp"
+#include "data/ticks.hpp"
 #include "market_data/enums.hpp"
 #include "market_data/MarketDataSubscription.hpp"
 #include "market_data/MarketDataBatch.hpp"

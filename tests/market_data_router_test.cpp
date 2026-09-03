@@ -274,6 +274,16 @@ MarketDataStatusUpdate ready_status(
 
 } // namespace
 
+TEST(MarketDataRouter, ImplementsCommonLifecycleModule) {
+    MarketDataRouter router;
+    optionx::lifecycle::ILifecycleModule& module = router;
+
+    EXPECT_FALSE(module.is_stopped());
+    module.process();
+    module.shutdown();
+    EXPECT_TRUE(module.is_stopped());
+}
+
 TEST(MarketDataRouter, UsesStrongRoutedSubscriptionIds) {
     const RoutedSubscriptionId empty;
     EXPECT_FALSE(empty.valid());
