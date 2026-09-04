@@ -337,7 +337,8 @@ auto route = router.subscribe_bars("intrade", chart, request);
 - `retry.max_attempts` задаёт общее количество попыток вместе с первой.
   `retry.initial_backoff_ms` включает ограниченный exponential backoff, а
   `retry.max_backoff_ms` задаёт его предел. По умолчанию выполняется одна
-  попытка, поэтому сохраняется прежняя политика `FAILED -> LIVE`. Повторы
+  попытка, поэтому live-доставка продолжается, а итоговый статус становится
+  `DEGRADED`. Повторы
   запускаются периодическими вызовами `MarketDataRouter::process()` в owner
   loop.
 
@@ -382,18 +383,25 @@ stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNE
 
 `max_backfill_bars` ограничивает каждый отдельный provider request, а не весь
 отсутствующий интервал. Если provider вернул неполный, но непустой backfill,
-Router продолжит разбирать очередь live batches и может выполнить следующий
-ограниченный запрос для оставшегося gap. Успешный пустой ответ для найденного
-gap считается terminal failed recovery: Router один раз выпускает накопленные
+Router считает такое восстановление неуспешным: неполный batch не доставляется
+и не продвигает continuity watermark, Router публикует `FAILED`, выпускает
+накопленные live data и завершает операцию в `DEGRADED`. Bounded gap response
+принимается только если после обрезки до фактического запрошенного диапазона
+он содержит каждый ожидаемый timeframe slot. Успешный пустой ответ для
+найденного gap обрабатывается так же: Router один раз выпускает накопленные
 live data и не зацикливает запрос того же диапазона. Успешный пустой prefill
 тоже является terminal result: исторический batch не доставляется, а Router
 переходит к накопленному live-потоку без retry.
+
+`max_backfill_bars` применяется до отправки provider request. Поэтому
+continuity updates содержат фактические bounded `from_time_ms`,
+`to_time_ms` и `requested_items` текущего chunk, а не исходный полный gap.
 
 Если history request завершился ошибкой или provider его отклонил, но попытки
 ещё остались, Router публикует `RETRYING`, сохраняет накопленные live batches и
 ждёт следующего вызова `process()` в owner loop. После исчерпания retry budget
 Router публикует `FAILED`, выпускает накопленные live batches, затем публикует
-`LIVE`. Route остаётся пригодным для работы, live-доставка продолжается, а
+`DEGRADED`. Route остаётся пригодным для работы, live-доставка продолжается, а
 невосстановленный исторический диапазон явно сообщается consumer. Router
 сохраняет revisions баров от provider и не применяет универсальную
 timestamp-дедупликацию. Если графику или storage нужно одно текущее значение

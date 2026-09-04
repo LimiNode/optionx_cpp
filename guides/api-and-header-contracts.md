@@ -266,6 +266,15 @@ Contract rules:
   capped exponential backoff. Retries are scheduled by the periodic Router
   `process()` call, so no continuity timer thread is created. Buffered live
   batches remain withheld while retrying.
+- Each bounded gap-history response must cover every expected timeframe slot in
+  the actual requested range. Router clips provider payloads to that range
+  before validating it; a non-empty partial response is not delivered and does
+  not advance the route's continuity watermark. Router reports `FAILED`,
+  releases buffered live data, and ends in `DEGRADED` while live delivery
+  continues.
+- `max_backfill_bars` applies to each individual gap request. Continuity
+  telemetry reports the actual bounded `from_time_ms`, `to_time_ms`, and
+  `requested_items`, rather than the original unbounded gap.
 - Successful empty history is terminal: an empty prefill proceeds to live
   delivery, while an empty gap backfill reports failed recovery and releases
   buffered live data without retrying the same range.
@@ -275,11 +284,10 @@ Contract rules:
 - Continuity updates carry the concrete provider subscription handle and must
   not be confused with stream-level `MarketDataStatusUpdate`. History failure
   does not terminate the live route: Router reports `FAILED`, releases buffered
-  live batches, and returns to `LIVE` after the retry budget is exhausted.
+  live batches, and ends in `DEGRADED` after the retry budget is exhausted.
 - Generic history continuity is currently defined for bars only. Tick history
-  remains a separate provider contract. The strict bar policy is a route-local
-  timestamp filter, not a universal semantic deduplication rule for all
-  providers.
+  remains a separate provider contract. Router does not apply a universal
+  timestamp deduplication policy; consumers decide how to upsert revisions.
 
 `MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 

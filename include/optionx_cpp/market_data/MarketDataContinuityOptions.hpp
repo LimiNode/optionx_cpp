@@ -7,7 +7,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 
 namespace optionx::market_data {
 
@@ -32,27 +31,6 @@ namespace optionx::market_data {
                 (max_backoff_ms == 0 || max_backoff_ms >= initial_backoff_ms);
         }
 
-        /// \brief Calculates the delay after a failed one-based attempt.
-        [[nodiscard]] std::uint64_t delay_after_attempt(
-                std::size_t attempt) const noexcept {
-            if (attempt == 0 || initial_backoff_ms == 0) return 0;
-
-            auto delay = initial_backoff_ms;
-            for (std::size_t index = 1; index < attempt; ++index) {
-                if (delay > std::numeric_limits<std::uint64_t>::max() / 2U) {
-                    delay = std::numeric_limits<std::uint64_t>::max();
-                    break;
-                }
-                delay *= 2U;
-                if (max_backoff_ms > 0 && delay >= max_backoff_ms) {
-                    delay = max_backoff_ms;
-                    break;
-                }
-            }
-            return max_backoff_ms > 0
-                ? (delay < max_backoff_ms ? delay : max_backoff_ms)
-                : delay;
-        }
     };
 
     /// \struct MarketDataContinuityOptions
