@@ -139,9 +139,12 @@ Subscription rules:
   clips provider history to the requested range, and removes buffered snapshots
   confirmed by that history. `DEGRADED` remains sticky until the complete old
   hole is repaired; `FAILED` names one history operation. A pending initial
-  prefill is restarted after `READY`, while a completed `PREFILL` route does not
-  gain reconnect recovery. Tick routes do not have this guarantee because the
-  provider contract still lacks generic tick-history.
+  prefill is restarted after `READY`; `PREFILL_AND_RECOVER` then repairs closed
+  outage slots after the original prefill boundary before emitting `LIVE`.
+  Cached invalidating status replay blocks the same work until a later live
+  `READY`, while a plain or completed `PREFILL` route does not gain outage
+  recovery. Tick routes do not have this guarantee because the provider contract
+  still lacks generic tick-history.
 - Router continuity is currently bar-only because providers expose
   `fetch_bar_history()` but no generic tick-history operation. See the complete
   EN/RU Router guides and `market_data_continuity_example.cpp`.

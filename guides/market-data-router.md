@@ -289,6 +289,10 @@ Replay follows these exact rules:
   route. Removing the last route unbinds callbacks and discards the cache.
 - Router replay is per route. Two logical subscriptions receive updates carrying
   their own concrete provider handles.
+- A replayed invalidating status (`DISCONNECTED`, `RECONNECTING`, `FAILED`, or
+  `STOPPED`) is applied to the new route's continuity state before initial
+  prefill can start. The route remains `STALE` until a later live `READY` permits
+  initialization or recovery.
 
 This is lifecycle replay, not historical market-data recovery. Historical
 prefill and gap repair belong to `MarketDataContinuityService` and provider
@@ -366,7 +370,11 @@ If transport is lost while initial prefill is still pending, Router invalidates
 the old asynchronous completion and waits for a later `READY`. It then repeats
 the original prefill range; `process()` cannot start it while transport is still
 disconnected. This startup restart applies to both history modes because it
-preserves an unfinished initialization contract. Once `PREFILL` initialization
+preserves an unfinished initialization contract. For `PREFILL_AND_RECOVER`, a
+successful restart is followed by recovery from the slot after the original
+prefill boundary through the latest closed candle; `LIVE` is emitted only after
+both ranges are verified. Plain `PREFILL` remains startup-only: it repeats the
+original range and does not add outage-tail recovery. Once its initialization
 has finished, later transport statuses do not enable recovery implicitly.
 
 With `PREFILL_AND_RECOVER`, Router compares increasing bar timestamps with the
