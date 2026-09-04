@@ -14,8 +14,8 @@ namespace optionx::market_data {
     /// \brief Selects how a routed bar stream is initialized and recovered.
     enum class MarketDataContinuityMode {
         LIVE_ONLY = 0,       ///< Deliver live provider payloads immediately.
-        PREFILL,             ///< Deliver historical bars before live payloads.
-        PREFILL_AND_RECOVER  ///< Prefill and repair timestamp gaps in live bars.
+        PREFILL,             ///< Deliver startup history without later gap recovery.
+        PREFILL_AND_RECOVER  ///< Prefill and repair live/reconnect timestamp gaps.
     };
 
     /// \struct MarketDataContinuityRetryPolicy

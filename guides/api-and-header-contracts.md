@@ -318,6 +318,18 @@ Contract rules:
    `LIVE` only after the buffered route is drained. A reconnect history response
    must cover the complete requested range; a partial response finishes as
    `FAILED` then `DEGRADED`.
+  `DEGRADED` remains sticky while any earlier unverified range exists; repairing
+  a later independent gap cannot emit `LIVE`.
+ - For initialized `PREFILL_AND_RECOVER` bar routes, transport loss
+   (`DISCONNECTED`, `RECONNECTING`, `FAILED`, or `STOPPED`) emits route-scoped
+   `STALE`. History recovery cannot start before a later `READY`. Router then
+   revalidates from its earliest unverified slot through the last closed candle,
+   waiting for a dirty current candle to close when necessary. Gap and reconnect
+   responses are clipped to their requested range and must cover every requested
+   timeframe slot; a partial response finishes as `FAILED` then `DEGRADED`.
+ - A disconnect while initial prefill is pending invalidates its old completion
+   and repeats the original prefill range after `READY`. Completed `PREFILL`
+   routes do not acquire reconnect or timestamp-gap recovery implicitly.
 - Generic history continuity is currently defined for bars only. Tick history
   remains a separate provider contract. Router does not apply a universal
   timestamp deduplication policy; consumers decide how to upsert revisions.

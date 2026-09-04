@@ -133,14 +133,15 @@ Subscription rules:
   batches are buffered while history is in flight. Route-scoped progress is
   reported through `IMarketDataSubscriber::on_market_data_continuity()`; it is
   separate from stream-level `on_market_data_status()`.
-- For continuity-enabled bar routes, transport loss emits route-scoped `STALE`.
-  After `READY`, Router validates an overlap through the last closed candle
-  boundary, removes buffered snapshots already confirmed by that history, and
-  emits `LIVE` only after the route is continuous again. If recovery cannot be
-  verified, the route remains usable but finishes in `DEGRADED`; `FAILED` names
-  the individual failed history operation. Tick routes do not have this
-  reconnect guarantee because the provider contract still lacks generic
-  tick-history.
+- For `PREFILL_AND_RECOVER` bar routes, transport loss emits route-scoped
+  `STALE`; `process()` cannot start recovery until `READY` arrives. Router then
+  validates from the earliest unverified slot through the last closed candle,
+  clips provider history to the requested range, and removes buffered snapshots
+  confirmed by that history. `DEGRADED` remains sticky until the complete old
+  hole is repaired; `FAILED` names one history operation. A pending initial
+  prefill is restarted after `READY`, while a completed `PREFILL` route does not
+  gain reconnect recovery. Tick routes do not have this guarantee because the
+  provider contract still lacks generic tick-history.
 - Router continuity is currently bar-only because providers expose
   `fetch_bar_history()` but no generic tick-history operation. See the complete
   EN/RU Router guides and `market_data_continuity_example.cpp`.
@@ -216,8 +217,8 @@ than assume that caller state was already updated after `subscribe_ticks()`.
 For a history-first bar route, set `BarSubscriptionRequest::continuity` to
 `PREFILL` or `PREFILL_AND_RECOVER`. Router delivers the initial
 `HISTORICAL` batch before buffered `LIVE_SOURCE | CATCHUP` batches. In recovery
-mode it emits
-route-scoped `GAP_DETECTED`/`BACKFILLING` updates, delivers recovered bars with
+mode it emits route-scoped `GAP_DETECTED`/`BACKFILLING` updates, requires the
+requested gap range to be complete, delivers recovered bars with
 `HISTORICAL | BACKFILL`, then resumes live delivery. A failed history request
 emits `FAILED` and releases buffered live data instead of killing the route.
 
