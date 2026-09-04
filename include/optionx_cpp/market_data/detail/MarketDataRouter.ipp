@@ -43,6 +43,11 @@ namespace optionx::market_data {
                 CLEANUP_FAILED
             };
 
+            enum class ContinuityRequestKind {
+                PREFILL,
+                GAP_BACKFILL
+            };
+
             struct PendingContinuityRequest;
 
             struct Entry {
@@ -57,6 +62,7 @@ namespace optionx::market_data {
                 bool continuity_request_in_flight = false;
                 bool continuity_flushing = false;
                 std::deque<BarDataBatch> continuity_buffer;
+                std::size_t continuity_buffered_items = 0;
                 std::uint64_t last_bar_time_ms = 0;
                 std::shared_ptr<PendingContinuityRequest> continuity_retry_request;
                 std::uint64_t continuity_retry_at_ms = 0;
@@ -74,7 +80,8 @@ namespace optionx::market_data {
                 RoutedSubscriptionId router_id;
                 MarketDataSubscriptionHandle subscription;
                 BarHistoryRequest request;
-                MarketDataContinuityStatus status = MarketDataContinuityStatus::UNKNOWN;
+                ContinuityRequestKind kind = ContinuityRequestKind::PREFILL;
+                bool announce_gap = false;
                 std::uint64_t from_time_ms = 0;
                 std::uint64_t to_time_ms = 0;
                 std::size_t requested_items = 0;
@@ -278,7 +285,8 @@ namespace optionx::market_data {
                     RoutedSubscriptionId router_id,
                     MarketDataSubscriptionHandle subscription,
                     BarHistoryRequest request,
-                    MarketDataContinuityStatus status,
+                    ContinuityRequestKind kind,
+                    bool announce_gap,
                     std::uint64_t from_time_ms,
                     std::uint64_t to_time_ms,
                     std::size_t requested_items,
@@ -287,7 +295,7 @@ namespace optionx::market_data {
                     RoutedSubscriptionId router_id,
                     MarketDataSubscriptionHandle subscription,
                     BarHistoryRequest request,
-                    MarketDataContinuityStatus operation_status,
+                    ContinuityRequestKind kind,
                     std::uint64_t from_time_ms,
                     std::uint64_t to_time_ms,
                     std::size_t requested_items,
@@ -311,11 +319,22 @@ namespace optionx::market_data {
                         std::shared_ptr<IMarketDataSubscriber>,
                         BarDataBatch>>& deliveries,
                     std::vector<PendingContinuityRequest>& continuity_requests,
+                    std::vector<std::pair<
+                        std::shared_ptr<IMarketDataSubscriber>,
+                        MarketDataContinuityUpdate>>& continuity_deliveries,
                     bool process_buffered = false,
                     bool allow_gap_recovery = true);
-            static void apply_bar_policy(
-                    const Entry& entry,
-                    BarDataBatch& batch);
+            static bool buffer_continuity_batch_no_lock(
+                    const std::shared_ptr<Entry>& entry,
+                    std::shared_ptr<IMarketDataSubscriber> subscriber,
+                    BarDataBatch batch,
+                    std::vector<std::pair<
+                        std::shared_ptr<IMarketDataSubscriber>,
+                        BarDataBatch>>& deliveries,
+                    std::vector<std::pair<
+                        std::shared_ptr<IMarketDataSubscriber>,
+                        MarketDataContinuityUpdate>>& continuity_deliveries,
+                    bool push_front);
 
             void fail_pending_subscribe(
                     RoutedSubscriptionId router_id,
@@ -1229,7 +1248,8 @@ namespace optionx::market_data {
                     bar_request,
                     now_ms,
                     entry->continuity.prefill_bars);
-                pending.status = MarketDataContinuityStatus::PREFILLING;
+                pending.kind = ContinuityRequestKind::PREFILL;
+                pending.announce_gap = false;
                 pending.from_time_ms =
                     MarketDataContinuityService::seconds_to_milliseconds(
                         pending.request.from_ts);
@@ -1256,7 +1276,8 @@ namespace optionx::market_data {
                 pending.router_id,
                 std::move(pending.subscription),
                 std::move(pending.request),
-                pending.status,
+                pending.kind,
+                pending.announce_gap,
                 pending.from_time_ms,
                 pending.to_time_ms,
                 pending.requested_items,
@@ -1267,7 +1288,8 @@ namespace optionx::market_data {
                 RoutedSubscriptionId router_id,
                 MarketDataSubscriptionHandle subscription,
                 BarHistoryRequest request,
-                MarketDataContinuityStatus status,
+                ContinuityRequestKind kind,
+                bool announce_gap,
                 std::uint64_t from_time_ms,
                 std::uint64_t to_time_ms,
                 std::size_t requested_items,
@@ -1288,17 +1310,19 @@ namespace optionx::market_data {
             }
             if (!provider) return;
 
-            if (status == MarketDataContinuityStatus::GAP_DETECTED) {
-                notify_continuity(
-                    router_id,
-                    make_continuity_update(
-                        subscription,
-                        MarketDataContinuityStatus::GAP_DETECTED,
-                        from_time_ms,
-                        to_time_ms,
-                        requested_items,
-                        0,
-                        "A gap was detected in the live bar stream."));
+            if (kind == ContinuityRequestKind::GAP_BACKFILL) {
+                if (announce_gap) {
+                    notify_continuity(
+                        router_id,
+                        make_continuity_update(
+                            subscription,
+                            MarketDataContinuityStatus::GAP_DETECTED,
+                            from_time_ms,
+                            to_time_ms,
+                            requested_items,
+                            0,
+                            "A gap was detected in the live bar stream."));
+                }
                 notify_continuity(
                     router_id,
                     make_continuity_update(
@@ -1317,7 +1341,7 @@ namespace optionx::market_data {
                                             router_id,
                                             subscription,
                                             request,
-                                            status,
+                                            kind,
                                             from_time_ms,
                                             to_time_ms,
                                             requested_items,
@@ -1328,7 +1352,7 @@ namespace optionx::market_data {
                              router_id,
                              subscription,
                              request,
-                             status,
+                             kind,
                              from_time_ms,
                              to_time_ms,
                              requested_items,
@@ -1338,7 +1362,7 @@ namespace optionx::market_data {
                         router_id,
                         subscription,
                         request,
-                        status,
+                        kind,
                         from_time_ms,
                         to_time_ms,
                         requested_items,
@@ -1371,7 +1395,7 @@ namespace optionx::market_data {
                 RoutedSubscriptionId router_id,
                 MarketDataSubscriptionHandle subscription,
                 BarHistoryRequest request,
-                MarketDataContinuityStatus operation_status,
+                ContinuityRequestKind kind,
                 std::uint64_t from_time_ms,
                 std::uint64_t to_time_ms,
                 std::size_t requested_items,
@@ -1401,7 +1425,7 @@ namespace optionx::market_data {
                     std::move(result.sequence),
                     request,
                     subscription,
-                    operation_status == MarketDataContinuityStatus::GAP_DETECTED);
+                    kind == ContinuityRequestKind::GAP_BACKFILL);
                 history_stream_matches = batch_matches_stream(
                     history_batch,
                     expected_stream);
@@ -1412,7 +1436,6 @@ namespace optionx::market_data {
                         entry_it->second->phase != EntryPhase::ACTIVE) {
                         return;
                     }
-                    apply_bar_policy(*entry_it->second, history_batch);
                     delivered_history_items = history_batch.items.size();
                     has_history_batch = !history_batch.items.empty();
                 }
@@ -1420,11 +1443,11 @@ namespace optionx::market_data {
 
             const bool usable_history = history_success &&
                 history_stream_matches &&
-                (operation_status != MarketDataContinuityStatus::GAP_DETECTED ||
+                (kind != ContinuityRequestKind::GAP_BACKFILL ||
                  delivered_history_items > 0);
 
             bool retry_scheduled = false;
-            if (!usable_history) {
+            if (!history_success) {
                 std::shared_ptr<PendingContinuityRequest> retry_request;
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
@@ -1440,7 +1463,8 @@ namespace optionx::market_data {
                         retry_request->router_id = router_id;
                         retry_request->subscription = subscription;
                         retry_request->request = request;
-                        retry_request->status = operation_status;
+                        retry_request->kind = kind;
+                        retry_request->announce_gap = false;
                         retry_request->from_time_ms = from_time_ms;
                         retry_request->to_time_ms = to_time_ms;
                         retry_request->requested_items = requested_items;
@@ -1493,7 +1517,9 @@ namespace optionx::market_data {
                                 ? "Historical market-data continuity request failed."
                                 : !history_stream_matches
                                 ? "Historical bar response does not match the subscribed stream."
-                                : "No bars were returned for the detected gap.")
+                                : kind == ContinuityRequestKind::GAP_BACKFILL
+                                ? "No bars were returned for the detected gap."
+                                : "No historical bars were returned for prefill.")
                             : result.error_desc));
             }
 
@@ -1524,8 +1550,12 @@ namespace optionx::market_data {
                 std::vector<std::pair<
                     std::shared_ptr<IMarketDataSubscriber>,
                     BarDataBatch>> deliveries;
+                std::vector<std::pair<
+                    std::shared_ptr<IMarketDataSubscriber>,
+                    MarketDataContinuityUpdate>> continuity_deliveries;
                 std::vector<PendingContinuityRequest> continuity_requests;
                 bool finished = false;
+                bool continuity_still_enabled = false;
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     const auto entry_it = m_entries.find(router_id);
@@ -1536,21 +1566,35 @@ namespace optionx::market_data {
                     if (entry_it->second->continuity_buffer.empty()) {
                         entry_it->second->continuity_ready = true;
                         entry_it->second->continuity_flushing = false;
+                        continuity_still_enabled =
+                            entry_it->second->continuity.enabled();
                         finished = true;
                     } else {
                         auto batch = std::move(
                             entry_it->second->continuity_buffer.front());
                         entry_it->second->continuity_buffer.pop_front();
+                        if (entry_it->second->continuity_buffered_items >=
+                                batch.items.size()) {
+                            entry_it->second->continuity_buffered_items -=
+                                batch.items.size();
+                        } else {
+                            entry_it->second->continuity_buffered_items = 0;
+                        }
                         route_bar_to_entry_no_lock(
                             entry_it->second,
                             batch,
                             deliveries,
                             continuity_requests,
+                            continuity_deliveries,
                             true,
                             usable_history);
                     }
                 }
 
+                for (auto& continuity_delivery : continuity_deliveries) {
+                    continuity_delivery.first->on_market_data_continuity(
+                        continuity_delivery.second);
+                }
                 for (auto& delivery : deliveries) {
                     delivery.first->on_bar_data(delivery.second);
                 }
@@ -1561,7 +1605,8 @@ namespace optionx::market_data {
                         pending.router_id,
                         std::move(pending.subscription),
                         std::move(pending.request),
-                        pending.status,
+                        pending.kind,
+                        pending.announce_gap,
                         pending.from_time_ms,
                         pending.to_time_ms,
                         pending.requested_items,
@@ -1570,18 +1615,20 @@ namespace optionx::market_data {
                 }
 
                 if (finished) {
-                    notify_continuity(
-                        router_id,
-                        make_continuity_update(
-                            subscription,
-                            MarketDataContinuityStatus::LIVE,
-                            from_time_ms,
-                            to_time_ms,
-                            requested_items,
-                            delivered_history_items,
-                            usable_history
-                                ? "Historical market-data continuity is ready."
-                                : "Live delivery continues after history failure."));
+                    if (continuity_still_enabled) {
+                        notify_continuity(
+                            router_id,
+                            make_continuity_update(
+                                subscription,
+                                MarketDataContinuityStatus::LIVE,
+                                from_time_ms,
+                                to_time_ms,
+                                requested_items,
+                                delivered_history_items,
+                                usable_history
+                                    ? "Historical market-data continuity is ready."
+                                    : "Live delivery continues after history failure."));
+                    }
                     return;
                 }
             }
@@ -1971,24 +2018,73 @@ namespace optionx::market_data {
             if (subscriber) subscriber->on_market_data_continuity(update);
         }
 
-        inline void MarketDataRouterState::apply_bar_policy(
-                const Entry& entry,
-                BarDataBatch& batch) {
-            if (entry.continuity.bar_policy !=
-                    MarketDataContinuityBarPolicy::DROP_NON_MONOTONIC) {
-                return;
+        inline bool MarketDataRouterState::buffer_continuity_batch_no_lock(
+                const std::shared_ptr<Entry>& entry,
+                std::shared_ptr<IMarketDataSubscriber> subscriber,
+                BarDataBatch batch,
+                std::vector<std::pair<
+                    std::shared_ptr<IMarketDataSubscriber>,
+                    BarDataBatch>>& deliveries,
+                std::vector<std::pair<
+                    std::shared_ptr<IMarketDataSubscriber>,
+                    MarketDataContinuityUpdate>>& continuity_deliveries,
+                bool push_front) {
+            const auto batch_items = batch.items.size();
+            const auto& continuity = entry->continuity;
+            const bool exceeds_batch_limit =
+                continuity.max_buffered_batches > 0 &&
+                entry->continuity_buffer.size() >= continuity.max_buffered_batches;
+            const bool exceeds_item_limit = continuity.max_buffered_items > 0 &&
+                (batch_items > continuity.max_buffered_items ||
+                 entry->continuity_buffered_items >
+                     continuity.max_buffered_items - batch_items);
+
+            if (!exceeds_batch_limit && !exceeds_item_limit) {
+                if (push_front) {
+                    entry->continuity_buffer.push_front(std::move(batch));
+                } else {
+                    entry->continuity_buffer.push_back(std::move(batch));
+                }
+                entry->continuity_buffered_items += batch_items;
+                return true;
             }
 
-            auto previous_time_ms = entry.last_bar_time_ms;
-            auto output = batch.items.begin();
-            for (const auto& bar : batch.items) {
-                if (bar.time_ms == 0 || bar.time_ms <= previous_time_ms) {
-                    continue;
-                }
-                previous_time_ms = bar.time_ms;
-                *output++ = bar;
+            while (!entry->continuity_buffer.empty()) {
+                auto buffered = std::move(entry->continuity_buffer.front());
+                entry->continuity_buffer.pop_front();
+                deliveries.emplace_back(subscriber, std::move(buffered));
             }
-            batch.items.erase(output, batch.items.end());
+            entry->continuity_buffered_items = 0;
+            deliveries.emplace_back(subscriber, std::move(batch));
+
+            entry->continuity_ready = true;
+            entry->continuity_request_in_flight = false;
+            entry->continuity_flushing = false;
+            entry->continuity_retry_request.reset();
+            entry->continuity_retry_at_ms = 0;
+            entry->continuity.mode = MarketDataContinuityMode::LIVE_ONLY;
+
+            continuity_deliveries.emplace_back(
+                subscriber,
+                make_continuity_update(
+                    entry->control->provider_subscription,
+                    MarketDataContinuityStatus::FAILED,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "Continuity buffer limit exceeded; live delivery continues."));
+            continuity_deliveries.emplace_back(
+                subscriber,
+                make_continuity_update(
+                    entry->control->provider_subscription,
+                    MarketDataContinuityStatus::LIVE,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "Live delivery resumed after continuity buffer overflow."));
+            return false;
         }
 
         inline bool MarketDataRouterState::route_bar_to_entry_no_lock(
@@ -1998,6 +2094,9 @@ namespace optionx::market_data {
                         std::shared_ptr<IMarketDataSubscriber>,
                         BarDataBatch>>& deliveries,
                 std::vector<PendingContinuityRequest>& continuity_requests,
+                std::vector<std::pair<
+                        std::shared_ptr<IMarketDataSubscriber>,
+                        MarketDataContinuityUpdate>>& continuity_deliveries,
                 bool process_buffered,
                 bool allow_gap_recovery) {
             if (!entry || entry->phase != EntryPhase::ACTIVE ||
@@ -2010,12 +2109,17 @@ namespace optionx::market_data {
 
             auto routed = batch;
             routed.subscription = entry->control->provider_subscription;
-            apply_bar_policy(*entry, routed);
             if (routed.items.empty()) return false;
 
             if (entry->continuity.enabled() && !process_buffered &&
                 (!entry->continuity_ready || entry->continuity_flushing)) {
-                entry->continuity_buffer.push_back(std::move(routed));
+                buffer_continuity_batch_no_lock(
+                    entry,
+                    std::move(subscriber),
+                    std::move(routed),
+                    deliveries,
+                    continuity_deliveries,
+                    false);
                 return false;
             }
 
@@ -2074,13 +2178,17 @@ namespace optionx::market_data {
                             routed.items.erase(
                                 routed.items.begin(),
                                 routed.items.begin() + static_cast<std::ptrdiff_t>(index));
+                            if (!buffer_continuity_batch_no_lock(
+                                    entry,
+                                    subscriber,
+                                    std::move(routed),
+                                    deliveries,
+                                    continuity_deliveries,
+                                    process_buffered)) {
+                                return false;
+                            }
                             entry->continuity_ready = false;
                             entry->continuity_request_in_flight = true;
-                            if (process_buffered) {
-                                entry->continuity_buffer.push_front(std::move(routed));
-                            } else {
-                                entry->continuity_buffer.push_back(std::move(routed));
-                            }
                             continuity_requests.push_back(PendingContinuityRequest{
                                 entry->router_id,
                                 entry->control->provider_subscription,
@@ -2089,7 +2197,8 @@ namespace optionx::market_data {
                                     gap_from_ms,
                                     gap_to_ms,
                                     entry->continuity.max_backfill_bars),
-                                MarketDataContinuityStatus::GAP_DETECTED,
+                                ContinuityRequestKind::GAP_BACKFILL,
+                                true,
                                 gap_from_ms,
                                 gap_to_ms,
                                 requested_items,
@@ -2120,6 +2229,9 @@ namespace optionx::market_data {
             std::vector<std::pair<
                 std::shared_ptr<IMarketDataSubscriber>,
                 BarDataBatch>> deliveries;
+            std::vector<std::pair<
+                std::shared_ptr<IMarketDataSubscriber>,
+                MarketDataContinuityUpdate>> continuity_deliveries;
             std::vector<PendingContinuityRequest> continuity_requests;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
@@ -2132,6 +2244,7 @@ namespace optionx::market_data {
                         *batch,
                         deliveries,
                         continuity_requests,
+                        continuity_deliveries,
                         false);
                 };
 
@@ -2150,6 +2263,10 @@ namespace optionx::market_data {
                 }
             }
 
+            for (auto& continuity_delivery : continuity_deliveries) {
+                continuity_delivery.first->on_market_data_continuity(
+                    continuity_delivery.second);
+            }
             for (auto& delivery : deliveries) {
                 delivery.first->on_bar_data(delivery.second);
             }
@@ -2158,7 +2275,8 @@ namespace optionx::market_data {
                     request.router_id,
                     std::move(request.subscription),
                     std::move(request.request),
-                    request.status,
+                    request.kind,
+                    request.announce_gap,
                     request.from_time_ms,
                     request.to_time_ms,
                     request.requested_items,
@@ -2346,17 +2464,15 @@ namespace optionx::market_data {
                         retry.router_id,
                         std::move(retry.subscription),
                         std::move(retry.request),
-                        retry.status,
+                        retry.kind,
+                        retry.announce_gap,
                         retry.from_time_ms,
                         retry.to_time_ms,
                         retry.requested_items,
                         retry.attempt);
                 }
 
-                if (!shutting_down) {
-                    if (retry_requests.empty()) return;
-                    continue;
-                }
+                if (!shutting_down) return;
 
                 for (auto& completion : completions) {
                     complete_unsubscribe(

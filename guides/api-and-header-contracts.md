@@ -257,14 +257,21 @@ Contract rules:
   optional timestamp-gap recovery. Router buffers live batches until the
   corresponding history operation completes and reports route-scoped progress
   through `IMarketDataSubscriber::on_market_data_continuity()`.
+- `prefill_bars` requests inclusive timeframe slots ending at the start of the
+  current timeframe bucket. `max_buffered_batches` and `max_buffered_items`
+  bound live batches held during history; zero disables each limit. On buffer
+  overflow Router reports continuity `FAILED`, releases the held live data,
+  disables continuity for that route, and resumes with `LIVE` delivery.
 - `MarketDataContinuityOptions::retry` bounds failed history requests with a
   capped exponential backoff. Retries are scheduled by the periodic Router
   `process()` call, so no continuity timer thread is created. Buffered live
   batches remain withheld while retrying.
-- `MarketDataContinuityOptions::bar_policy` defaults to `KEEP_ALL`, preserving
-  provider revisions and overlapping snapshots. `DROP_NON_MONOTONIC` instead
-  filters zero, repeated, and out-of-order timestamps per route for both
-  history and live batches. Gap detection runs after this filtering.
+- Successful empty history is terminal: an empty prefill proceeds to live
+  delivery, while an empty gap backfill reports failed recovery and releases
+  buffered live data without retrying the same range.
+- Router preserves provider bar revisions and leaves timestamp upsert or
+  deduplication to the consumer. A chart or storage component should upsert by
+  stream and `time_ms` when it needs one current candle value.
 - Continuity updates carry the concrete provider subscription handle and must
   not be confused with stream-level `MarketDataStatusUpdate`. History failure
   does not terminate the live route: Router reports `FAILED`, releases buffered

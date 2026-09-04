@@ -319,16 +319,21 @@ The options have these meanings:
 - `LIVE_ONLY` leaves live delivery unchanged. `PREFILL` requests
   `prefill_bars` before the first live delivery. `PREFILL_AND_RECOVER` does
   both and also repairs timestamp gaps.
-- `prefill_bars` is the count-based initial history depth. Router builds an
-  inclusive timeframe range for that many slots; a provider may still return
-  fewer bars when part of the range has no data. A `PREFILL` request must
-  specify a positive count. `PREFILL_AND_RECOVER` may use zero when the
-  application wants recovery only.
+- `prefill_bars` is the count-based initial history depth. Router aligns the
+  end of the inclusive range to the start of the current timeframe bucket and
+  requests `prefill_bars` slots, so the range is `boundary - (N - 1) *
+  timeframe` through `boundary`. A provider may still return fewer bars when
+  part of the range has no data. A `PREFILL` request must specify a positive
+  count. `PREFILL_AND_RECOVER` may use zero when the application wants
+  recovery only.
 - `max_backfill_bars` bounds one gap request. Zero means that the provider
   request is not count-bounded by Router.
-- `bar_policy` defaults to `KEEP_ALL`, preserving provider revisions. Set it to
-  `DROP_NON_MONOTONIC` when the consumer requires strictly increasing bar
-  timestamps; repeated and out-of-order bars are then discarded per route.
+- `max_buffered_batches` and `max_buffered_items` bound live data retained
+  while a history request is in flight. Zero disables the corresponding limit.
+  When either limit is exceeded, Router reports continuity `FAILED`, releases
+  the queued and current live batches, disables continuity for that route, and
+  reports `LIVE`. This is an explicit loss-of-recovery fallback: live data
+  continues, but the route no longer promises historical ordering.
 - `retry.max_attempts` is the total number of attempts, including the initial
   request. `retry.initial_backoff_ms` starts a capped exponential backoff, and
   `retry.max_backoff_ms` limits it. The default is one attempt, preserving the
@@ -377,17 +382,20 @@ stream-level `MarketDataStatusUpdate` events such as `READY` or `DISCONNECTED`.
 missing interval. When a provider returns a partial but non-empty backfill,
 Router keeps draining the queued live batches and can issue another bounded
 request for the next remaining gap. An empty successful response for a detected
-gap is treated as a failed recovery, so Router releases the queued live data
-once instead of retrying the same range forever.
+gap is treated as a terminal failed recovery, so Router releases the queued live
+data once instead of retrying the same range forever. A successful empty
+prefill is terminal as well: it carries no historical batch and proceeds to
+the buffered live stream without retry.
 
 If a history request fails or is rejected and attempts remain, Router emits
 `RETRYING`, keeps buffered live batches, and waits for a later owner-loop
 `process()` call. After the retry budget is exhausted, Router emits `FAILED`,
 releases any buffered live batches, and then emits `LIVE`. The route stays usable
 and live delivery continues, but an unrecovered historical range is reported to
-the consumer. A provider may return overlapping snapshots for an in-progress
-bar; `KEEP_ALL` preserves those revisions, while `DROP_NON_MONOTONIC` provides
-a strict timestamp filter for consumers that need one.
+the consumer. Router preserves provider bar revisions and does not apply a
+generic timestamp deduplication policy; consumers such as charts or storage
+should upsert by stream and `time_ms` when they need one current value per
+candle while still accepting later finalized revisions.
 
 `MarketDataContinuityService` is the lower-level helper for applications that
 want to request history directly. It converts a `BarHistoryResult` into a

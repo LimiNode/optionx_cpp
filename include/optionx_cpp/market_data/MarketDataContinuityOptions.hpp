@@ -19,13 +19,6 @@ namespace optionx::market_data {
         PREFILL_AND_RECOVER  ///< Prefill and repair timestamp gaps in live bars.
     };
 
-    /// \enum MarketDataContinuityBarPolicy
-    /// \brief Selects how repeated or out-of-order bar timestamps are handled.
-    enum class MarketDataContinuityBarPolicy {
-        KEEP_ALL = 0,       ///< Preserve every provider bar, including revisions.
-        DROP_NON_MONOTONIC  ///< Keep only strictly increasing timestamps per route.
-    };
-
     /// \struct MarketDataContinuityRetryPolicy
     /// \brief Configures bounded history retry attempts and exponential backoff.
     struct MarketDataContinuityRetryPolicy {
@@ -63,14 +56,14 @@ namespace optionx::market_data {
     };
 
     /// \struct MarketDataContinuityOptions
-    /// \brief Configures history prefill, recovery, ordering, and retries.
+    /// \brief Configures history prefill, recovery, retries, and buffering.
     struct MarketDataContinuityOptions {
         MarketDataContinuityMode mode = MarketDataContinuityMode::LIVE_ONLY;
         std::size_t prefill_bars = 0; ///< Number of historical bars requested before live delivery.
         std::size_t max_backfill_bars = 1000; ///< Maximum bars per detected gap; zero is unbounded.
-        MarketDataContinuityBarPolicy bar_policy =
-            MarketDataContinuityBarPolicy::KEEP_ALL;
         MarketDataContinuityRetryPolicy retry;
+        std::size_t max_buffered_batches = 1024; ///< Maximum live batches held during history; zero is unbounded.
+        std::size_t max_buffered_items = 100000; ///< Maximum live items held during history; zero is unbounded.
 
         /// \brief Returns true when the option combination is usable.
         [[nodiscard]] bool valid() const noexcept {
