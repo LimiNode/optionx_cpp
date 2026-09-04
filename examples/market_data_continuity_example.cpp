@@ -7,6 +7,14 @@
 #include <utility>
 #include <vector>
 
+namespace market_data_continuity_example_clock {
+    inline std::uint64_t now_ms = 180000ULL;
+}
+
+#ifndef OPTIONX_TIMESTAMP_MS
+#define OPTIONX_TIMESTAMP_MS market_data_continuity_example_clock::now_ms
+#endif
+
 #include <optionx_cpp/market_data.hpp>
 
 namespace md = optionx::market_data;
@@ -138,13 +146,18 @@ int main() {
         return 1;
     }
 
-    // This live bar is buffered until the initial historical range is delivered.
-    provider.emit_live_bar(220000, 100.5);
-    provider.complete_history(make_bars({100000, 160000}));
+    market_data_continuity_example_clock::now_ms = 240000ULL;
+    provider.emit_live_bar(240000, 100.5);
+    provider.complete_history(make_bars({120000, 180000}));
 
-    // 280000 is missing, so the Router requests it before releasing 340000.
-    provider.emit_live_bar(340000, 101.5);
-    provider.complete_history(make_bars({280000}));
+    // This live bar arrives after the initial history and is delivered directly.
+    market_data_continuity_example_clock::now_ms = 300000ULL;
+    provider.emit_live_bar(300000, 101.0);
+
+    // 360000 is missing, so the Router requests it before releasing 420000.
+    market_data_continuity_example_clock::now_ms = 420000ULL;
+    provider.emit_live_bar(420000, 101.5);
+    provider.complete_history(make_bars({360000}));
 
     route.reset();
     router.shutdown();
