@@ -323,11 +323,11 @@ Contract rules:
   timeframe slot; a partial response finishes as `FAILED` then `DEGRADED`.
 - A disconnect while initial prefill is pending invalidates its old completion
   and repeats the original prefill range after `READY`. In
-  `PREFILL_AND_RECOVER`, Router then repairs closed outage slots after the
-  original prefill boundary before emitting `LIVE`; plain `PREFILL` remains
-  startup-only. A cached invalidating status applies the same transition before
-  a newly accepted route may start prefill. Completed `PREFILL` routes do not
-  acquire reconnect or timestamp-gap recovery implicitly.
+  `PREFILL_AND_RECOVER`, Router then revalidates the original boundary candle
+  after it closes and repairs later closed outage slots before emitting `LIVE`;
+  plain `PREFILL` remains startup-only. A cached invalidating status applies the
+  same transition before a newly accepted route may start prefill. Completed
+  `PREFILL` routes do not acquire reconnect or timestamp-gap recovery implicitly.
 - Generic history continuity is currently defined for bars only. Tick history
   remains a separate provider contract. Router does not apply a universal
   timestamp deduplication policy; consumers decide how to upsert revisions.

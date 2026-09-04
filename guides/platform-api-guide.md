@@ -139,8 +139,9 @@ Subscription rules:
   clips provider history to the requested range, and removes buffered snapshots
   confirmed by that history. `DEGRADED` remains sticky until the complete old
   hole is repaired; `FAILED` names one history operation. A pending initial
-  prefill is restarted after `READY`; `PREFILL_AND_RECOVER` then repairs closed
-  outage slots after the original prefill boundary before emitting `LIVE`.
+  prefill is restarted after `READY`; `PREFILL_AND_RECOVER` then revalidates the
+  original boundary after that candle closes and repairs later closed outage
+  slots before emitting `LIVE`.
   Cached invalidating status replay blocks the same work until a later live
   `READY`, while a plain or completed `PREFILL` route does not gain outage
   recovery. Tick routes do not have this guarantee because the provider contract

@@ -371,11 +371,13 @@ the old asynchronous completion and waits for a later `READY`. It then repeats
 the original prefill range; `process()` cannot start it while transport is still
 disconnected. This startup restart applies to both history modes because it
 preserves an unfinished initialization contract. For `PREFILL_AND_RECOVER`, a
-successful restart is followed by recovery from the slot after the original
-prefill boundary through the latest closed candle; `LIVE` is emitted only after
-both ranges are verified. Plain `PREFILL` remains startup-only: it repeats the
-original range and does not add outage-tail recovery. Once its initialization
-has finished, later transport statuses do not enable recovery implicitly.
+successful restart is followed by recovery from the original prefill boundary
+through the latest closed candle. It includes the original boundary itself
+because that may have been the open candle when transport was lost; `LIVE` is
+emitted only after the closed boundary and the outage tail are verified. Plain
+`PREFILL` remains startup-only: it repeats the original range and does not add
+outage recovery. Once its initialization has finished, later transport statuses
+do not enable recovery implicitly.
 
 With `PREFILL_AND_RECOVER`, Router compares increasing bar timestamps with the
 requested timeframe. A later bar that skips one or more expected timeframe

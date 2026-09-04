@@ -2537,15 +2537,10 @@ namespace optionx::market_data {
                     const auto timeframe_ms = static_cast<std::uint64_t>(
                         entry->stream.timeframe) * 1000U;
                     if (continuity.initial_prefill_pending) {
-                        if (continuity.initial_prefill_boundary_time_ms > 0 &&
-                            timeframe_ms > 0 &&
-                            continuity.initial_prefill_boundary_time_ms <=
-                                std::numeric_limits<std::uint64_t>::max() -
-                                    timeframe_ms) {
+                        if (continuity.initial_prefill_boundary_time_ms > 0) {
                             mark_unverified_no_lock(
                                 entry,
-                                continuity.initial_prefill_boundary_time_ms +
-                                    timeframe_ms);
+                                continuity.initial_prefill_boundary_time_ms);
                         }
                     } else if (continuity.verified_through_time_ms > 0 &&
                                timeframe_ms > 0 &&
