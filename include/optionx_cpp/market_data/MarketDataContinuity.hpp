@@ -21,6 +21,7 @@ namespace optionx::market_data {
         RETRYING,         ///< A failed history request will be attempted again.
         LIVE,             ///< No known unresolved history range remains for the route.
         FAILED,           ///< A specific history operation failed; the route may continue.
+        STALE,            ///< Transport loss invalidated the route's continuity.
         DEGRADED          ///< Live delivery continues while continuity remains unverified; the status is sticky until the unresolved range is verified.
     };
 
@@ -39,6 +40,8 @@ namespace optionx::market_data {
             return "LIVE";
         case MarketDataContinuityStatus::FAILED:
             return "FAILED";
+        case MarketDataContinuityStatus::STALE:
+            return "STALE";
         case MarketDataContinuityStatus::DEGRADED:
             return "DEGRADED";
         case MarketDataContinuityStatus::UNKNOWN:

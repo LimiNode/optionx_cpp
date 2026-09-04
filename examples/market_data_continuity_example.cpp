@@ -67,6 +67,18 @@ public:
         if (on_bar_data()) on_bar_data()(std::move(batch));
     }
 
+    void emit_status(md::MarketDataStreamStatus status) {
+        if (!on_market_data_status()) return;
+        md::MarketDataStatusUpdate update;
+        update.subscription = m_subscription;
+        update.type = md::MarketDataType::BARS;
+        update.symbol = m_subscription.symbol;
+        update.timeframe = m_subscription.timeframe;
+        update.transport = m_subscription.transport;
+        update.status = status;
+        on_market_data_status()(std::move(update));
+    }
+
     void complete_history(std::vector<optionx::Bar> bars) {
         if (m_history_callbacks.empty()) return;
 
@@ -98,7 +110,7 @@ public:
             if (bar.has_flag(optionx::MarketDataFlags::HISTORICAL)) {
                 source = bar.has_flag(optionx::MarketDataFlags::BACKFILL)
                     ? "backfill"
-                    : "prefill";
+                    : "historical";
             }
             const char* delivery =
                 bar.has_flag(optionx::MarketDataFlags::CATCHUP)
@@ -119,6 +131,12 @@ public:
         std::cout << "continuity: subscription #" << update.subscription.id
                   << ", status=" << md::to_str(update.status)
                   << ", history items=" << update.delivered_items << '\n';
+    }
+
+    void on_market_data_status(
+            const md::MarketDataStatusUpdate& update) override {
+        std::cout << "transport: subscription #" << update.subscription.id
+                  << ", status=" << md::to_str(update.status) << '\n';
     }
 };
 
@@ -170,6 +188,14 @@ int main() {
     market_data_continuity_example_clock::now_ms = 420000ULL;
     provider.emit_live_bar(420000, 101.5);
     provider.complete_history(make_bars({360000}));
+
+    // A reconnect invalidates the route. The 420000 live snapshot is held
+    // while Router revalidates the closed 360000 and 420000 slots.
+    market_data_continuity_example_clock::now_ms = 480000ULL;
+    provider.emit_status(md::MarketDataStreamStatus::DISCONNECTED);
+    provider.emit_live_bar(420000, 102.0);
+    provider.emit_status(md::MarketDataStreamStatus::READY);
+    provider.complete_history(make_bars({360000, 420000}));
 
     route.reset();
     router.shutdown();

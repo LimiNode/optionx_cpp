@@ -90,6 +90,11 @@ TEST(MarketDataSubscriptionHandle, BuildsTickAndBarHandlesAndReportsValidity) {
     EXPECT_FALSE(MarketDataSubscriptionHandle{}.valid());
 }
 
+TEST(MarketDataContinuityStatus, ConvertsReconnectStatusesToStableText) {
+    EXPECT_STREQ(to_str(MarketDataContinuityStatus::STALE), "STALE");
+    EXPECT_STREQ(to_str(MarketDataContinuityStatus::DEGRADED), "DEGRADED");
+}
+
 TEST(MarketDataSubscriptionResult, DerivesSuccessFromStatus) {
     const TickSubscriptionRequest request("EUR/USD");
     const auto handle =

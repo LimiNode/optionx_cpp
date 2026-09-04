@@ -382,6 +382,46 @@ continuity GAP_DETECTED
 нужно показывать или записывать это состояние. Эти события отделены от
 stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNECTED`.
 
+### Восстановление После Потери Транспорта
+
+Для bar route с включённым continuity статусы `DISCONNECTED`, `RECONNECTING`,
+`FAILED` или `STOPPED` инвалидируют доказанную границу history-to-live. Router
+оставляет логический route активным, публикует `STALE` и начинает удерживать
+последующие live bars. Следующий `READY` запускает ограниченное overlap
+восстановление:
+
+```text
+transport DISCONNECTED / RECONNECTING / FAILED / STOPPED
+  -> continuity STALE
+  -> live bars удерживаются как LIVE_SOURCE | CATCHUP
+transport READY
+  -> historical overlap для закрытых timeframe slots
+  -> накопленные live bars без уже подтверждённых overlap slots
+  -> continuity LIVE
+```
+
+Сам по себе `READY` ещё не означает, что route снова непрерывен. Router берёт
+последний доверенный finalized bar как границу и включает в overlap последний
+наблюдавшийся incomplete bar. История запрашивается только до последней
+закрытой candle boundary. Если текущая свеча ещё не закрыта, Router ждёт
+следующий `process()` после её закрытия. Так повреждённый текущий snapshot не
+становится доверенным только из-за восстановления транспорта.
+
+Reconnect history доставляется как `HISTORICAL`: это проверочная история, а не
+`BACKFILL` для timestamp gap. После успешного overlap Router не доставляет ещё
+раз накопленные live snapshots для timestamp slots, подтверждённых историей.
+Это узкая дедупликация только на recovery boundary; обычные live revisions по-
+прежнему передаются consumer, который должен делать upsert mutable bars по
+stream и `time_ms`.
+
+Если reconnect history завершилась ошибкой, была отклонена или не покрыла весь
+запрошенный диапазон, Router публикует `FAILED` для этой операции, выпускает
+накопленные live data по safety policy и завершает route в `DEGRADED`. Route
+остаётся активным и продолжает live-доставку, но больше не обещает проверенную
+целостность, пока следующая потеря транспорта не запустит новую попытку.
+`DEGRADED` описывает состояние route после невозможности доказать recovery, а
+`FAILED` описывает одну неудачную history operation.
+
 `max_backfill_bars` ограничивает каждый отдельный provider request, а не весь
 отсутствующий интервал. Если provider вернул неполный, но непустой backfill,
 Router считает такое восстановление неуспешным: неполный batch не доставляется
@@ -435,10 +475,12 @@ broker timestamp в текущий.
 Router публикует `FAILED`, выпускает накопленные live batches, затем публикует
 `DEGRADED`. Route остаётся пригодным для работы, live-доставка продолжается, а
 невосстановленный исторический диапазон явно сообщается consumer. Router
-сохраняет revisions баров от provider и не применяет универсальную
-timestamp-дедупликацию. Если графику или storage нужно одно текущее значение
-на candle, consumer должен делать upsert по stream и `time_ms`, сохраняя
-возможность принять более позднюю finalized revision.
+сохраняет обычные revisions баров от provider и не применяет универсальную
+timestamp-дедупликацию. После успешного reconnect overlap Router удаляет из
+buffer live snapshots, чьи timestamps уже подтверждены историей, поэтому одна
+recovery candle не доставляется дважды. Если графику или storage нужно одно
+текущее значение на candle, consumer всё равно должен делать upsert по stream и
+`time_ms`, сохраняя возможность принять более позднюю finalized revision.
 
 `MarketDataContinuityService` остаётся низкоуровневым helper для приложений,
 которые хотят запрашивать историю напрямую. Он превращает `BarHistoryResult` в

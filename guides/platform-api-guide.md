@@ -133,6 +133,14 @@ Subscription rules:
   batches are buffered while history is in flight. Route-scoped progress is
   reported through `IMarketDataSubscriber::on_market_data_continuity()`; it is
   separate from stream-level `on_market_data_status()`.
+- For continuity-enabled bar routes, transport loss emits route-scoped `STALE`.
+  After `READY`, Router validates an overlap through the last closed candle
+  boundary, removes buffered snapshots already confirmed by that history, and
+  emits `LIVE` only after the route is continuous again. If recovery cannot be
+  verified, the route remains usable but finishes in `DEGRADED`; `FAILED` names
+  the individual failed history operation. Tick routes do not have this
+  reconnect guarantee because the provider contract still lacks generic
+  tick-history.
 - Router continuity is currently bar-only because providers expose
   `fetch_bar_history()` but no generic tick-history operation. See the complete
   EN/RU Router guides and `market_data_continuity_example.cpp`.

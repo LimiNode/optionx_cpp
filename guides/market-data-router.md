@@ -380,6 +380,47 @@ Implement `IMarketDataSubscriber::on_market_data_continuity()` when a chart or
 bot needs to display or record this state. These updates are separate from
 stream-level `MarketDataStatusUpdate` events such as `READY` or `DISCONNECTED`.
 
+### Recovery After Transport Loss
+
+For a continuity-enabled bar route, `DISCONNECTED`, `RECONNECTING`, `FAILED`,
+or `STOPPED` invalidates the history-to-live proof. Router keeps the logical
+route active, marks it `STALE`, and buffers subsequent live bars. A later
+`READY` starts a bounded overlap recovery:
+
+```text
+transport DISCONNECTED / RECONNECTING / FAILED / STOPPED
+  -> continuity STALE
+  -> live bars buffered as LIVE_SOURCE | CATCHUP
+transport READY
+  -> historical overlap for closed timeframe slots
+  -> buffered live bars, with confirmed overlap slots removed
+  -> continuity LIVE
+```
+
+`READY` by itself does not mean that a route is continuous again. Router uses
+the last trusted finalized bar as the recovery boundary and includes the last
+observed incomplete bar in the overlap. History is requested only through the
+last closed candle boundary. If the current candle is still dirty, Router
+waits for a later `process()` cycle after that candle closes. This avoids
+trusting a potentially damaged current snapshot merely because the transport
+reconnected.
+
+Reconnect history is delivered as `HISTORICAL` (it is validation/recovery
+history, not a timestamp-gap `BACKFILL`). After a successful overlap, buffered
+live snapshots for timestamps already confirmed by history are not delivered a
+second time. This narrow Router-side deduplication applies to the recovery
+boundary only; ordinary live revisions still reach consumers, which should
+upsert mutable bars by stream and `time_ms`.
+
+If reconnect history fails, is rejected, or does not cover the complete
+requested range, Router emits operation-level `FAILED`, releases buffered live
+data according to the configured safety policy, and finishes in `DEGRADED`.
+The route remains active and can continue delivering live data; it simply no
+longer claims verified continuity until a later transport loss starts another
+recovery attempt. `DEGRADED` therefore differs from `FAILED`: the former
+describes the route after recovery could not be proved, while the latter
+describes one failed history operation.
+
 `max_backfill_bars` limits each individual provider request, not the complete
 missing interval. When a provider returns a partial but non-empty backfill,
 Router treats that response as an unsuccessful recovery: it does not deliver

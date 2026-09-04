@@ -299,13 +299,25 @@ Contract rules:
 - Successful empty history is terminal: an empty prefill proceeds to live
   delivery, while an empty gap backfill reports failed recovery and releases
   buffered live data without retrying the same range.
-- Router preserves provider bar revisions and leaves timestamp upsert or
-  deduplication to the consumer. A chart or storage component should upsert by
-  stream and `time_ms` when it needs one current candle value.
+- Router preserves ordinary provider bar revisions and leaves general timestamp
+  upsert to the consumer. After a successful reconnect overlap, Router removes
+  buffered live snapshots whose timestamps were already confirmed by returned
+  historical bars, so the same recovery candle is not delivered twice. A chart
+  or storage component should still upsert by stream and `time_ms` when it needs
+  one current candle value.
 - Continuity updates carry the concrete provider subscription handle and must
   not be confused with stream-level `MarketDataStatusUpdate`. History failure
   does not terminate the live route: Router reports `FAILED`, releases buffered
   live batches, and ends in `DEGRADED` after the retry budget is exhausted.
+  `LIVE` means that the route has no known unresolved history range; `DEGRADED`
+  means that live delivery continues without proof of the complete range.
+ - For continuity-enabled bar routes, transport loss (`DISCONNECTED`,
+   `RECONNECTING`, `FAILED`, or `STOPPED`) emits route-scoped `STALE`. After a
+   later `READY`, Router revalidates an overlap through the last closed candle
+   boundary, waits for a dirty current candle to close when necessary, and emits
+   `LIVE` only after the buffered route is drained. A reconnect history response
+   must cover the complete requested range; a partial response finishes as
+   `FAILED` then `DEGRADED`.
 - Generic history continuity is currently defined for bars only. Tick history
   remains a separate provider contract. Router does not apply a universal
   timestamp deduplication policy; consumers decide how to upsert revisions.

@@ -38,10 +38,10 @@ namespace optionx::market_data {
     struct MarketDataContinuityOptions {
         MarketDataContinuityMode mode = MarketDataContinuityMode::LIVE_ONLY;
         std::size_t prefill_bars = 0; ///< Number of historical bars requested before live delivery.
-        std::size_t max_backfill_bars = 1000; ///< Maximum bars per detected gap; zero is unbounded.
+        std::size_t max_backfill_bars = 1000; ///< Maximum bars per gap or reconnect request; zero is unbounded.
         MarketDataContinuityRetryPolicy retry;
-        std::size_t max_buffered_batches = 1024; ///< Maximum live batches held during history; zero is unbounded.
-        std::size_t max_buffered_items = 100000; ///< Maximum live items held during history; zero is unbounded.
+        std::size_t max_buffered_batches = 1024; ///< Maximum live batches held during prefill or reconnect; zero is unbounded.
+        std::size_t max_buffered_items = 100000; ///< Maximum live items held during prefill or reconnect; zero is unbounded.
 
         /// \brief Returns true when the option combination is usable.
         [[nodiscard]] bool valid() const noexcept {
