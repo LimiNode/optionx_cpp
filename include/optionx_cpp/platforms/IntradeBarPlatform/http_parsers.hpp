@@ -1482,7 +1482,7 @@ namespace optionx::platforms::intrade_bar {
                     detail::read_json_int64(el.value().at("Updates"), "Updates")));
             tick.received_ms = received_ms;
             tick.set_flag(MarketDataFlags::INITIALIZED);
-            tick.set_flag(MarketDataFlags::REALTIME);
+            mark_live_payload(tick.flags);
             batches.push_back(events::PriceUpdateEvent::make_tick_batch(
                 std::move(tick),
                 symbol,
@@ -1517,7 +1517,7 @@ namespace optionx::platforms::intrade_bar {
             tick.set_flag(TickUpdateFlags::LAST_UPDATED);
             tick.set_flag(TickUpdateFlags::VOLUME_UPDATED);
             tick.set_flag(MarketDataFlags::INITIALIZED);
-            tick.set_flag(MarketDataFlags::REALTIME);
+            mark_live_payload(tick.flags);
             batch = events::PriceUpdateEvent::make_tick_batch(
                 std::move(tick),
                 "BTCUSDT",
@@ -1559,7 +1559,7 @@ namespace optionx::platforms::intrade_bar {
         tick.set_flag(TickUpdateFlags::ASK_UPDATED);
         tick.set_flag(TickUpdateFlags::BID_UPDATED);
         tick.set_flag(MarketDataFlags::INITIALIZED);
-        tick.set_flag(MarketDataFlags::REALTIME);
+        mark_live_payload(tick.flags);
         batch = events::PriceUpdateEvent::make_tick_batch(
             std::move(tick),
             normalized_symbol,

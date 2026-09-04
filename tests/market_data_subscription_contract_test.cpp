@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <type_traits>
 
 #include <optionx_cpp/market_data.hpp>
@@ -315,28 +316,34 @@ TEST(BarTimeframe, SupportsDailyTimeframeWithoutTruncation) {
 
 TEST(MarketDataPayloadFlags, TickAndBarEncodeOriginAndPriceType) {
     Tick tick;
-    tick.set_flag(MarketDataFlags::REALTIME);
+    mark_live_payload(tick.flags);
     tick.set_flag(TickUpdateFlags::BID_UPDATED);
+    EXPECT_TRUE(tick.has_flag(MarketDataFlags::LIVE_SOURCE));
     EXPECT_TRUE(tick.has_flag(MarketDataFlags::REALTIME));
+    EXPECT_FALSE(tick.has_flag(MarketDataFlags::CATCHUP));
     EXPECT_FALSE(tick.has_flag(MarketDataFlags::HISTORICAL));
     EXPECT_TRUE(tick.has_flag(TickUpdateFlags::BID_UPDATED));
+    EXPECT_TRUE(market_data_flags_valid(tick.flags));
 
     Tick trade_tick;
     trade_tick.last = 61521.34;
     EXPECT_DOUBLE_EQ(trade_tick.mid_price(), 61521.34);
 
     Bar bar;
-    bar.set_flag(MarketDataFlags::HISTORICAL);
-    bar.set_flag(MarketDataFlags::BACKFILL);
+    mark_historical_payload(bar.flags, true);
     bar.set_price_type(MarketPriceType::MID);
     EXPECT_TRUE(bar.has_flag(MarketDataFlags::HISTORICAL));
     EXPECT_TRUE(bar.has_flag(MarketDataFlags::BACKFILL));
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::LIVE_SOURCE));
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::REALTIME));
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::CATCHUP));
     EXPECT_EQ(bar.price_type(), MarketPriceType::MID);
+    EXPECT_TRUE(market_data_flags_valid(bar.flags));
 }
 
 TEST(MarketDataPayloadFlags, FormatsFlagsAndPriceTypes) {
     std::uint32_t flags = 0;
-    set_flag_in_place(flags, MarketDataFlags::REALTIME);
+    mark_live_payload(flags);
     set_flag_in_place(flags, MarketDataFlags::INCOMPLETE);
     set_market_price_type_in_place(flags, MarketPriceType::MID);
 
@@ -344,8 +351,49 @@ TEST(MarketDataPayloadFlags, FormatsFlagsAndPriceTypes) {
     EXPECT_STREQ(optionx::market_data::to_str(MarketDataType::TICKS), "TICKS");
     EXPECT_STREQ(optionx::market_data::to_str(MarketDataStreamStatus::READY), "READY");
     EXPECT_EQ(market_price_type(flags), MarketPriceType::MID);
-    EXPECT_EQ(market_data_flags_to_string(flags), "REALTIME|INCOMPLETE");
+    EXPECT_EQ(
+        market_data_flags_to_string(flags),
+        "LIVE_SOURCE|REALTIME|INCOMPLETE");
     EXPECT_EQ(market_data_flags_to_string(0), "NONE");
+}
+
+TEST(MarketDataPayloadFlags, NormalizesCatchupAndHistoryDeliveryModes) {
+    std::uint32_t flags = 0;
+    set_flag_in_place(flags, MarketDataFlags::INCOMPLETE);
+
+    mark_live_payload(flags, true);
+    EXPECT_TRUE(has_flag(flags, MarketDataFlags::LIVE_SOURCE));
+    EXPECT_TRUE(has_flag(flags, MarketDataFlags::CATCHUP));
+    EXPECT_FALSE(has_flag(flags, MarketDataFlags::REALTIME));
+    EXPECT_TRUE(has_flag(flags, MarketDataFlags::INCOMPLETE));
+    EXPECT_TRUE(market_data_flags_valid(flags));
+
+    mark_historical_payload(flags, true);
+    EXPECT_FALSE(has_flag(flags, MarketDataFlags::LIVE_SOURCE));
+    EXPECT_FALSE(has_flag(flags, MarketDataFlags::CATCHUP));
+    EXPECT_FALSE(has_flag(flags, MarketDataFlags::REALTIME));
+    EXPECT_TRUE(has_flag(flags, MarketDataFlags::HISTORICAL));
+    EXPECT_TRUE(has_flag(flags, MarketDataFlags::BACKFILL));
+    EXPECT_TRUE(has_flag(flags, MarketDataFlags::INCOMPLETE));
+    EXPECT_TRUE(market_data_flags_valid(flags));
+}
+
+TEST(MarketDataPayloadFlags, RejectsContradictoryOriginAndDeliveryFlags) {
+    EXPECT_EQ(
+        static_cast<std::uint32_t>(MarketDataFlags::LIVE_SOURCE),
+        1U << 16);
+
+    std::uint32_t flags = 0;
+    set_flag_in_place(flags, MarketDataFlags::REALTIME);
+    EXPECT_FALSE(market_data_flags_valid(flags));
+
+    mark_live_payload(flags);
+    set_flag_in_place(flags, MarketDataFlags::CATCHUP);
+    EXPECT_FALSE(market_data_flags_valid(flags));
+
+    flags = 0;
+    set_flag_in_place(flags, MarketDataFlags::BACKFILL);
+    EXPECT_FALSE(market_data_flags_valid(flags));
 }
 
 TEST(MarketDataPayloadFlags, ParsesPriceSourcesAndTransports) {
@@ -370,7 +418,7 @@ TEST(MarketDataPayloadFlags, ParsesPriceSourcesAndTransports) {
 
 TEST(MarketDataPayloadFlags, TickCanClearMarketDataFlag) {
     Tick tick;
-    tick.set_flag(MarketDataFlags::REALTIME);
+    mark_live_payload(tick.flags);
     ASSERT_TRUE(tick.has_flag(MarketDataFlags::REALTIME));
 
     tick.set_flag(MarketDataFlags::REALTIME, false);
@@ -401,7 +449,16 @@ TEST(MarketDataContinuityService, RoutesHistoricalBarsAsBackfillBatch) {
     provider.next_sequence.price_digits = 5;
     provider.next_sequence.volume_digits = 0;
     provider.next_sequence.price_source = BarPriceSource::BID;
-    provider.next_sequence.bars.push_back(Bar{1.0, 1.2, 0.9, 1.1, 10.0, 1000});
+    provider.next_sequence.bars.push_back(Bar{
+        1.0,
+        1.2,
+        0.9,
+        1.1,
+        10.0,
+        1000,
+        static_cast<std::uint32_t>(MarketDataFlags::LIVE_SOURCE) |
+            static_cast<std::uint32_t>(MarketDataFlags::REALTIME) |
+            static_cast<std::uint32_t>(MarketDataFlags::CATCHUP)});
 
     const auto handle = MarketDataSubscriptionHandle::from_bar_request(
         provider.provider_id(),
@@ -427,6 +484,10 @@ TEST(MarketDataContinuityService, RoutesHistoricalBarsAsBackfillBatch) {
     EXPECT_EQ(delivered->subscription.id, handle.id);
     EXPECT_TRUE(delivered->items[0].has_flag(MarketDataFlags::HISTORICAL));
     EXPECT_TRUE(delivered->items[0].has_flag(MarketDataFlags::BACKFILL));
+    EXPECT_FALSE(delivered->items[0].has_flag(MarketDataFlags::LIVE_SOURCE));
+    EXPECT_FALSE(delivered->items[0].has_flag(MarketDataFlags::REALTIME));
+    EXPECT_FALSE(delivered->items[0].has_flag(MarketDataFlags::CATCHUP));
+    EXPECT_TRUE(market_data_flags_valid(delivered->items[0].flags));
     EXPECT_EQ(delivered->items[0].price_type(), MarketPriceType::BID);
 }
 

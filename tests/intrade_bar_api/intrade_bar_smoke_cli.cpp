@@ -328,7 +328,7 @@ public:
         auto& bar = m_bars[symbol];
         if (bar.time_ms != bar_time) {
             bar = optionx::Bar(price, price, price, price, tick.volume, bar_time, 0);
-            bar.set_flag(optionx::MarketDataFlags::REALTIME);
+            optionx::mark_live_payload(bar.flags);
             bar.set_flag(optionx::MarketDataFlags::INCOMPLETE);
             bar.set_price_type(optionx::market_price_type_from_bar_price_source(m_price_source));
             return bar;
@@ -338,7 +338,7 @@ public:
         bar.low = std::min(bar.low, price);
         bar.close = price;
         bar.volume += tick.volume;
-        bar.set_flag(optionx::MarketDataFlags::REALTIME);
+        optionx::mark_live_payload(bar.flags);
         bar.set_flag(optionx::MarketDataFlags::INCOMPLETE);
         return bar;
     }

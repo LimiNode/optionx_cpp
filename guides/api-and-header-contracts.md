@@ -192,8 +192,23 @@ Contract rules:
   are routed and coalesced. Calling `event_bus().drain()` alone is an internal
   event-bus operation and is not part of the public market-data delivery
   contract.
-- Payload `flags` encode realtime/history/backfill state through
-  `MarketDataFlags` and the compact price stream through `MarketPriceType`.
+- Payload `flags` encode origin, delivery mode, bar lifecycle, and the compact
+  price stream through `MarketDataFlags` and `MarketPriceType`.
+- `LIVE_SOURCE` means that a payload originated in a live or polling pipeline;
+  `HISTORICAL` means that it came from a history request. `BACKFILL` refines
+  `HISTORICAL` for a request that repairs a stream gap.
+- `REALTIME` means that a live-source payload is delivered from the current
+  live edge. `CATCHUP` means that Router intentionally held that live-source
+  payload in a continuity backlog and is now replaying it. They are mutually
+  exclusive, and both may be combined independently with `INCOMPLETE` or
+  `FINALIZED`.
+- Providers and direct hubs should use `mark_live_payload()` for live data;
+  history adapters should use `mark_historical_payload()`. These helpers
+  preserve bar lifecycle and update origin/delivery flags consistently.
+- `REALTIME` is pipeline state, not a wall-clock freshness guarantee. Use
+  `received_ms` and `time_ms` when a strategy needs to measure transport or
+  broker latency. A trading consumer should update its time series for
+  `CATCHUP` payloads but gate current-edge actions on `REALTIME`.
 - Live bar payloads with `INCOMPLETE` are mutable snapshots. Consumers that keep
   a local time series should upsert by `(provider_id, subscription_id, symbol,
   timeframe, time_ms)` until a `FINALIZED` payload for the same key arrives.

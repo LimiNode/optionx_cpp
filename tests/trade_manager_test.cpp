@@ -1109,7 +1109,7 @@ TEST_F(TradeManagerTestFixture, ValidTradeTest) {
     // Set tick price data so that mid_price > open_price.
     // For example, for BUY order if mid_price > 1.12335 then trade is WIN.
     tick = { 1.12350, 1.12340, 0.1, 1695483030000, 1695483031000, 0 };
-    tick.set_flag(optionx::MarketDataFlags::REALTIME);
+    optionx::mark_live_payload(tick.flags);
     tick.set_flag(optionx::MarketDataFlags::INITIALIZED);
 
     bus.notify_async(make_price_update_event("EURUSD", tick, 5));
@@ -1202,7 +1202,7 @@ TEST_F(TradeManagerTestFixture, InvalidTradeTest) {
     // Set tick price data so that mid_price > open_price.
     // For example, for BUY order if mid_price > 1.12335 then trade is WIN.
     tick = { 1.12350, 1.12340, 0.1, 1695483030000, 1695483031000, 0 };
-    tick.set_flag(optionx::MarketDataFlags::REALTIME);
+    optionx::mark_live_payload(tick.flags);
     tick.set_flag(optionx::MarketDataFlags::INITIALIZED);
 
     bus.notify_async(make_price_update_event("EURUSD", tick, 5));
@@ -1297,7 +1297,7 @@ TEST_F(TradeManagerTestFixture, ShutdownTest) {
     // Set tick price data so that mid_price > open_price.
     // For example, for BUY order if mid_price > 1.12335 then trade is WIN.
     tick = { 1.12350, 1.12340, 0.1, 1695483030000, 1695483031000, 0 };
-    tick.set_flag(optionx::MarketDataFlags::REALTIME);
+    optionx::mark_live_payload(tick.flags);
     tick.set_flag(optionx::MarketDataFlags::INITIALIZED);
 
     bus.notify_async(make_price_update_event("EURUSD", tick, 5));

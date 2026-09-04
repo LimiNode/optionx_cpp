@@ -202,8 +202,8 @@ Expected output includes lines like:
 ```text
 [subscribe-ticks] status=APPLIED results=1
 [status] type=TICKS symbol=BTCUSDT transport=WEBSOCKET status=READY
-[tick] symbol=BTCUSDT time_ms=... bid=... ask=... flags=REALTIME
-[bar-update] symbol=BTCUSDT timeframe=60 ... flags=REALTIME|INCOMPLETE
+[tick] symbol=BTCUSDT time_ms=... bid=... ask=... flags=LIVE_SOURCE|REALTIME
+[bar-update] symbol=BTCUSDT timeframe=60 ... flags=LIVE_SOURCE|REALTIME|INCOMPLETE
 [bar-batch] symbol=BTCUSDT timeframe=60 items=...
 ```
 

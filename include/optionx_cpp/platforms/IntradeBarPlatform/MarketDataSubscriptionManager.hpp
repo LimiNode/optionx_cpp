@@ -840,7 +840,7 @@ namespace optionx::platforms::intrade_bar {
                 auto& batch = pending_tick_batch_for(subscription, source_batch);
                 for (const auto& tick : source_batch.items) {
                     batch.items.push_back(tick);
-                    batch.items.back().set_flag(MarketDataFlags::REALTIME);
+                    mark_live_payload(batch.items.back().flags);
                 }
             }
 
@@ -1052,7 +1052,7 @@ namespace optionx::platforms::intrade_bar {
             }
 
             state.current = Bar(price, price, price, price, tick.volume, bucket_ms);
-            state.current.set_flag(MarketDataFlags::REALTIME);
+            mark_live_payload(state.current.flags);
             state.current.set_flag(MarketDataFlags::INCOMPLETE);
             state.current.set_flag(MarketDataFlags::INITIALIZED);
             state.current.set_price_type(price_type);
@@ -1074,7 +1074,7 @@ namespace optionx::platforms::intrade_bar {
             state.last_tick_time_ms = timestamp_ms;
         }
         state.current.volume += tick.volume;
-        state.current.set_flag(MarketDataFlags::REALTIME);
+        mark_live_payload(state.current.flags);
         state.current.set_flag(MarketDataFlags::INCOMPLETE);
         state.current.set_flag(MarketDataFlags::FINALIZED, false);
         state.current.set_flag(MarketDataFlags::INITIALIZED);
