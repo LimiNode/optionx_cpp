@@ -332,8 +332,9 @@ The options have these meanings:
   while a history request is in flight. Zero disables the corresponding limit.
   When either limit is exceeded, Router reports continuity `FAILED`, releases
   the queued and current live batches, disables continuity for that route, and
-  reports `LIVE`. This is an explicit loss-of-recovery fallback: live data
-  continues, but the route no longer promises historical ordering.
+  reports `DEGRADED` while live data continues. This is an explicit
+  loss-of-recovery fallback: continuity is not automatically re-enabled for
+  that route.
 - `retry.max_attempts` is the total number of attempts, including the initial
   request. `retry.initial_backoff_ms` starts a capped exponential backoff, and
   `retry.max_backoff_ms` limits it. The default is one attempt, preserving the
@@ -394,6 +395,12 @@ live stream without retry.
 `max_backfill_bars` is applied before the provider request is sent. Therefore
 continuity updates report the actual bounded `from_time_ms`, `to_time_ms`, and
 `requested_items` for the current chunk, not the original full gap.
+
+`last_bar_time_ms` is the latest delivered bar, not a continuity trust
+watermark. After any terminal unusable history operation, Router retains the
+earliest unresolved boundary. A later successful history range cannot clear
+that trust loss unless it covers the unresolved boundary; Router emits `LIVE`
+only when no unresolved boundary remains known.
 
 If a history request fails or is rejected and attempts remain, Router emits
 `RETRYING`, keeps buffered live batches, and waits for a later owner-loop

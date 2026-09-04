@@ -77,6 +77,8 @@ namespace optionx::market_data {
                 std::deque<BarDataBatch> continuity_buffer;
                 std::size_t continuity_buffered_items = 0;
                 std::uint64_t last_bar_time_ms = 0;
+                std::uint64_t verified_through_time_ms = 0;
+                std::uint64_t unverified_from_time_ms = 0;
                 std::optional<PendingContinuityRequest> continuity_retry_request;
                 std::chrono::steady_clock::time_point continuity_retry_at;
                 MarketDataSubscriptionHandle retained_cleanup_subscription;
@@ -345,6 +347,16 @@ namespace optionx::market_data {
                     BarDataBatch& batch,
                     std::uint64_t from_time_ms,
                     std::uint64_t to_time_ms);
+            static void mark_unverified_no_lock(
+                    const std::shared_ptr<Entry>& entry,
+                    std::uint64_t from_time_ms) noexcept;
+            static void record_verified_range_no_lock(
+                    const std::shared_ptr<Entry>& entry,
+                    std::uint64_t from_time_ms,
+                    std::uint64_t to_time_ms) noexcept;
+            static void record_bar_progress_no_lock(
+                    const std::shared_ptr<Entry>& entry,
+                    const std::vector<Bar>& bars) noexcept;
             static std::chrono::steady_clock::duration continuity_retry_delay(
                     const MarketDataContinuityRetryPolicy& policy,
                     std::size_t attempt) noexcept;
@@ -1444,6 +1456,61 @@ namespace optionx::market_data {
                 batch.items.end());
         }
 
+        inline void MarketDataRouterState::mark_unverified_no_lock(
+                const std::shared_ptr<Entry>& entry,
+                std::uint64_t from_time_ms) noexcept {
+            if (!entry || from_time_ms == 0) return;
+            auto& unverified_from = entry->unverified_from_time_ms;
+            if (unverified_from == 0 || from_time_ms < unverified_from) {
+                unverified_from = from_time_ms;
+            }
+        }
+
+        inline void MarketDataRouterState::record_verified_range_no_lock(
+                const std::shared_ptr<Entry>& entry,
+                std::uint64_t from_time_ms,
+                std::uint64_t to_time_ms) noexcept {
+            if (!entry || from_time_ms == 0 || to_time_ms < from_time_ms) {
+                return;
+            }
+
+            if (entry->unverified_from_time_ms != 0 &&
+                (from_time_ms > entry->unverified_from_time_ms ||
+                 to_time_ms < entry->unverified_from_time_ms)) {
+                return;
+            }
+
+            entry->verified_through_time_ms = std::max(
+                entry->verified_through_time_ms,
+                to_time_ms);
+            if (entry->unverified_from_time_ms != 0) {
+                entry->unverified_from_time_ms = 0;
+            }
+        }
+
+        inline void MarketDataRouterState::record_bar_progress_no_lock(
+                const std::shared_ptr<Entry>& entry,
+                const std::vector<Bar>& bars) noexcept {
+            if (!entry) return;
+
+            for (const auto& bar : bars) {
+                if (bar.time_ms > entry->last_bar_time_ms) {
+                    entry->last_bar_time_ms = bar.time_ms;
+                }
+
+                const bool trusted_finalized =
+                    bar.has_flag(MarketDataFlags::FINALIZED) ||
+                    (bar.has_flag(MarketDataFlags::HISTORICAL) &&
+                     !bar.has_flag(MarketDataFlags::INCOMPLETE));
+                if (trusted_finalized &&
+                    (entry->unverified_from_time_ms == 0 ||
+                     bar.time_ms < entry->unverified_from_time_ms) &&
+                    bar.time_ms > entry->verified_through_time_ms) {
+                    entry->verified_through_time_ms = bar.time_ms;
+                }
+            }
+        }
+
         inline std::chrono::steady_clock::duration
         MarketDataRouterState::continuity_retry_delay(
                 const MarketDataContinuityRetryPolicy& policy,
@@ -1610,6 +1677,23 @@ namespace optionx::market_data {
                 }
             }
 
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                const auto entry_it = m_entries.find(router_id);
+                if (entry_it == m_entries.end() ||
+                    entry_it->second->phase != EntryPhase::ACTIVE) {
+                    return;
+                }
+                if (!usable_history) {
+                    mark_unverified_no_lock(entry_it->second, from_time_ms);
+                } else if (kind == ContinuityRequestKind::GAP_BACKFILL) {
+                    record_verified_range_no_lock(
+                        entry_it->second,
+                        from_time_ms,
+                        to_time_ms);
+                }
+            }
+
             if (!usable_history) {
                 notify_continuity(
                     router_id,
@@ -1645,11 +1729,9 @@ namespace optionx::market_data {
                         !entry_it->second->release_requested;
                     if (active) {
                         subscriber = entry_it->second->subscriber.lock();
-                        for (const auto& bar : history_batch.items) {
-                            if (bar.time_ms > entry_it->second->last_bar_time_ms) {
-                                entry_it->second->last_bar_time_ms = bar.time_ms;
-                            }
-                        }
+                        record_bar_progress_no_lock(
+                            entry_it->second,
+                            history_batch.items);
                     }
                 }
                 if (active && subscriber) {
@@ -1667,6 +1749,7 @@ namespace optionx::market_data {
                 std::vector<PendingContinuityRequest> continuity_requests;
                 bool finished = false;
                 bool continuity_still_enabled = false;
+                bool continuity_verified = false;
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     const auto entry_it = m_entries.find(router_id);
@@ -1679,6 +1762,8 @@ namespace optionx::market_data {
                         entry_it->second->continuity_flushing = false;
                         continuity_still_enabled =
                             entry_it->second->continuity.enabled();
+                        continuity_verified = usable_history &&
+                            entry_it->second->unverified_from_time_ms == 0;
                         finished = true;
                     } else {
                         auto batch = std::move(
@@ -1731,14 +1816,14 @@ namespace optionx::market_data {
                             router_id,
                             make_continuity_update(
                                 subscription,
-                                usable_history
+                                continuity_verified
                                     ? MarketDataContinuityStatus::LIVE
                                     : MarketDataContinuityStatus::DEGRADED,
                                 from_time_ms,
                                 to_time_ms,
                                 requested_items,
                                 delivered_history_items,
-                                usable_history
+                                continuity_verified
                                     ? "Historical market-data continuity is ready."
                                     : "Live delivery continues without verified continuity."));
                     }
@@ -2288,14 +2373,10 @@ namespace optionx::market_data {
                             if (index > 0) {
                                 BarDataBatch prefix = routed;
                                 prefix.items.resize(index);
+                                record_bar_progress_no_lock(
+                                    entry,
+                                    prefix.items);
                                 deliveries.emplace_back(subscriber, std::move(prefix));
-                                for (std::size_t prefix_index = 0;
-                                     prefix_index < index;
-                                     ++prefix_index) {
-                                    entry->last_bar_time_ms = std::max(
-                                        entry->last_bar_time_ms,
-                                        routed.items[prefix_index].time_ms);
-                                }
                             }
 
                             routed.items.erase(
@@ -2331,11 +2412,7 @@ namespace optionx::market_data {
                 }
             }
 
-            for (const auto& bar : routed.items) {
-                if (bar.time_ms > entry->last_bar_time_ms) {
-                    entry->last_bar_time_ms = bar.time_ms;
-                }
-            }
+            record_bar_progress_no_lock(entry, routed.items);
             deliveries.emplace_back(std::move(subscriber), std::move(routed));
             return true;
         }

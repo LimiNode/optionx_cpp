@@ -332,8 +332,9 @@ auto route = router.subscribe_bars("intrade", chart, request);
   удерживаемые во время history request. Ноль отключает соответствующее
   ограничение. При превышении любого лимита Router публикует continuity
   `FAILED`, выпускает накопленные и текущий live batch, отключает continuity
-  для этого route и публикует `LIVE`. Это явный fallback с потерей обещания
-  historical ordering: live-доставка продолжается.
+  для этого route и публикует `DEGRADED`, продолжая live-доставку. Это явный
+  fallback с потерей обещания historical ordering: continuity автоматически
+  для этого route не включается.
 - `retry.max_attempts` задаёт общее количество попыток вместе с первой.
   `retry.initial_backoff_ms` включает ограниченный exponential backoff, а
   `retry.max_backoff_ms` задаёт его предел. По умолчанию выполняется одна
@@ -396,6 +397,12 @@ live data и не зацикливает запрос того же диапаз
 `max_backfill_bars` применяется до отправки provider request. Поэтому
 continuity updates содержат фактические bounded `from_time_ms`,
 `to_time_ms` и `requested_items` текущего chunk, а не исходный полный gap.
+
+`last_bar_time_ms` является последним доставленным bar, а не watermark доверия
+continuity. После любой terminal unusable history operation Router сохраняет
+самую раннюю неподтверждённую границу. Более поздний успешный history range не
+может убрать эту потерю доверия, пока не покрывает unresolved boundary; Router
+публикует `LIVE` только когда известной неподтверждённой границы не осталось.
 
 Если history request завершился ошибкой или provider его отклонил, но попытки
 ещё остались, Router публикует `RETRYING`, сохраняет накопленные live batches и

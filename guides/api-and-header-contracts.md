@@ -261,7 +261,8 @@ Contract rules:
   current timeframe bucket. `max_buffered_batches` and `max_buffered_items`
   bound live batches held during history; zero disables each limit. On buffer
   overflow Router reports continuity `FAILED`, releases the held live data,
-  disables continuity for that route, and resumes with `LIVE` delivery.
+  disables continuity for that route, and resumes with live delivery in
+  `DEGRADED`; continuity is not automatically re-enabled for that route.
 - `MarketDataContinuityOptions::retry` bounds failed history requests with a
   capped exponential backoff. Retries are scheduled by the periodic Router
   `process()` call, so no continuity timer thread is created. Buffered live
@@ -275,6 +276,11 @@ Contract rules:
 - `max_backfill_bars` applies to each individual gap request. Continuity
   telemetry reports the actual bounded `from_time_ms`, `to_time_ms`, and
   `requested_items`, rather than the original unbounded gap.
+- `last_bar_time_ms` tracks the latest delivered bar, not continuity trust.
+  After any terminal unusable history operation, Router retains the earliest
+  unresolved boundary. A later successful history range cannot clear that
+  trust loss unless it covers the unresolved boundary; `LIVE` is emitted only
+  when no unresolved boundary remains known.
 - Successful empty history is terminal: an empty prefill proceeds to live
   delivery, while an empty gap backfill reports failed recovery and releases
   buffered live data without retrying the same range.
