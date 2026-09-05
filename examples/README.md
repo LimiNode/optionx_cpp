@@ -38,8 +38,9 @@ Currently maintained examples:
   and unsubscribe commands from its own thread by stable provider ID and alias,
   while provider calls, delivery, and handle cleanup stay in one owner loop.
 - `market_data_continuity_example.cpp` demonstrates bar history prefill,
-  history-before-live ordering, timestamp-gap recovery, and route-scoped
-  continuity status events with a deterministic local provider.
+  history-before-live ordering, timestamp-gap recovery, reconnect overlap
+  recovery, and route-scoped continuity status events with a deterministic
+  local provider.
 - `trading_condition_hub_example.cpp` demonstrates routing payout, session and
   expiration-limit changes through `TradingConditionHub`, plus querying the
   merged current condition snapshot for a concrete symbol.

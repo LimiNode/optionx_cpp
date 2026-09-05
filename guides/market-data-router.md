@@ -289,6 +289,10 @@ Replay follows these exact rules:
   route. Removing the last route unbinds callbacks and discards the cache.
 - Router replay is per route. Two logical subscriptions receive updates carrying
   their own concrete provider handles.
+- A replayed invalidating status (`DISCONNECTED`, `RECONNECTING`, `FAILED`, or
+  `STOPPED`) is applied to the new route's continuity state before initial
+  prefill can start. The route remains `STALE` until a later live `READY` permits
+  initialization or recovery.
 
 This is lifecycle replay, not historical market-data recovery. Historical
 prefill and gap repair belong to `MarketDataContinuityService` and provider
@@ -317,8 +321,9 @@ auto route = router.subscribe_bars("intrade", chart, request);
 The options have these meanings:
 
 - `LIVE_ONLY` leaves live delivery unchanged. `PREFILL` requests
-  `prefill_bars` before the first live delivery. `PREFILL_AND_RECOVER` does
-  both and also repairs timestamp gaps.
+  `prefill_bars` before the first live delivery and does not repair later
+  transport or timestamp gaps. `PREFILL_AND_RECOVER` does both and keeps
+  repairing continuity after initialization.
 - `prefill_bars` is the count-based initial history depth. Router aligns the
   end of the inclusive range to the start of the current timeframe bucket and
   requests `prefill_bars` slots, so the range is `boundary - (N - 1) *
@@ -361,6 +366,19 @@ continuous prefix followed by a gap, the prefix is delivered first and only the
 suffix is held for recovery. Several queued gaps are recovered serially before
 the route emits its final `LIVE` update.
 
+If transport is lost while initial prefill is still pending, Router invalidates
+the old asynchronous completion and waits for a later `READY`. It then repeats
+the original prefill range; `process()` cannot start it while transport is still
+disconnected. This startup restart applies to both history modes because it
+preserves an unfinished initialization contract. For `PREFILL_AND_RECOVER`, a
+successful restart is followed by recovery from the original prefill boundary
+through the latest closed candle. It includes the original boundary itself
+because that may have been the open candle when transport was lost; `LIVE` is
+emitted only after the closed boundary and the outage tail are verified. Plain
+`PREFILL` remains startup-only: it repeats the original range and does not add
+outage recovery. Once its initialization has finished, later transport statuses
+do not enable recovery implicitly.
+
 With `PREFILL_AND_RECOVER`, Router compares increasing bar timestamps with the
 requested timeframe. A later bar that skips one or more expected timeframe
 buckets produces:
@@ -379,6 +397,55 @@ concrete provider handle for that route, and `from_time_ms`, `to_time_ms`,
 Implement `IMarketDataSubscriber::on_market_data_continuity()` when a chart or
 bot needs to display or record this state. These updates are separate from
 stream-level `MarketDataStatusUpdate` events such as `READY` or `DISCONNECTED`.
+
+### Recovery After Transport Loss
+
+For an initialized `PREFILL_AND_RECOVER` bar route, `DISCONNECTED`,
+`RECONNECTING`, `FAILED`, or `STOPPED` invalidates the history-to-live proof.
+Router keeps the logical route active, marks it `STALE`, and buffers subsequent
+live bars. Recovery is gated by a later `READY`; periodic `process()` calls made
+while disconnected cannot start history work. After `READY`, Router starts a
+bounded overlap recovery:
+
+```text
+transport DISCONNECTED / RECONNECTING / FAILED / STOPPED
+  -> continuity STALE
+  -> live bars buffered as LIVE_SOURCE | CATCHUP
+transport READY
+  -> historical overlap for closed timeframe slots
+  -> buffered live bars, with confirmed overlap slots removed
+  -> continuity LIVE
+```
+
+`READY` only permits recovery to start; it does not mean that a route is
+continuous again. Router keeps a trust watermark for the last contiguous
+verified finalized slot and remembers the earliest unresolved slot. History is
+requested from that unresolved boundary through the last closed candle. If the
+current candle is still dirty, Router waits for a later `process()` cycle after
+that candle closes. This avoids trusting a potentially damaged current snapshot
+merely because the transport reconnected.
+
+Reconnect history is delivered as `HISTORICAL` (it is validation/recovery
+history, not a timestamp-gap `BACKFILL`). After a successful overlap, buffered
+live snapshots for timestamps already confirmed by history are not delivered a
+second time. This narrow Router-side deduplication applies to the recovery
+boundary only; ordinary live revisions still reach consumers, which should
+upsert mutable bars by stream and `time_ms`. Providers may pad a history
+response beyond the requested interval; Router clips reconnect and gap-recovery
+payloads to the inclusive `[from_time_ms, to_time_ms]` range before validating,
+delivering, advancing progress, or deduplicating buffered live data.
+
+If reconnect history fails, is rejected, or does not cover the complete
+requested range, Router emits operation-level `FAILED`, releases buffered live
+data according to the configured safety policy, and finishes in `DEGRADED`.
+The route remains active and can continue delivering live data; it simply no
+longer claims verified continuity. This loss of trust is sticky: a later repair
+of an unrelated newer gap cannot hide the earlier missing range or emit
+`LIVE`. A later overlap recovery must cover the earliest unresolved slot through
+the current closed boundary before the trust watermark advances and `LIVE`
+returns. `DEGRADED` therefore differs from `FAILED`: the former describes the
+route after recovery could not be proved, while the latter describes one failed
+history operation.
 
 `max_backfill_bars` limits each individual provider request, not the complete
 missing interval. When a provider returns a partial but non-empty backfill,
@@ -401,6 +468,12 @@ watermark. After any terminal unusable history operation, Router retains the
 earliest unresolved boundary. A later successful history range cannot clear
 that trust loss unless it covers the unresolved boundary; Router emits `LIVE`
 only when no unresolved boundary remains known.
+
+The current completeness check assumes dense timeframe slots. Providers for
+session-based markets may need a future provider capability or explicit
+`range_complete` result before Router can distinguish a closed session from a
+missing candle. The last-closed boundary also uses the application wall clock;
+deployments with material broker-clock skew should account for that limitation.
 
 The payload flags distinguish source from delivery timing. A provider live
 payload normally starts as `LIVE_SOURCE | REALTIME`. If a route holds it in the
