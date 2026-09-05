@@ -190,14 +190,14 @@ int main() {
     provider.complete_history(make_bars({360000}));
 
     // A reconnect invalidates the route. The 420000 live snapshot is held
-    // while Router revalidates the closed 360000 and 420000 slots.
+    // while Router revalidates the closed 420000 slot.
     market_data_continuity_example_clock::now_ms = 480000ULL;
     // process() cannot start that history request before READY has been observed.
     provider.emit_status(md::MarketDataStreamStatus::DISCONNECTED);
     provider.emit_live_bar(420000, 102.0);
     router.process();
     provider.emit_status(md::MarketDataStreamStatus::READY);
-    provider.complete_history(make_bars({360000, 420000}));
+    provider.complete_history(make_bars({420000}));
 
     route.reset();
     router.shutdown();

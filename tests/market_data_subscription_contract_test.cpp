@@ -91,6 +91,15 @@ TEST(MarketDataSubscriptionHandle, BuildsTickAndBarHandlesAndReportsValidity) {
 }
 
 TEST(MarketDataContinuityStatus, ConvertsReconnectStatusesToStableText) {
+    EXPECT_EQ(
+        static_cast<int>(MarketDataContinuityStatus::FAILED),
+        6);
+    EXPECT_EQ(
+        static_cast<int>(MarketDataContinuityStatus::DEGRADED),
+        7);
+    EXPECT_EQ(
+        static_cast<int>(MarketDataContinuityStatus::STALE),
+        8);
     EXPECT_STREQ(to_str(MarketDataContinuityStatus::STALE), "STALE");
     EXPECT_STREQ(to_str(MarketDataContinuityStatus::DEGRADED), "DEGRADED");
 }
