@@ -113,8 +113,18 @@ public:
         batch->timeframe = m_active_subscription.timeframe;
         for (const auto time_ms : times) {
             batch->items.emplace_back(1.0, 2.0, 0.5, 1.5, 1.0, time_ms);
-            batch->items.back().set_flag(MarketDataFlags::REALTIME);
+            mark_live_payload(batch->items.back().flags);
         }
+        if (m_bar_callback) m_bar_callback(std::move(batch));
+    }
+
+    void emit_unscoped_live_bar(std::uint64_t time_ms) {
+        auto batch = std::make_unique<BarDataBatch>();
+        batch->type = MarketDataType::BARS;
+        batch->symbol = "EURUSD";
+        batch->timeframe = 60;
+        batch->items.emplace_back(1.0, 2.0, 0.5, 1.5, 1.0, time_ms);
+        mark_live_payload(batch->items.back().flags);
         if (m_bar_callback) m_bar_callback(std::move(batch));
     }
 
@@ -159,6 +169,24 @@ BarSequence make_history(std::initializer_list<std::uint64_t> times) {
     return sequence;
 }
 
+void expect_live_delivery(const Bar& bar, bool catchup) {
+    EXPECT_TRUE(bar.has_flag(MarketDataFlags::LIVE_SOURCE));
+    EXPECT_EQ(bar.has_flag(MarketDataFlags::REALTIME), !catchup);
+    EXPECT_EQ(bar.has_flag(MarketDataFlags::CATCHUP), catchup);
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::HISTORICAL));
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::BACKFILL));
+    EXPECT_TRUE(market_data_flags_valid(bar.flags));
+}
+
+void expect_history_delivery(const Bar& bar, bool backfill) {
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::LIVE_SOURCE));
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::REALTIME));
+    EXPECT_FALSE(bar.has_flag(MarketDataFlags::CATCHUP));
+    EXPECT_TRUE(bar.has_flag(MarketDataFlags::HISTORICAL));
+    EXPECT_EQ(bar.has_flag(MarketDataFlags::BACKFILL), backfill);
+    EXPECT_TRUE(market_data_flags_valid(bar.flags));
+}
+
 BarSubscriptionRequest continuity_request(MarketDataContinuityMode mode) {
     BarSubscriptionRequest request(
         "EURUSD",
@@ -200,9 +228,8 @@ TEST(MarketDataContinuity, PrefillDeliversHistoryBeforeBufferedLiveBars) {
     provider.complete_history(make_history({100000}));
 
     ASSERT_EQ(subscriber->bars.size(), 2U);
-    EXPECT_TRUE(subscriber->bars[0].items[0].has_flag(MarketDataFlags::HISTORICAL));
-    EXPECT_FALSE(subscriber->bars[0].items[0].has_flag(MarketDataFlags::BACKFILL));
-    EXPECT_TRUE(subscriber->bars[1].items[0].has_flag(MarketDataFlags::REALTIME));
+    expect_history_delivery(subscriber->bars[0].items[0], false);
+    expect_live_delivery(subscriber->bars[1].items[0], true);
     ASSERT_EQ(subscriber->continuity.size(), 2U);
     EXPECT_EQ(subscriber->continuity[0].status, MarketDataContinuityStatus::PREFILLING);
     EXPECT_EQ(subscriber->continuity[1].status, MarketDataContinuityStatus::LIVE);
@@ -212,6 +239,37 @@ TEST(MarketDataContinuity, PrefillDeliversHistoryBeforeBufferedLiveBars) {
     EXPECT_EQ(
         subscriber->continuity[1].subscription.id,
         route.provider_subscription().id);
+}
+
+TEST(MarketDataContinuity, DeliveryFlagsAreScopedToEachRoute) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto realtime_subscriber = std::make_shared<RecordingSubscriber>();
+    auto catchup_subscriber = std::make_shared<RecordingSubscriber>();
+
+    const auto live_route = router.subscribe_bars(
+        provider,
+        realtime_subscriber,
+        BarSubscriptionRequest("EURUSD", 60, BarPriceSource::MID));
+    const auto catchup_route = router.subscribe_bars(
+        provider,
+        catchup_subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL));
+    ASSERT_TRUE(live_route.active());
+    ASSERT_TRUE(catchup_route.active());
+
+    provider.emit_unscoped_live_bar(200000);
+    ASSERT_EQ(realtime_subscriber->bars.size(), 1U);
+    EXPECT_TRUE(realtime_subscriber->bars.front().items.front().has_flag(
+        MarketDataFlags::REALTIME));
+    EXPECT_FALSE(realtime_subscriber->bars.front().items.front().has_flag(
+        MarketDataFlags::CATCHUP));
+    EXPECT_TRUE(catchup_subscriber->bars.empty());
+
+    provider.complete_history(make_history({100000}));
+    ASSERT_EQ(catchup_subscriber->bars.size(), 2U);
+    expect_history_delivery(catchup_subscriber->bars[0].items.front(), false);
+    expect_live_delivery(catchup_subscriber->bars[1].items.front(), true);
 }
 
 TEST(MarketDataContinuity, RecoversTimestampGapBeforeReleasingLiveBatch) {
@@ -237,8 +295,8 @@ TEST(MarketDataContinuity, RecoversTimestampGapBeforeReleasingLiveBatch) {
     provider.complete_history(make_history({160000, 220000}));
 
     ASSERT_EQ(subscriber->bars.size(), 3U);
-    EXPECT_TRUE(subscriber->bars[1].items[0].has_flag(MarketDataFlags::BACKFILL));
-    EXPECT_TRUE(subscriber->bars[2].items[0].has_flag(MarketDataFlags::REALTIME));
+    expect_history_delivery(subscriber->bars[1].items[0], true);
+    expect_live_delivery(subscriber->bars[2].items[0], true);
     ASSERT_EQ(subscriber->continuity.size(), 5U);
     EXPECT_EQ(subscriber->continuity.back().status, MarketDataContinuityStatus::LIVE);
     EXPECT_EQ(
@@ -475,9 +533,10 @@ TEST(MarketDataContinuity, ChecksGapsInsideBufferedBatchesInOrder) {
     ASSERT_EQ(subscriber->bars.size(), 6U);
     EXPECT_EQ(subscriber->bars[4].items[0].time_ms, 340000U);
     EXPECT_EQ(subscriber->bars[5].items[0].time_ms, 400000U);
-    EXPECT_TRUE(subscriber->bars[2].items[0].has_flag(MarketDataFlags::BACKFILL));
-    EXPECT_TRUE(subscriber->bars[3].items[0].has_flag(MarketDataFlags::REALTIME));
-    EXPECT_TRUE(subscriber->bars[4].items[0].has_flag(MarketDataFlags::BACKFILL));
+    expect_history_delivery(subscriber->bars[2].items[0], true);
+    expect_live_delivery(subscriber->bars[3].items[0], true);
+    expect_history_delivery(subscriber->bars[4].items[0], true);
+    expect_live_delivery(subscriber->bars[5].items[0], true);
 }
 
 TEST(MarketDataContinuity, EmptyBackfillFailsOnceAndReleasesLiveBatch) {
@@ -501,6 +560,7 @@ TEST(MarketDataContinuity, EmptyBackfillFailsOnceAndReleasesLiveBatch) {
     ASSERT_EQ(provider.history_requests.size(), 2U);
     ASSERT_EQ(subscriber->bars.size(), 2U);
     EXPECT_EQ(subscriber->bars.back().items.front().time_ms, 280000U);
+    expect_live_delivery(subscriber->bars.back().items.front(), true);
     ASSERT_EQ(subscriber->continuity.size(), 6U);
     EXPECT_EQ(subscriber->continuity[4].status, MarketDataContinuityStatus::FAILED);
     EXPECT_EQ(subscriber->continuity[5].status, MarketDataContinuityStatus::DEGRADED);
@@ -521,15 +581,15 @@ TEST(MarketDataContinuity, HistoryFailureKeepsLiveRouteUsable) {
     provider.fail_history("history endpoint unavailable");
 
     ASSERT_EQ(subscriber->bars.size(), 1U);
-    EXPECT_TRUE(subscriber->bars.front().items.front().has_flag(
-        MarketDataFlags::REALTIME));
+    expect_live_delivery(subscriber->bars.front().items.front(), true);
     ASSERT_EQ(subscriber->continuity.size(), 3U);
     EXPECT_EQ(subscriber->continuity[1].status, MarketDataContinuityStatus::FAILED);
     EXPECT_EQ(subscriber->continuity[1].message, "history endpoint unavailable");
     EXPECT_EQ(subscriber->continuity[2].status, MarketDataContinuityStatus::DEGRADED);
 
     provider.emit_live_bar(260000);
-    EXPECT_EQ(subscriber->bars.size(), 2U);
+    ASSERT_EQ(subscriber->bars.size(), 2U);
+    expect_live_delivery(subscriber->bars.back().items.front(), false);
 }
 
 TEST(MarketDataContinuity, ShutdownWaitsForDeferredHistoryOperation) {
@@ -659,8 +719,8 @@ TEST(MarketDataContinuity, RetriesFailedHistoryBeforeReleasingLive) {
     provider.complete_history(make_history({100000}));
 
     ASSERT_EQ(subscriber->bars.size(), 2U);
-    EXPECT_TRUE(subscriber->bars[0].items[0].has_flag(MarketDataFlags::HISTORICAL));
-    EXPECT_TRUE(subscriber->bars[1].items[0].has_flag(MarketDataFlags::REALTIME));
+    expect_history_delivery(subscriber->bars[0].items[0], false);
+    expect_live_delivery(subscriber->bars[1].items[0], true);
     ASSERT_EQ(subscriber->continuity.size(), 3U);
     EXPECT_EQ(
         subscriber->continuity.back().status,
@@ -692,8 +752,8 @@ TEST(MarketDataContinuity, RetriesRejectedHistoryBeforeReleasingLive) {
     provider.complete_history(make_history({100000}));
 
     ASSERT_EQ(subscriber->bars.size(), 2U);
-    EXPECT_TRUE(subscriber->bars[0].items[0].has_flag(MarketDataFlags::HISTORICAL));
-    EXPECT_TRUE(subscriber->bars[1].items[0].has_flag(MarketDataFlags::REALTIME));
+    expect_history_delivery(subscriber->bars[0].items[0], false);
+    expect_live_delivery(subscriber->bars[1].items[0], true);
     EXPECT_EQ(
         subscriber->continuity.back().status,
         MarketDataContinuityStatus::LIVE);
@@ -778,8 +838,7 @@ TEST(MarketDataContinuity, ExhaustedRetriesReleaseBufferedLiveOnce) {
     provider.fail_history("second failure");
 
     ASSERT_EQ(subscriber->bars.size(), 1U);
-    EXPECT_TRUE(subscriber->bars.front().items.front().has_flag(
-        MarketDataFlags::REALTIME));
+    expect_live_delivery(subscriber->bars.front().items.front(), true);
     ASSERT_EQ(subscriber->continuity.size(), 4U);
     EXPECT_EQ(
         subscriber->continuity[2].status,
@@ -829,6 +888,8 @@ TEST(MarketDataContinuity, BufferLimitReleasesLiveDataAndDisablesContinuity) {
     ASSERT_EQ(subscriber->bars.size(), 2U);
     EXPECT_EQ(subscriber->bars[0].items.front().time_ms, 200000U);
     EXPECT_EQ(subscriber->bars[1].items.front().time_ms, 260000U);
+    expect_live_delivery(subscriber->bars[0].items.front(), true);
+    expect_live_delivery(subscriber->bars[1].items.front(), true);
     ASSERT_EQ(subscriber->continuity.size(), 3U);
     EXPECT_EQ(
         subscriber->continuity[1].status,
@@ -843,6 +904,7 @@ TEST(MarketDataContinuity, BufferLimitReleasesLiveDataAndDisablesContinuity) {
     provider.emit_live_bar(320000);
     ASSERT_EQ(subscriber->bars.size(), 3U);
     EXPECT_EQ(subscriber->bars.back().items.front().time_ms, 320000U);
+    expect_live_delivery(subscriber->bars.back().items.front(), false);
 }
 
 TEST(MarketDataContinuity, UnsubscribeDuringHistoryDropsLateDelivery) {

@@ -2173,6 +2173,9 @@ namespace optionx::market_data {
                     return batch_matches_stream(data, stream);
                 },
                 [](IMarketDataSubscriber& subscriber, TickDataBatch& data) {
+                    for (auto& tick : data.items) {
+                        mark_live_payload(tick.flags);
+                    }
                     subscriber.on_tick_data(data);
                 });
         }
@@ -2227,6 +2230,9 @@ namespace optionx::market_data {
                     std::shared_ptr<IMarketDataSubscriber>,
                     MarketDataContinuityUpdate>>& continuity_deliveries,
                 bool push_front) {
+            for (auto& bar : batch.items) {
+                mark_live_payload(bar.flags, true);
+            }
             const auto batch_items = batch.items.size();
             const auto& continuity = entry->continuity;
             const bool exceeds_batch_limit =
@@ -2308,6 +2314,10 @@ namespace optionx::market_data {
             auto routed = batch;
             routed.subscription = entry->control->provider_subscription;
             if (routed.items.empty()) return false;
+
+            for (auto& bar : routed.items) {
+                mark_live_payload(bar.flags, process_buffered);
+            }
 
             if (entry->continuity.enabled() && !process_buffered &&
                 (!entry->continuity_ready || entry->continuity_flushing)) {

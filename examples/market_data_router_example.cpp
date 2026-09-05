@@ -68,7 +68,7 @@ public:
         batch->symbol = subscription.symbol;
         batch->price_digits = subscription.symbol == "BTCUSDT" ? 2 : 5;
         batch->items.emplace_back(bid, ask, 0.0, 1.0, 1783028778697ULL, 0, 0);
-        batch->items.back().set_flag(optionx::MarketDataFlags::REALTIME);
+        optionx::mark_live_payload(batch->items.back().flags);
         if (m_ticks_callback) m_ticks_callback(std::move(batch));
     }
 

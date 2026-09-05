@@ -348,7 +348,7 @@ For initial prefill, the delivery order is:
 SUBSCRIBED
   -> continuity PREFILLING
   -> historical BarDataBatch (HISTORICAL)
-  -> buffered live BarDataBatch (REALTIME)
+  -> buffered live BarDataBatch (LIVE_SOURCE | CATCHUP)
   -> continuity LIVE
 ```
 
@@ -401,6 +401,31 @@ watermark. After any terminal unusable history operation, Router retains the
 earliest unresolved boundary. A later successful history range cannot clear
 that trust loss unless it covers the unresolved boundary; Router emits `LIVE`
 only when no unresolved boundary remains known.
+
+The payload flags distinguish source from delivery timing. A provider live
+payload normally starts as `LIVE_SOURCE | REALTIME`. If a route holds it in the
+continuity buffer, Router changes only that route's copy to
+`LIVE_SOURCE | CATCHUP` before storing it. History conversion clears all live
+delivery flags and sets `HISTORICAL`, plus `BACKFILL` for gap recovery. Thus a
+buffered `12:05` `INCOMPLETE` bar remains useful for rebuilding a time series,
+but a bot can avoid treating it as a current-edge trading trigger:
+
+```cpp
+void on_bar_data(const md::BarDataBatch& batch) override {
+    for (const auto& bar : batch.items) {
+        update_series(bar); // Upsert revisions, including CATCHUP payloads.
+        if (!bar.has_flag(optionx::MarketDataFlags::REALTIME)) continue;
+        evaluate_current_edge(bar);
+    }
+}
+```
+
+`REALTIME` is a logical delivery-mode marker, not a measured age threshold.
+`received_ms` and `time_ms` remain the appropriate values for latency and
+freshness calculations. `MarketDataContinuityStatus::LIVE` is route-level
+state: it says that Router knows of no unresolved history range for the route.
+It does not override the per-payload `CATCHUP` marker and does not make an old
+broker timestamp current.
 
 If a history request fails or is rejected and attempts remain, Router emits
 `RETRYING`, keeps buffered live batches, and waits for a later owner-loop

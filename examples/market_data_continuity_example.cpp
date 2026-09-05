@@ -63,7 +63,7 @@ public:
         batch->symbol = m_subscription.symbol;
         batch->timeframe = m_subscription.timeframe;
         batch->items.emplace_back(close - 0.1, close + 0.2, close - 0.3, close, 1.0, time_ms);
-        batch->items.back().set_flag(optionx::MarketDataFlags::REALTIME);
+        optionx::mark_live_payload(batch->items.back().flags);
         if (on_bar_data()) on_bar_data()(std::move(batch));
     }
 
@@ -100,10 +100,17 @@ public:
                     ? "backfill"
                     : "prefill";
             }
+            const char* delivery =
+                bar.has_flag(optionx::MarketDataFlags::CATCHUP)
+                ? "catchup"
+                : bar.has_flag(optionx::MarketDataFlags::REALTIME)
+                ? "realtime"
+                : "history";
             std::cout << "chart bar: route provider subscription #"
                       << batch.subscription.id
                       << ", t=" << bar.time_ms
-                      << ", source=" << source << '\n';
+                      << ", source=" << source
+                      << ", delivery=" << delivery << '\n';
         }
     }
 

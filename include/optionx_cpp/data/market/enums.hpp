@@ -11,15 +11,17 @@
 namespace optionx {
 
     /// \enum MarketDataFlags
-    /// \brief Flags describing how a tick or bar entered the market-data pipeline.
+    /// \brief Flags describing origin, delivery mode, and state of market data.
     enum class MarketDataFlags : std::uint32_t {
         NONE       = 0,       ///< No market-data flags are set.
-        REALTIME   = 1u << 16,///< Payload came from a live stream or polling source.
+        LIVE_SOURCE = 1u << 16,///< Payload came from a live stream or polling source.
         HISTORICAL = 1u << 17,///< Payload came from a history request.
         BACKFILL   = 1u << 18,///< Payload was loaded to fill a stream gap.
         INCOMPLETE = 1u << 19,///< Bar payload is still forming.
         FINALIZED  = 1u << 20,///< Payload is complete and will not be updated.
-        INITIALIZED = 1u << 21 ///< Payload has enough fields to be consumed.
+        INITIALIZED = 1u << 21,///< Payload has enough fields to be consumed.
+        REALTIME   = 1u << 22,///< Live-source payload delivered from the current live edge.
+        CATCHUP    = 1u << 23 ///< Live-source payload replayed from a continuity backlog.
     };
 
     /// \enum MarketPriceType
@@ -100,6 +102,52 @@ namespace optionx {
         flags = set_flag(flags, flag, value);
     }
 
+    /// \brief Marks a payload as live-source data and normalizes its delivery mode.
+    /// \param flags Payload flags to update.
+    /// \param catchup Whether the payload is being replayed from a continuity backlog.
+    ///
+    /// This preserves bar lifecycle flags such as INCOMPLETE and FINALIZED while
+    /// making origin and delivery mode mutually consistent.
+    inline void mark_live_payload(
+            std::uint32_t& flags,
+            bool catchup = false) noexcept {
+        set_flag_in_place(flags, MarketDataFlags::LIVE_SOURCE);
+        set_flag_in_place(flags, MarketDataFlags::HISTORICAL, false);
+        set_flag_in_place(flags, MarketDataFlags::BACKFILL, false);
+        set_flag_in_place(flags, MarketDataFlags::REALTIME, !catchup);
+        set_flag_in_place(flags, MarketDataFlags::CATCHUP, catchup);
+    }
+
+    /// \brief Marks a payload as data returned by a history request.
+    /// \param flags Payload flags to update.
+    /// \param backfill Whether the history request repairs a stream gap.
+    inline void mark_historical_payload(
+            std::uint32_t& flags,
+            bool backfill = false) noexcept {
+        set_flag_in_place(flags, MarketDataFlags::LIVE_SOURCE, false);
+        set_flag_in_place(flags, MarketDataFlags::HISTORICAL);
+        set_flag_in_place(flags, MarketDataFlags::BACKFILL, backfill);
+        set_flag_in_place(flags, MarketDataFlags::REALTIME, false);
+        set_flag_in_place(flags, MarketDataFlags::CATCHUP, false);
+    }
+
+    /// \brief Checks the origin and delivery-mode invariants of market data flags.
+    /// \param flags Bitmask containing MarketDataFlags and an encoded price type.
+    /// \return True when origin, delivery, and backfill flags are consistent.
+    [[nodiscard]] inline bool market_data_flags_valid(
+            std::uint32_t flags) noexcept {
+        const bool live_source = has_flag(flags, MarketDataFlags::LIVE_SOURCE);
+        const bool historical = has_flag(flags, MarketDataFlags::HISTORICAL);
+        const bool backfill = has_flag(flags, MarketDataFlags::BACKFILL);
+        const bool realtime = has_flag(flags, MarketDataFlags::REALTIME);
+        const bool catchup = has_flag(flags, MarketDataFlags::CATCHUP);
+        return !(live_source && historical) &&
+            !(realtime && catchup) &&
+            (!realtime || live_source) &&
+            (!catchup || live_source) &&
+            (!backfill || historical);
+    }
+
     /// \brief Reads the encoded market price type from a flags value.
     [[nodiscard]] inline MarketPriceType market_price_type(std::uint32_t flags) noexcept {
         return static_cast<MarketPriceType>(
@@ -133,9 +181,11 @@ namespace optionx {
             result += name;
         };
 
-        if (has_flag(flags, MarketDataFlags::REALTIME)) append("REALTIME");
+        if (has_flag(flags, MarketDataFlags::LIVE_SOURCE)) append("LIVE_SOURCE");
         if (has_flag(flags, MarketDataFlags::HISTORICAL)) append("HISTORICAL");
         if (has_flag(flags, MarketDataFlags::BACKFILL)) append("BACKFILL");
+        if (has_flag(flags, MarketDataFlags::REALTIME)) append("REALTIME");
+        if (has_flag(flags, MarketDataFlags::CATCHUP)) append("CATCHUP");
         if (has_flag(flags, MarketDataFlags::INCOMPLETE)) append("INCOMPLETE");
         if (has_flag(flags, MarketDataFlags::FINALIZED)) append("FINALIZED");
         if (has_flag(flags, MarketDataFlags::INITIALIZED)) append("INITIALIZED");

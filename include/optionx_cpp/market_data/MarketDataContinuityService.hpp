@@ -162,8 +162,7 @@ namespace optionx::market_data {
                     : sequence.price_source);
 
             for (auto& bar : batch->items) {
-                bar.set_flag(MarketDataFlags::HISTORICAL);
-                bar.set_flag(MarketDataFlags::BACKFILL, backfill_marks);
+                mark_historical_payload(bar.flags, backfill_marks);
                 bar.set_price_type(price_type);
             }
 

@@ -205,6 +205,9 @@ namespace optionx::market_data {
 
     inline void MarketDataHub::publish_ticks(std::unique_ptr<TickDataBatch> batch) {
         if (!batch) return;
+        for (auto& tick : batch->items) {
+            mark_live_payload(tick.flags);
+        }
         const auto subscribers = live_subscribers();
         for (const auto& subscriber : subscribers) {
             subscriber->on_tick_data(*batch);
@@ -213,6 +216,9 @@ namespace optionx::market_data {
 
     inline void MarketDataHub::publish_bars(std::unique_ptr<BarDataBatch> batch) {
         if (!batch) return;
+        for (auto& bar : batch->items) {
+            mark_live_payload(bar.flags);
+        }
         const auto subscribers = live_subscribers();
         for (const auto& subscriber : subscribers) {
             subscriber->on_bar_data(*batch);

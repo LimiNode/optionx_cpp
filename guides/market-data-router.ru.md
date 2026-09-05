@@ -349,7 +349,7 @@ auto route = router.subscribe_bars("intrade", chart, request);
 SUBSCRIBED
   -> continuity PREFILLING
   -> исторический BarDataBatch (HISTORICAL)
-  -> накопленный live BarDataBatch (REALTIME)
+  -> накопленный live BarDataBatch (LIVE_SOURCE | CATCHUP)
   -> continuity LIVE
 ```
 
@@ -403,6 +403,31 @@ continuity. После любой terminal unusable history operation Router с�
 самую раннюю неподтверждённую границу. Более поздний успешный history range не
 может убрать эту потерю доверия, пока не покрывает unresolved boundary; Router
 публикует `LIVE` только когда известной неподтверждённой границы не осталось.
+
+Флаги payload разделяют источник и режим доставки. Обычный live payload от
+provider начинается как `LIVE_SOURCE | REALTIME`. Если конкретный route
+удерживает его в continuity buffer, Router меняет только копию этого route на
+`LIVE_SOURCE | CATCHUP` перед сохранением. History conversion очищает live
+delivery flags и устанавливает `HISTORICAL`, а для gap recovery ещё и
+`BACKFILL`. Поэтому buffered bar `12:05` с `INCOMPLETE` полезен для построения
+временного ряда, но бот может не считать его текущим trading trigger:
+
+```cpp
+void on_bar_data(const md::BarDataBatch& batch) override {
+    for (const auto& bar : batch.items) {
+        update_series(bar); // Upsert revisions, включая CATCHUP payloads.
+        if (!bar.has_flag(optionx::MarketDataFlags::REALTIME)) continue;
+        evaluate_current_edge(bar);
+    }
+}
+```
+
+`REALTIME` — это логический маркер режима доставки, а не измерение возраста в
+миллисекундах. Для расчёта latency и freshness используйте `received_ms` и
+`time_ms`. `MarketDataContinuityStatus::LIVE` относится ко всему route и
+означает, что Router не знает ни одного unresolved history range этого route.
+Этот статус не отменяет per-payload маркер `CATCHUP` и не превращает старый
+broker timestamp в текущий.
 
 Если history request завершился ошибкой или provider его отклонил, но попытки
 ещё остались, Router публикует `RETRYING`, сохраняет накопленные live batches и

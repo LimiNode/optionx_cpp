@@ -110,7 +110,7 @@ std::unique_ptr<optionx::market_data::TickDataBatch> make_tick_batch() {
         1783028778697ULL,
         0,
         0));
-    batch->items.back().set_flag(optionx::MarketDataFlags::REALTIME);
+    optionx::mark_live_payload(batch->items.back().flags);
     return batch;
 }
 
@@ -127,7 +127,7 @@ std::unique_ptr<optionx::market_data::BarDataBatch> make_bar_batch() {
         61521.34,
         10.0,
         1783028760000ULL));
-    batch->items.back().set_flag(optionx::MarketDataFlags::REALTIME);
+    optionx::mark_live_payload(batch->items.back().flags);
     batch->items.back().set_flag(optionx::MarketDataFlags::INCOMPLETE);
     return batch;
 }
