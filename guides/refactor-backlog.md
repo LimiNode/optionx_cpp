@@ -5,25 +5,22 @@ series. Keep it short and remove items once they are handled.
 
 ## Next PR Candidates
 
-- Add `MarketDataRouter` above provider subscriptions. The router should own
-  provider handles, expose move-only RAII subscription handles, correlate
-  statuses with concrete subscriptions, and replay the current stream status
-  to late subscriptions.
-- Add `MarketDataSubscriberBase` as optional convenience API for bots and
-  charts that subscribe from their own methods and retain router handles.
-- Publish real broker/platform payout, expiry, amount-limit, and market-open
-  changes through `TradingConditionUpdate` instead of using the hub only as a
-  manually populated snapshot cache.
+- Extend market-data continuity beyond the first bar-only route implementation:
+  define provider support for tick history, retries, and a documented
+  history-to-live boundary for each provider.
+- Add robust gap recovery policy with provider-aware retry/backoff, sequence or
+  timestamp validation, and an explicit deduplication policy for overlapping
+  historical, backfill, and live bar snapshots.
+- Add route-scoped continuity metrics and failure visibility for applications
+  that need to prove that a chart or strategy has a complete time series.
 - Add a fuller CMake package/export story for consumers that do not use the
   project as a direct submodule. The current `optionx_cpp::optionx_cpp`
   interface target covers build-tree/submodule consumption.
 
 ## Explicitly Deferred
 
-- Finalize live bars from platform time/process even when no tick arrives for
-  the next bar. Tick-driven aggregation alone cannot close an idle stream.
-- Remove `SingleTick` from the internal price event path after all remaining
-  parser/manager consumers use `TickUpdateBatch` directly.
+- Add a generic tick-history provider contract. Current continuity support is
+  intentionally bar-first because providers expose bar history only.
 - Continue generation-safe lifecycle hardening for legacy bridge transports
   when their behavior is changed; do not mix that work into market-data API
   PRs.

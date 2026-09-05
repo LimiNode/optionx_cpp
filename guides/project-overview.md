@@ -36,7 +36,7 @@ node lifecycles. See [English](lifecycle-stack.md) or
 | `optionx_cpp/lifecycle.hpp` | `ILifecycleModule`, `LifecycleStack` | Для необязательной общей обработки и staged shutdown модулей |
 | `optionx_cpp/data.hpp` | DTO, events, enums, account/symbol/tick/bar/trading data | Для API boundary и сообщений |
 | `optionx_cpp/components.hpp` | `BaseComponent`, HTTP и trade execution base classes | Для нового manager/component |
-| `optionx_cpp/market_data.hpp` | Market-data provider role, subscription DTOs and statuses | Для live tick/bar subscriptions и history API contracts |
+| `optionx_cpp/market_data.hpp` | Provider role, subscription DTOs, Router, subscriber base and continuity | Для live tick/bar subscriptions, history prefill and routed delivery |
 | `optionx_cpp/platforms.hpp` | Base platform и Intrade Bar platform | Для клиентского кода платформ |
 | `optionx_cpp/storages.hpp` | `ServiceSessionDB` | Для session storage |
 | `optionx_cpp/bridges.hpp` | `BaseBridge` | Для внешних bridge integrations |
@@ -51,7 +51,7 @@ node lifecycles. See [English](lifecycle-stack.md) or
 | Platform facade | `optionx::platforms`, `include/optionx_cpp/platforms` | Публичный API платформы: connect, auth, trades, account info |
 | Components/managers | `optionx::components`, platform subnamespaces | Lifecycle-компоненты, которые получают events и выполняют работу |
 | Trading data | `optionx`, `include/optionx_cpp/data/trading` | `TradeRequest`, `TradeResult`, enums, signals |
-| Market data | `optionx::market_data`, `include/optionx_cpp/market_data`, `data/bars`, `data/ticks`, `data/symbol` | Live subscriptions, history requests/results, ticks, bars and symbols |
+| Market data | `optionx::market_data`, `include/optionx_cpp/market_data`, `data/bars`, `data/ticks`, `data/symbol` | Provider subscriptions, routed delivery, history prefill/recovery, ticks, bars and symbols |
 | Events | `optionx::events`, `include/optionx_cpp/data/events` | Pub-sub контракты между components |
 | Infrastructure | `optionx::utils` | EventBus, tasks, crypto, ids, HTTP helpers |
 | Storage | `optionx::storage` | AES + mdbx session storage |
@@ -79,7 +79,8 @@ node lifecycles. See [English](lifecycle-stack.md) or
    implementations. Concrete platforms may use HTTP polling, websockets, or
    both internally; public subscription callbacks report desired-state
    acceptance, while physical stream readiness is reported through status
-   callbacks.
+   callbacks. `MarketDataRouter` adds provider selection, route ownership,
+   subscription-scoped delivery, and optional bar history continuity.
 8. `shutdown()` останавливает tasks, вызывает shutdown у components, затем
    draining event bus.
 

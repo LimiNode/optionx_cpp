@@ -10,10 +10,13 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
+#include <cstddef>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -22,11 +25,14 @@
 
 #include "lifecycle.hpp"
 #include "utils/fixed_point.hpp"
+#include "utils/time_utils.hpp"
 #include "data/market.hpp"
 #include "data/bars.hpp"
 #include "data/ticks.hpp"
 #include "market_data/enums.hpp"
+#include "market_data/MarketDataContinuityOptions.hpp"
 #include "market_data/MarketDataSubscription.hpp"
+#include "market_data/MarketDataContinuity.hpp"
 #include "market_data/MarketDataBatch.hpp"
 #include "market_data/BaseMarketDataProvider.hpp"
 #include "market_data/MarketDataContinuityService.hpp"

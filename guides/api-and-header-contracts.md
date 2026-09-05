@@ -171,6 +171,7 @@ Market-data APIs are split into DTO/data types and a provider role:
   `MarketDataSubscriptionHandle`, `MarketDataSubscriptionResult`,
   `MarketDataBatch<T>`, `MarketDataHub`, `MarketDataRouter`,
   `MarketDataSubscriberBase`, `IMarketDataSubscriber`, and
+  `MarketDataContinuityOptions`, `MarketDataContinuityUpdate`, and
   `MarketDataContinuityService`.
 
 Contract rules:
@@ -252,6 +253,47 @@ Contract rules:
 - `MarketDataContinuityService` is the thin helper for routing recovered history
   into the same bar batch pipeline. It marks payload bars as
   `HISTORICAL` and, for gap recovery, `BACKFILL`.
+- `BarSubscriptionRequest::continuity` enables Router-owned bar prefill and
+  optional timestamp-gap recovery. Router buffers live batches until the
+  corresponding history operation completes and reports route-scoped progress
+  through `IMarketDataSubscriber::on_market_data_continuity()`.
+- `prefill_bars` requests inclusive timeframe slots ending at the start of the
+  current timeframe bucket. `max_buffered_batches` and `max_buffered_items`
+  bound live batches held during history; zero disables each limit. On buffer
+  overflow Router reports continuity `FAILED`, releases the held live data,
+  disables continuity for that route, and resumes with live delivery in
+  `DEGRADED`; continuity is not automatically re-enabled for that route.
+- `MarketDataContinuityOptions::retry` bounds failed history requests with a
+  capped exponential backoff. Retries are scheduled by the periodic Router
+  `process()` call, so no continuity timer thread is created. Buffered live
+  batches remain withheld while retrying.
+- Each bounded gap-history response must cover every expected timeframe slot in
+  the actual requested range. Router clips provider payloads to that range
+  before validating it; a non-empty partial response is not delivered and does
+  not advance the route's continuity watermark. Router reports `FAILED`,
+  releases buffered live data, and ends in `DEGRADED` while live delivery
+  continues.
+- `max_backfill_bars` applies to each individual gap request. Continuity
+  telemetry reports the actual bounded `from_time_ms`, `to_time_ms`, and
+  `requested_items`, rather than the original unbounded gap.
+- `last_bar_time_ms` tracks the latest delivered bar, not continuity trust.
+  After any terminal unusable history operation, Router retains the earliest
+  unresolved boundary. A later successful history range cannot clear that
+  trust loss unless it covers the unresolved boundary; `LIVE` is emitted only
+  when no unresolved boundary remains known.
+- Successful empty history is terminal: an empty prefill proceeds to live
+  delivery, while an empty gap backfill reports failed recovery and releases
+  buffered live data without retrying the same range.
+- Router preserves provider bar revisions and leaves timestamp upsert or
+  deduplication to the consumer. A chart or storage component should upsert by
+  stream and `time_ms` when it needs one current candle value.
+- Continuity updates carry the concrete provider subscription handle and must
+  not be confused with stream-level `MarketDataStatusUpdate`. History failure
+  does not terminate the live route: Router reports `FAILED`, releases buffered
+  live batches, and ends in `DEGRADED` after the retry budget is exhausted.
+- Generic history continuity is currently defined for bars only. Tick history
+  remains a separate provider contract. Router does not apply a universal
+  timestamp deduplication policy; consumers decide how to upsert revisions.
 
 `MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 
@@ -359,7 +401,9 @@ Intrade Bar publishes condition snapshots for every supported symbol/option-type
 scope after the account context becomes known. `TradingConditionManager` also
 re-evaluates the time-dependent session, amount, open-trade and sprint-duration
 limits from the same `AccountInfoData` model used to validate trade requests.
-Only scopes whose values changed are emitted.
+Only scopes whose values changed are emitted. During platform shutdown it emits
+one final `tradable=false` patch for each cached scope before clearing the
+manager, which prevents long-lived hubs from retaining stale availability.
 
 Intrade Bar intentionally leaves `TradingConditionUpdate::payout` empty. Its
 payout model depends on the concrete trade amount and duration, but those values

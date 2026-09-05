@@ -5,6 +5,8 @@
 /// \file MarketDataSubscription.hpp
 /// \brief Defines market-data subscription request, handle, and result DTOs.
 
+#include "MarketDataContinuityOptions.hpp"
+
 namespace optionx::market_data {
 
     /// \brief Runtime identifier of a market-data provider instance.
@@ -55,6 +57,7 @@ namespace optionx::market_data {
         BarTimeframe timeframe = 0; ///< Bar timeframe in seconds; values <= 0 are invalid.
         BarPriceSource price_source = BarPriceSource::MID; ///< Price source for bars.
         MarketDataTransport transport = MarketDataTransport::AUTO; ///< Preferred transport.
+        MarketDataContinuityOptions continuity; ///< Optional history prefill and gap recovery.
 
         /// \brief Default constructor.
         BarSubscriptionRequest() = default;
@@ -64,20 +67,23 @@ namespace optionx::market_data {
         /// \param timeframe Bar timeframe in seconds.
         /// \param price_source Price stream used to build OHLC values.
         /// \param transport Preferred transport for live data.
+        /// \param continuity Optional history prefill and gap recovery policy.
         BarSubscriptionRequest(
                 std::string symbol,
                 BarTimeframe timeframe,
                 BarPriceSource price_source = BarPriceSource::MID,
-                MarketDataTransport transport = MarketDataTransport::AUTO)
+                MarketDataTransport transport = MarketDataTransport::AUTO,
+                MarketDataContinuityOptions continuity = {})
                 : symbol(std::move(symbol)),
                   timeframe(timeframe),
                   price_source(price_source),
-                  transport(transport) {}
+                  transport(transport),
+                  continuity(continuity) {}
 
         /// \brief Returns true when the request describes a valid live bar stream.
         /// \return True when symbol is not empty and timeframe is positive.
         bool valid() const {
-            return !symbol.empty() && timeframe > 0;
+            return !symbol.empty() && timeframe > 0 && continuity.valid();
         }
     };
 

@@ -198,6 +198,14 @@ jobs:
           ./build-linux/market_data_router_test --gtest_brief=1
           ./build-linux/market_data_router_example
 
+      - name: Build market_data_continuity_test and example
+        run: cmake --build build-linux --target market_data_continuity_test market_data_continuity_example -j
+
+      - name: Run market_data_continuity_test and example
+        run: |
+          ./build-linux/market_data_continuity_test --gtest_brief=1
+          ./build-linux/market_data_continuity_example
+
       - name: Build market_data_subscriber_base_test and example
         run: cmake --build build-linux --target market_data_subscriber_base_test market_data_subscriber_base_example -j
 

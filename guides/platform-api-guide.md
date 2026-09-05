@@ -65,6 +65,9 @@
 snapshots after account context is known and whenever time-dependent limits
 change. Intrade payout remains absent because it depends on a concrete amount
 and duration; query that exact trade through `AccountInfoRequest`.
+When the platform shuts down, the condition manager publishes a final
+`tradable=false` patch for every cached scope before clearing its state, so a
+long-lived condition hub does not retain a stale tradable snapshot.
 
 ## `market_data::BaseMarketDataProvider`
 
@@ -121,6 +124,14 @@ Subscription rules:
   timer-based final snapshot to be delivered.
 - `MarketDataContinuityService` routes recovered historical bars into the same
   `BarDataBatch` pipeline and marks them as `HISTORICAL`/`BACKFILL`.
+- `BarSubscriptionRequest::continuity` lets `MarketDataRouter` request initial
+  bar history before live delivery and optionally recover timestamp gaps. Live
+  batches are buffered while history is in flight. Route-scoped progress is
+  reported through `IMarketDataSubscriber::on_market_data_continuity()`; it is
+  separate from stream-level `on_market_data_status()`.
+- Router continuity is currently bar-only because providers expose
+  `fetch_bar_history()` but no generic tick-history operation. See the complete
+  EN/RU Router guides and `market_data_continuity_example.cpp`.
 - `BaseMarketDataProvider` is non-copyable and non-movable so provider identity
   cannot be duplicated after handles were issued.
 - Public subscriptions describe consumer routing. Internal platform polling or
@@ -189,6 +200,13 @@ the concrete provider subscription delivered to the bot. The Router may replay
 a cached matching stream status synchronously while a new route is accepted;
 callbacks should therefore use the subscription carried by the event rather
 than assume that caller state was already updated after `subscribe_ticks()`.
+
+For a history-first bar route, set `BarSubscriptionRequest::continuity` to
+`PREFILL` or `PREFILL_AND_RECOVER`. Router delivers the initial
+`HISTORICAL` batch before buffered `REALTIME` batches. In recovery mode it emits
+route-scoped `GAP_DETECTED`/`BACKFILLING` updates, delivers recovered bars with
+`HISTORICAL | BACKFILL`, then resumes live delivery. A failed history request
+emits `FAILED` and releases buffered live data instead of killing the route.
 
 Logical release and physical provider cleanup are separate. A released route
 stops receiving events immediately. If provider `unsubscribe()` is rejected or

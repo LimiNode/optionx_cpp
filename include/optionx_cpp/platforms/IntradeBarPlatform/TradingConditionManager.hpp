@@ -76,6 +76,19 @@ namespace optionx::platforms::intrade_bar {
 
         /// \brief Clears local condition state during platform shutdown.
         void shutdown() override {
+            const auto timestamp = current_timestamp_sec();
+            for (const auto& previous : m_last_snapshots) {
+                TradingConditionUpdate retired;
+                retired.symbol = previous.symbol;
+                retired.platform_type = previous.platform_type;
+                retired.account_type = previous.account_type;
+                retired.currency = previous.currency;
+                retired.option_type = previous.option_type;
+                retired.timestamp = timestamp;
+                retired.tradable = false;
+                retired.message = "Intrade Bar account condition manager stopped.";
+                publish(retired);
+            }
             m_connected = false;
             m_last_refresh_sec = 0;
             m_last_snapshots.clear();
