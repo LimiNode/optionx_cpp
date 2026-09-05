@@ -19,9 +19,10 @@ namespace optionx::market_data {
     /// \class MarketDataContinuityService
     /// \brief Bridges historical bar requests into the live market-data batch pipeline.
     ///
-    /// The service intentionally stays thin: providers still own transport,
-    /// retry, and stream lifecycle. This helper only tags recovered payloads
-    /// as historical/backfill data and packages them into BarDataBatch objects.
+    /// The service intentionally stays thin: providers still own transport and
+    /// stream lifecycle, while Router owns route-level retry policy. This helper
+    /// only tags recovered payloads as historical/backfill data and packages
+    /// them into BarDataBatch objects.
     class MarketDataContinuityService {
     public:
         /// \brief Callback that receives a failed history request.
@@ -61,9 +62,13 @@ namespace optionx::market_data {
             const auto depth_ms = safe_multiply(
                 timeframe_ms,
                 bars > 0 ? bars - 1 : 0);
-            const auto from_ms = now_ms > depth_ms ? now_ms - depth_ms : 1U;
+            const auto aligned_now_ms = timeframe_ms > 0
+                ? now_ms - (now_ms % timeframe_ms)
+                : now_ms;
+            const auto boundary_ms = aligned_now_ms > 0 ? aligned_now_ms : now_ms;
+            const auto from_ms = boundary_ms > depth_ms ? boundary_ms - depth_ms : 1U;
 
-            return make_history_request(request, from_ms, now_ms);
+            return make_history_request(request, from_ms, boundary_ms);
         }
 
         /// \brief Builds a bounded request for a missing bar range.

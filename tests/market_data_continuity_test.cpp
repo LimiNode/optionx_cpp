@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <deque>
 #include <functional>
 #include <initializer_list>
@@ -170,6 +171,17 @@ BarSubscriptionRequest continuity_request(MarketDataContinuityMode mode) {
     return request;
 }
 
+std::size_t continuity_status_count(
+        const RecordingSubscriber& subscriber,
+        MarketDataContinuityStatus status) {
+    return static_cast<std::size_t>(std::count_if(
+        subscriber.continuity.begin(),
+        subscriber.continuity.end(),
+        [status](const MarketDataContinuityUpdate& update) {
+            return update.status == status;
+        }));
+}
+
 TEST(MarketDataContinuity, PrefillDeliversHistoryBeforeBufferedLiveBars) {
     FakeHistoryProvider provider;
     MarketDataRouter router;
@@ -237,6 +249,200 @@ TEST(MarketDataContinuity, RecoversTimestampGapBeforeReleasingLiveBatch) {
         route.provider_subscription().id);
 }
 
+TEST(MarketDataContinuity, RejectsGapHistoryMissingRangeStart) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({100000}));
+
+    provider.emit_live_bar(280000);
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    provider.complete_history(make_history({220000}));
+
+    ASSERT_EQ(subscriber->bars.size(), 2U);
+    EXPECT_EQ(subscriber->bars[0].items.front().time_ms, 100000U);
+    EXPECT_EQ(subscriber->bars[1].items.front().time_ms, 280000U);
+    EXPECT_EQ(
+        continuity_status_count(*subscriber, MarketDataContinuityStatus::LIVE),
+        1U);
+    ASSERT_GE(subscriber->continuity.size(), 2U);
+    EXPECT_EQ(
+        subscriber->continuity[subscriber->continuity.size() - 2].status,
+        MarketDataContinuityStatus::FAILED);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+}
+
+TEST(MarketDataContinuity, RejectsGapHistoryMissingRangeEnd) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({100000}));
+
+    provider.emit_live_bar(280000);
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    provider.complete_history(make_history({160000}));
+
+    ASSERT_EQ(subscriber->bars.size(), 2U);
+    EXPECT_EQ(subscriber->bars[0].items.front().time_ms, 100000U);
+    EXPECT_EQ(subscriber->bars[1].items.front().time_ms, 280000U);
+    EXPECT_EQ(
+        continuity_status_count(*subscriber, MarketDataContinuityStatus::LIVE),
+        1U);
+    ASSERT_GE(subscriber->continuity.size(), 2U);
+    EXPECT_EQ(
+        subscriber->continuity[subscriber->continuity.size() - 2].status,
+        MarketDataContinuityStatus::FAILED);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+}
+
+TEST(MarketDataContinuity, LaterGapRepairDoesNotHideEarlierMissingRange) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({100000}));
+
+    provider.emit_live_bar(280000);
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    provider.complete_history(make_history({220000}));
+    ASSERT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+
+    const auto live_status_count = continuity_status_count(
+        *subscriber,
+        MarketDataContinuityStatus::LIVE);
+    provider.emit_live_bar(400000);
+    ASSERT_EQ(provider.history_requests.size(), 3U);
+    EXPECT_EQ(provider.history_requests[2].from_ts, 340);
+    EXPECT_EQ(provider.history_requests[2].to_ts, 340);
+
+    provider.complete_history(make_history({340000}));
+
+    EXPECT_EQ(
+        continuity_status_count(
+            *subscriber,
+            MarketDataContinuityStatus::LIVE),
+        live_status_count);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+}
+
+TEST(MarketDataContinuity, FailedPrefillKeepsLaterGapRecoveryDegraded) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    provider.fail_history("initial history unavailable");
+    ASSERT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+
+    const auto live_status_count = continuity_status_count(
+        *subscriber,
+        MarketDataContinuityStatus::LIVE);
+    provider.emit_live_bar(100000);
+    provider.emit_live_bar(220000);
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(provider.history_requests[1].from_ts, 160);
+    EXPECT_EQ(provider.history_requests[1].to_ts, 160);
+
+    provider.complete_history(make_history({160000}));
+
+    EXPECT_EQ(
+        continuity_status_count(
+            *subscriber,
+            MarketDataContinuityStatus::LIVE),
+        live_status_count);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+}
+
+TEST(MarketDataContinuity, ClipsGapHistoryToRequestedRange) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({100000}));
+
+    provider.emit_live_bar(280000);
+    provider.complete_history(make_history({100000, 160000, 220000, 280000}));
+
+    ASSERT_EQ(subscriber->bars.size(), 3U);
+    ASSERT_EQ(subscriber->bars[1].items.size(), 2U);
+    EXPECT_EQ(subscriber->bars[1].items[0].time_ms, 160000U);
+    EXPECT_EQ(subscriber->bars[1].items[1].time_ms, 220000U);
+    EXPECT_EQ(subscriber->bars[2].items.front().time_ms, 280000U);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
+}
+
+TEST(MarketDataContinuity, ReportsActualBoundedGapRange) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER);
+    request.continuity.max_backfill_bars = 2;
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({100000}));
+
+    provider.emit_live_bar(400000);
+
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(provider.history_requests[1].from_ts, 160);
+    EXPECT_EQ(provider.history_requests[1].to_ts, 220);
+    ASSERT_FALSE(subscriber->continuity.empty());
+    EXPECT_EQ(subscriber->continuity.back().from_time_ms, 160000U);
+    EXPECT_EQ(subscriber->continuity.back().to_time_ms, 220000U);
+    EXPECT_EQ(subscriber->continuity.back().requested_items, 2U);
+
+    provider.complete_history(make_history({160000, 220000}));
+    ASSERT_EQ(provider.history_requests.size(), 3U);
+    EXPECT_EQ(provider.history_requests[2].from_ts, 280);
+    EXPECT_EQ(provider.history_requests[2].to_ts, 340);
+    provider.complete_history(make_history({280000, 340000}));
+
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
+}
+
 TEST(MarketDataContinuity, ChecksGapsInsideBufferedBatchesInOrder) {
     FakeHistoryProvider provider;
     MarketDataRouter router;
@@ -278,11 +484,13 @@ TEST(MarketDataContinuity, EmptyBackfillFailsOnceAndReleasesLiveBatch) {
     FakeHistoryProvider provider;
     MarketDataRouter router;
     auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER);
+    request.continuity.retry.max_attempts = 3;
 
     auto route = router.subscribe_bars(
         provider,
         subscriber,
-        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+        request);
     ASSERT_TRUE(route.active());
     provider.complete_history(make_history({100000}));
 
@@ -295,7 +503,7 @@ TEST(MarketDataContinuity, EmptyBackfillFailsOnceAndReleasesLiveBatch) {
     EXPECT_EQ(subscriber->bars.back().items.front().time_ms, 280000U);
     ASSERT_EQ(subscriber->continuity.size(), 6U);
     EXPECT_EQ(subscriber->continuity[4].status, MarketDataContinuityStatus::FAILED);
-    EXPECT_EQ(subscriber->continuity[5].status, MarketDataContinuityStatus::LIVE);
+    EXPECT_EQ(subscriber->continuity[5].status, MarketDataContinuityStatus::DEGRADED);
 }
 
 TEST(MarketDataContinuity, HistoryFailureKeepsLiveRouteUsable) {
@@ -318,7 +526,7 @@ TEST(MarketDataContinuity, HistoryFailureKeepsLiveRouteUsable) {
     ASSERT_EQ(subscriber->continuity.size(), 3U);
     EXPECT_EQ(subscriber->continuity[1].status, MarketDataContinuityStatus::FAILED);
     EXPECT_EQ(subscriber->continuity[1].message, "history endpoint unavailable");
-    EXPECT_EQ(subscriber->continuity[2].status, MarketDataContinuityStatus::LIVE);
+    EXPECT_EQ(subscriber->continuity[2].status, MarketDataContinuityStatus::DEGRADED);
 
     provider.emit_live_bar(260000);
     EXPECT_EQ(subscriber->bars.size(), 2U);
@@ -401,7 +609,7 @@ TEST(MarketDataContinuity, RejectsHistoryResponseFromAnotherStream) {
         "Historical bar response does not match the subscribed stream.");
     EXPECT_EQ(
         subscriber->continuity[2].status,
-        MarketDataContinuityStatus::LIVE);
+        MarketDataContinuityStatus::DEGRADED);
 
     provider.emit_live_bar(280000);
     EXPECT_EQ(provider.history_requests.size(), 1U);
@@ -418,11 +626,223 @@ TEST(MarketDataContinuity, PrefillRequestUsesInclusiveBarCountRange) {
 
     const auto history = MarketDataContinuityService::make_prefill_request(
         request,
-        600000,
+        600013,
         3);
 
     EXPECT_EQ(history.from_ts, 480);
     EXPECT_EQ(history.to_ts, 600);
+}
+
+TEST(MarketDataContinuity, RetriesFailedHistoryBeforeReleasingLive) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.continuity.retry.max_attempts = 2;
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    provider.emit_live_bar(200000);
+    provider.fail_history("temporary history failure");
+
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+    EXPECT_TRUE(subscriber->bars.empty());
+    ASSERT_EQ(subscriber->continuity.size(), 2U);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::RETRYING);
+
+    router.process();
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+
+    provider.complete_history(make_history({100000}));
+
+    ASSERT_EQ(subscriber->bars.size(), 2U);
+    EXPECT_TRUE(subscriber->bars[0].items[0].has_flag(MarketDataFlags::HISTORICAL));
+    EXPECT_TRUE(subscriber->bars[1].items[0].has_flag(MarketDataFlags::REALTIME));
+    ASSERT_EQ(subscriber->continuity.size(), 3U);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
+}
+
+TEST(MarketDataContinuity, RetriesRejectedHistoryBeforeReleasingLive) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.continuity.retry.max_attempts = 2;
+
+    provider.reject_history = true;
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    provider.emit_live_bar(200000);
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+    ASSERT_EQ(subscriber->continuity.size(), 2U);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::RETRYING);
+    EXPECT_TRUE(subscriber->bars.empty());
+
+    provider.reject_history = false;
+    router.process();
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    provider.complete_history(make_history({100000}));
+
+    ASSERT_EQ(subscriber->bars.size(), 2U);
+    EXPECT_TRUE(subscriber->bars[0].items[0].has_flag(MarketDataFlags::HISTORICAL));
+    EXPECT_TRUE(subscriber->bars[1].items[0].has_flag(MarketDataFlags::REALTIME));
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
+}
+
+TEST(MarketDataContinuity, ProcessRunsOnlyOneRetryPass) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.continuity.retry.max_attempts = 3;
+
+    provider.reject_history = true;
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+
+    router.process();
+
+    EXPECT_EQ(provider.history_requests.size(), 2U);
+    ASSERT_FALSE(subscriber->continuity.empty());
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::RETRYING);
+}
+
+TEST(MarketDataContinuity, GapRetryDoesNotRepeatGapDetectedStatus) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER);
+    request.continuity.retry.max_attempts = 2;
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({100000}));
+
+    provider.emit_live_bar(280000);
+    provider.fail_history("temporary backfill failure");
+    ASSERT_EQ(subscriber->continuity.size(), 5U);
+    EXPECT_EQ(
+        subscriber->continuity[2].status,
+        MarketDataContinuityStatus::GAP_DETECTED);
+    EXPECT_EQ(
+        subscriber->continuity[4].status,
+        MarketDataContinuityStatus::RETRYING);
+
+    router.process();
+    ASSERT_EQ(provider.history_requests.size(), 3U);
+    ASSERT_EQ(subscriber->continuity.size(), 6U);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::BACKFILLING);
+
+    provider.complete_history(make_history({160000, 220000}));
+
+    const auto gap_detected_count = std::count_if(
+        subscriber->continuity.begin(),
+        subscriber->continuity.end(),
+        [](const MarketDataContinuityUpdate& update) {
+            return update.status == MarketDataContinuityStatus::GAP_DETECTED;
+        });
+    EXPECT_EQ(gap_detected_count, 1);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
+}
+
+TEST(MarketDataContinuity, ExhaustedRetriesReleaseBufferedLiveOnce) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.continuity.retry.max_attempts = 2;
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    provider.emit_live_bar(200000);
+    provider.fail_history("first failure");
+    router.process();
+    provider.fail_history("second failure");
+
+    ASSERT_EQ(subscriber->bars.size(), 1U);
+    EXPECT_TRUE(subscriber->bars.front().items.front().has_flag(
+        MarketDataFlags::REALTIME));
+    ASSERT_EQ(subscriber->continuity.size(), 4U);
+    EXPECT_EQ(
+        subscriber->continuity[2].status,
+        MarketDataContinuityStatus::FAILED);
+    EXPECT_EQ(
+        subscriber->continuity[3].status,
+        MarketDataContinuityStatus::DEGRADED);
+}
+
+TEST(MarketDataContinuity, RetryBackoffDefersProviderRequest) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.continuity.retry.max_attempts = 2;
+    request.continuity.retry.initial_backoff_ms = 60000;
+    request.continuity.retry.max_backoff_ms = 60000;
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+    provider.fail_history("temporary history failure");
+
+    router.process();
+
+    EXPECT_EQ(provider.history_requests.size(), 1U);
+    ASSERT_FALSE(subscriber->continuity.empty());
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::RETRYING);
+}
+
+TEST(MarketDataContinuity, BufferLimitReleasesLiveDataAndDisablesContinuity) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.continuity.max_buffered_batches = 1;
+    request.continuity.max_buffered_items = 1;
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    provider.emit_live_bar(200000);
+    EXPECT_TRUE(subscriber->bars.empty());
+    provider.emit_live_bar(260000);
+
+    ASSERT_EQ(subscriber->bars.size(), 2U);
+    EXPECT_EQ(subscriber->bars[0].items.front().time_ms, 200000U);
+    EXPECT_EQ(subscriber->bars[1].items.front().time_ms, 260000U);
+    ASSERT_EQ(subscriber->continuity.size(), 3U);
+    EXPECT_EQ(
+        subscriber->continuity[1].status,
+        MarketDataContinuityStatus::FAILED);
+    EXPECT_EQ(
+        subscriber->continuity[2].status,
+        MarketDataContinuityStatus::DEGRADED);
+
+    provider.complete_history(make_history({100000}));
+    EXPECT_EQ(subscriber->bars.size(), 2U);
+
+    provider.emit_live_bar(320000);
+    ASSERT_EQ(subscriber->bars.size(), 3U);
+    EXPECT_EQ(subscriber->bars.back().items.front().time_ms, 320000U);
 }
 
 TEST(MarketDataContinuity, UnsubscribeDuringHistoryDropsLateDelivery) {

@@ -319,13 +319,29 @@ auto route = router.subscribe_bars("intrade", chart, request);
 - `LIVE_ONLY` оставляет live-доставку без изменений. `PREFILL` запрашивает
   `prefill_bars` перед первой live-доставкой. `PREFILL_AND_RECOVER` делает оба
   действия и дополнительно восстанавливает разрывы по timestamp.
-- `prefill_bars` задаёт глубину начальной истории в барах. Router строит
-  inclusive-диапазон на это количество timeframe slots; провайдер всё равно
-  может вернуть меньше баров, если часть диапазона не содержит данных. Для
-  `PREFILL` требуется положительное значение. `PREFILL_AND_RECOVER` может
-  использовать ноль, если приложению нужно только восстановление разрывов.
+- `prefill_bars` задаёт глубину начальной истории в барах. Router выравнивает
+  конец inclusive-диапазона к началу текущего timeframe bucket и запрашивает
+  `prefill_bars` slots: от `boundary - (N - 1) * timeframe` до `boundary`.
+  Провайдер всё равно может вернуть меньше баров, если часть диапазона не
+  содержит данных. Для `PREFILL` требуется положительное значение.
+  `PREFILL_AND_RECOVER` может использовать ноль, если приложению нужно только
+  восстановление разрывов.
 - `max_backfill_bars` ограничивает один запрос для разрыва. Ноль означает,
   что Router не ограничивает provider request количеством баров.
+- `max_buffered_batches` и `max_buffered_items` ограничивают live data,
+  удерживаемые во время history request. Ноль отключает соответствующее
+  ограничение. При превышении любого лимита Router публикует continuity
+  `FAILED`, выпускает накопленные и текущий live batch, отключает continuity
+  для этого route и публикует `DEGRADED`, продолжая live-доставку. Это явный
+  fallback с потерей обещания historical ordering: continuity автоматически
+  для этого route не включается.
+- `retry.max_attempts` задаёт общее количество попыток вместе с первой.
+  `retry.initial_backoff_ms` включает ограниченный exponential backoff, а
+  `retry.max_backoff_ms` задаёт его предел. По умолчанию выполняется одна
+  попытка, поэтому live-доставка продолжается, а итоговый статус становится
+  `DEGRADED`. Повторы
+  запускаются периодическими вызовами `MarketDataRouter::process()` в owner
+  loop.
 
 Для initial prefill порядок доставки такой:
 
@@ -368,20 +384,36 @@ stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNE
 
 `max_backfill_bars` ограничивает каждый отдельный provider request, а не весь
 отсутствующий интервал. Если provider вернул неполный, но непустой backfill,
-Router продолжит разбирать очередь live batches и может выполнить следующий
-ограниченный запрос для оставшегося gap. Успешный пустой ответ для найденного
-gap считается failed recovery: Router один раз выпускает накопленные live data и
-не зацикливает запрос того же диапазона.
+Router считает такое восстановление неуспешным: неполный batch не доставляется
+и не продвигает continuity watermark, Router публикует `FAILED`, выпускает
+накопленные live data и завершает операцию в `DEGRADED`. Bounded gap response
+принимается только если после обрезки до фактического запрошенного диапазона
+он содержит каждый ожидаемый timeframe slot. Успешный пустой ответ для
+найденного gap обрабатывается так же: Router один раз выпускает накопленные
+live data и не зацикливает запрос того же диапазона. Успешный пустой prefill
+тоже является terminal result: исторический batch не доставляется, а Router
+переходит к накопленному live-потоку без retry.
 
-Если history request завершился ошибкой или provider его отклонил, Router
-публикует `FAILED`, выпускает накопленные live batches, затем публикует `LIVE`.
-Route остаётся пригодным для работы и live-доставка продолжается, но
-отсутствующий исторический диапазон не восстанавливается. Приложение, которому
-нужен полный временной ряд, должно записать ошибку и применить собственную
-политику повторной попытки. Provider может возвращать пересекающиеся snapshots
-для незавершённого бара; этот первый слой continuity не вводит универсальную
-политику deduplication, поэтому consumer должен сам сопоставлять бары по
-stream и `time_ms` с учётом политики `FINALIZED`/незавершённых баров.
+`max_backfill_bars` применяется до отправки provider request. Поэтому
+continuity updates содержат фактические bounded `from_time_ms`,
+`to_time_ms` и `requested_items` текущего chunk, а не исходный полный gap.
+
+`last_bar_time_ms` является последним доставленным bar, а не watermark доверия
+continuity. После любой terminal unusable history operation Router сохраняет
+самую раннюю неподтверждённую границу. Более поздний успешный history range не
+может убрать эту потерю доверия, пока не покрывает unresolved boundary; Router
+публикует `LIVE` только когда известной неподтверждённой границы не осталось.
+
+Если history request завершился ошибкой или provider его отклонил, но попытки
+ещё остались, Router публикует `RETRYING`, сохраняет накопленные live batches и
+ждёт следующего вызова `process()` в owner loop. После исчерпания retry budget
+Router публикует `FAILED`, выпускает накопленные live batches, затем публикует
+`DEGRADED`. Route остаётся пригодным для работы, live-доставка продолжается, а
+невосстановленный исторический диапазон явно сообщается consumer. Router
+сохраняет revisions баров от provider и не применяет универсальную
+timestamp-дедупликацию. Если графику или storage нужно одно текущее значение
+на candle, consumer должен делать upsert по stream и `time_ms`, сохраняя
+возможность принять более позднюю finalized revision.
 
 `MarketDataContinuityService` остаётся низкоуровневым helper для приложений,
 которые хотят запрашивать историю напрямую. Он превращает `BarHistoryResult` в

@@ -18,8 +18,10 @@ namespace optionx::market_data {
         PREFILLING,       ///< Historical initialization is being requested.
         GAP_DETECTED,     ///< A timestamp gap was found in the live stream.
         BACKFILLING,      ///< Historical bars are being loaded for a gap.
-        LIVE,             ///< Live delivery is current, with no pending history work.
-        FAILED            ///< History work failed; live delivery continues without it.
+        RETRYING,         ///< A failed history request will be attempted again.
+        LIVE,             ///< No known unresolved history range remains for the route.
+        FAILED,           ///< A specific history operation failed; the route may continue.
+        DEGRADED          ///< Live delivery continues while continuity remains unverified; the status is sticky until the unresolved range is verified.
     };
 
     /// \brief Converts a continuity status to stable text.
@@ -31,10 +33,14 @@ namespace optionx::market_data {
             return "GAP_DETECTED";
         case MarketDataContinuityStatus::BACKFILLING:
             return "BACKFILLING";
+        case MarketDataContinuityStatus::RETRYING:
+            return "RETRYING";
         case MarketDataContinuityStatus::LIVE:
             return "LIVE";
         case MarketDataContinuityStatus::FAILED:
             return "FAILED";
+        case MarketDataContinuityStatus::DEGRADED:
+            return "DEGRADED";
         case MarketDataContinuityStatus::UNKNOWN:
         default:
             return "UNKNOWN";

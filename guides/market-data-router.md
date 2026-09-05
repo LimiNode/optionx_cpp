@@ -319,13 +319,28 @@ The options have these meanings:
 - `LIVE_ONLY` leaves live delivery unchanged. `PREFILL` requests
   `prefill_bars` before the first live delivery. `PREFILL_AND_RECOVER` does
   both and also repairs timestamp gaps.
-- `prefill_bars` is the count-based initial history depth. Router builds an
-  inclusive timeframe range for that many slots; a provider may still return
-  fewer bars when part of the range has no data. A `PREFILL` request must
-  specify a positive count. `PREFILL_AND_RECOVER` may use zero when the
-  application wants recovery only.
+- `prefill_bars` is the count-based initial history depth. Router aligns the
+  end of the inclusive range to the start of the current timeframe bucket and
+  requests `prefill_bars` slots, so the range is `boundary - (N - 1) *
+  timeframe` through `boundary`. A provider may still return fewer bars when
+  part of the range has no data. A `PREFILL` request must specify a positive
+  count. `PREFILL_AND_RECOVER` may use zero when the application wants
+  recovery only.
 - `max_backfill_bars` bounds one gap request. Zero means that the provider
   request is not count-bounded by Router.
+- `max_buffered_batches` and `max_buffered_items` bound live data retained
+  while a history request is in flight. Zero disables the corresponding limit.
+  When either limit is exceeded, Router reports continuity `FAILED`, releases
+  the queued and current live batches, disables continuity for that route, and
+  reports `DEGRADED` while live data continues. This is an explicit
+  loss-of-recovery fallback: continuity is not automatically re-enabled for
+  that route.
+- `retry.max_attempts` is the total number of attempts, including the initial
+  request. `retry.initial_backoff_ms` starts a capped exponential backoff, and
+  `retry.max_backoff_ms` limits it. The default is one attempt, preserving the
+  existing live-delivery fallback with a final `DEGRADED` status. Retries are
+  advanced by periodic
+  `MarketDataRouter::process()` calls on the owner loop.
 
 For initial prefill, the delivery order is:
 
@@ -367,19 +382,35 @@ stream-level `MarketDataStatusUpdate` events such as `READY` or `DISCONNECTED`.
 
 `max_backfill_bars` limits each individual provider request, not the complete
 missing interval. When a provider returns a partial but non-empty backfill,
-Router keeps draining the queued live batches and can issue another bounded
-request for the next remaining gap. An empty successful response for a detected
-gap is treated as a failed recovery, so Router releases the queued live data
-once instead of retrying the same range forever.
+Router treats that response as an unsuccessful recovery: it does not deliver
+the partial batch or advance the continuity watermark, reports `FAILED`,
+releases the queued live data, and finishes in `DEGRADED`. A bounded gap
+response is accepted only when, after clipping to the actual requested range,
+it contains every expected timeframe slot. An empty successful response for a
+detected gap is treated the same way, so Router releases the queued live data
+once instead of retrying the same range forever. A successful empty prefill is
+terminal as well: it carries no historical batch and proceeds to the buffered
+live stream without retry.
 
-If a history request fails or is rejected, Router emits `FAILED`, releases any
-buffered live batches, and then emits `LIVE`. The route stays usable and live
-delivery continues, but the missing historical range is not reconstructed.
-Applications that require a complete time series should record the failure and
-apply their own retry policy. A provider may return overlapping snapshots for
-an in-progress bar; this first continuity layer does not impose a universal
-payload deduplication policy, so consumers should correlate bars by stream and
-`time_ms` according to their finalized/incomplete-bar policy.
+`max_backfill_bars` is applied before the provider request is sent. Therefore
+continuity updates report the actual bounded `from_time_ms`, `to_time_ms`, and
+`requested_items` for the current chunk, not the original full gap.
+
+`last_bar_time_ms` is the latest delivered bar, not a continuity trust
+watermark. After any terminal unusable history operation, Router retains the
+earliest unresolved boundary. A later successful history range cannot clear
+that trust loss unless it covers the unresolved boundary; Router emits `LIVE`
+only when no unresolved boundary remains known.
+
+If a history request fails or is rejected and attempts remain, Router emits
+`RETRYING`, keeps buffered live batches, and waits for a later owner-loop
+`process()` call. After the retry budget is exhausted, Router emits `FAILED`,
+releases any buffered live batches, and then emits `DEGRADED`. The route stays
+usable and live delivery continues, but an unrecovered historical range is
+reported to the consumer. Router preserves provider bar revisions and does not
+apply a generic timestamp deduplication policy; consumers such as charts or
+storage should upsert by stream and `time_ms` when they need one current value
+per candle while still accepting later finalized revisions.
 
 `MarketDataContinuityService` is the lower-level helper for applications that
 want to request history directly. It converts a `BarHistoryResult` into a

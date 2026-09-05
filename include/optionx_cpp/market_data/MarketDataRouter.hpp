@@ -218,8 +218,8 @@ namespace optionx::market_data {
         std::size_t retry_failed_unsubscribes();
 
         /// \brief Advances deferred Router lifecycle work on the owner loop.
-        /// \details Processes provider completions retained during shutdown and
-        ///          starts or completes physical subscription cleanup. This method
+        /// \details Processes due continuity retries, provider completions retained
+        ///          during shutdown, and physical subscription cleanup. This method
         ///          does not poll providers or transport data.
         void process() override;
 
