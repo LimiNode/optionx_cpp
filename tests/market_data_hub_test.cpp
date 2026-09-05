@@ -54,7 +54,7 @@ TickDataBatch make_tick_batch() {
     batch.symbol = "BTCUSDT";
     batch.price_digits = 2;
     batch.items.push_back(Tick(0.0, 0.0, 61521.34, 0.00017, 1783028778697ULL, 0, 0));
-    batch.items.front().set_flag(MarketDataFlags::REALTIME);
+    mark_live_payload(batch.items.front().flags);
     return batch;
 }
 
@@ -65,7 +65,7 @@ BarDataBatch make_bar_batch() {
     batch.timeframe = 60;
     batch.price_digits = 5;
     batch.items.push_back(Bar(1.1, 1.2, 1.0, 1.15, 10.0, 1783028760000ULL));
-    batch.items.front().set_flag(MarketDataFlags::REALTIME);
+    mark_live_payload(batch.items.front().flags);
     return batch;
 }
 

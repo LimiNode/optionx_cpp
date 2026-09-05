@@ -74,7 +74,7 @@ SingleTick make_market_data_tick(const std::string& symbol, double bid, double a
     tick.tick.time_ms = 1000;
     tick.tick.received_ms = 1001;
     tick.tick.set_flag(MarketDataFlags::INITIALIZED);
-    tick.tick.set_flag(MarketDataFlags::REALTIME);
+    mark_live_payload(tick.tick.flags);
     return tick;
 }
 

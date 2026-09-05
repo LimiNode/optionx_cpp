@@ -113,8 +113,12 @@ Subscription rules:
   default worker loop this happens automatically after `run()`. If you use
   `run(false)` or an external event loop, call `platform.process()`; draining
   `event_bus()` directly is not enough to flush public market-data batches.
-- Use `MarketDataFlags` for realtime/history/backfill markers and
-  `MarketPriceType` for bid/ask/mid/last payload identity.
+- Use `MarketDataFlags` for payload origin, delivery mode, and bar lifecycle,
+  and `MarketPriceType` for bid/ask/mid/last payload identity. `LIVE_SOURCE`
+  identifies live/polling origin; `HISTORICAL` and `BACKFILL` identify history
+  origin and gap-repair purpose. `REALTIME` marks a current-edge delivery,
+  while `CATCHUP` marks live-origin data replayed from Router continuity
+  backlog. These two delivery markers are mutually exclusive.
 - Live bar streams can deliver several `INCOMPLETE` snapshots with the same
   `(provider_id, subscription_id, symbol, timeframe, time_ms)` key before the
   final `FINALIZED` snapshot. Treat them as upserts, not append-only candles.
@@ -203,7 +207,8 @@ than assume that caller state was already updated after `subscribe_ticks()`.
 
 For a history-first bar route, set `BarSubscriptionRequest::continuity` to
 `PREFILL` or `PREFILL_AND_RECOVER`. Router delivers the initial
-`HISTORICAL` batch before buffered `REALTIME` batches. In recovery mode it emits
+`HISTORICAL` batch before buffered `LIVE_SOURCE | CATCHUP` batches. In recovery
+mode it emits
 route-scoped `GAP_DETECTED`/`BACKFILLING` updates, delivers recovered bars with
 `HISTORICAL | BACKFILL`, then resumes live delivery. A failed history request
 emits `FAILED` and releases buffered live data instead of killing the route.
