@@ -410,7 +410,7 @@ TEST(MarketDataContinuity, RejectsGapHistoryMissingRangeEnd) {
         MarketDataContinuityStatus::DEGRADED);
 }
 
-TEST(MarketDataContinuity, LaterGapRepairDoesNotHideEarlierMissingRange) {
+TEST(MarketDataContinuity, LaterGapRepairDoesNotHideEarlierGapFailure) {
     FakeHistoryProvider provider;
     MarketDataRouter router;
     auto subscriber = std::make_shared<RecordingSubscriber>();
@@ -450,6 +450,7 @@ TEST(MarketDataContinuity, LaterGapRepairDoesNotHideEarlierMissingRange) {
 }
 
 TEST(MarketDataContinuity, FailedPrefillKeepsLaterGapRecoveryDegraded) {
+    ScopedTestClock clock(240000ULL);
     FakeHistoryProvider provider;
     MarketDataRouter router;
     auto subscriber = std::make_shared<RecordingSubscriber>();
@@ -467,13 +468,13 @@ TEST(MarketDataContinuity, FailedPrefillKeepsLaterGapRecoveryDegraded) {
     const auto live_status_count = continuity_status_count(
         *subscriber,
         MarketDataContinuityStatus::LIVE);
-    provider.emit_live_bar(100000);
-    provider.emit_live_bar(220000);
+    provider.emit_live_bar(300000);
+    provider.emit_live_bar(420000);
     ASSERT_EQ(provider.history_requests.size(), 2U);
-    EXPECT_EQ(provider.history_requests[1].from_ts, 160);
-    EXPECT_EQ(provider.history_requests[1].to_ts, 160);
+    EXPECT_EQ(provider.history_requests[1].from_ts, 360);
+    EXPECT_EQ(provider.history_requests[1].to_ts, 360);
 
-    provider.complete_history(make_history({160000}));
+    provider.complete_history(make_history({360000}));
 
     EXPECT_EQ(
         continuity_status_count(

@@ -5,6 +5,9 @@
 /// \file MarketDataRouter.ipp
 /// \brief Implements subscription-scoped market-data routing utilities.
 
+#include <chrono>
+#include <optional>
+
 namespace optionx::market_data {
 
     namespace detail {
@@ -58,7 +61,17 @@ namespace optionx::market_data {
                 DEGRADED
             };
 
-            struct PendingContinuityRequest;
+            struct PendingContinuityRequest {
+                RoutedSubscriptionId router_id;
+                MarketDataSubscriptionHandle subscription;
+                BarHistoryRequest request;
+                ContinuityRequestKind kind = ContinuityRequestKind::PREFILL;
+                bool announce_gap = false;
+                std::uint64_t from_time_ms = 0;
+                std::uint64_t to_time_ms = 0;
+                std::size_t requested_items = 0;
+                std::size_t attempt = 1;
+            };
 
             struct ContinuityState {
                 ContinuityPhase phase = ContinuityPhase::LIVE;
@@ -100,18 +113,6 @@ namespace optionx::market_data {
                 EntryPhase phase = EntryPhase::PENDING;
                 bool release_requested = false;
                 subscription_callback_t release_callback;
-            };
-
-            struct PendingContinuityRequest {
-                RoutedSubscriptionId router_id;
-                MarketDataSubscriptionHandle subscription;
-                BarHistoryRequest request;
-                ContinuityRequestKind kind = ContinuityRequestKind::PREFILL;
-                bool announce_gap = false;
-                std::uint64_t from_time_ms = 0;
-                std::uint64_t to_time_ms = 0;
-                std::size_t requested_items = 0;
-                std::size_t attempt = 1;
             };
 
             struct ContinuityOperation {
@@ -2530,7 +2531,7 @@ namespace optionx::market_data {
                 ++continuity.generation;
                 continuity.request_in_flight = false;
                 continuity.retry_request.reset();
-                continuity.retry_at_ms = 0;
+                continuity.retry_at = {};
                 continuity.reconnect_target_time_ms = 0;
 
                 if (entry->continuity.recovers_gaps()) {
