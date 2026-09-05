@@ -75,16 +75,34 @@ namespace optionx::market_data {
 
             struct ContinuityState {
                 ContinuityPhase phase = ContinuityPhase::LIVE;
+                MarketDataContinuityStatus last_status =
+                    MarketDataContinuityStatus::UNKNOWN;
+                MarketDataContinuityOperation last_operation =
+                    MarketDataContinuityOperation::NONE;
                 bool initial_prefill_pending = false;
                 bool request_in_flight = false;
                 std::deque<BarDataBatch> buffer;
                 std::size_t buffered_items = 0;
                 std::uint64_t last_observed_time_ms = 0;
+                std::uint64_t requested_from_time_ms = 0;
+                std::uint64_t requested_to_time_ms = 0;
+                std::size_t requested_items = 0;
+                std::uint64_t confirmed_from_time_ms = 0;
+                std::uint64_t confirmed_through_time_ms = 0;
+                std::size_t confirmed_items = 0;
                 std::uint64_t verified_through_time_ms = 0;
                 std::uint64_t unverified_from_time_ms = 0;
                 std::uint64_t initial_prefill_boundary_time_ms = 0;
                 std::uint64_t generation = 0;
                 std::uint64_t reconnect_target_time_ms = 0;
+                std::size_t history_request_count = 0;
+                std::size_t retry_count = 0;
+                std::size_t failure_count = 0;
+                std::string last_failure;
+                std::chrono::steady_clock::duration stale_duration{};
+                std::chrono::steady_clock::duration degraded_duration{};
+                std::chrono::steady_clock::time_point stale_since{};
+                std::chrono::steady_clock::time_point degraded_since{};
                 std::optional<PendingContinuityRequest> retry_request;
                 std::chrono::steady_clock::time_point retry_at;
 
@@ -207,6 +225,10 @@ namespace optionx::market_data {
             [[nodiscard]] std::size_t subscription_count() const;
             [[nodiscard]] std::size_t failed_unsubscribe_count() const;
             std::size_t retry_failed_unsubscribes();
+            [[nodiscard]] std::optional<MarketDataContinuitySnapshot>
+            continuity_snapshot(RoutedSubscriptionId route) const;
+            [[nodiscard]] std::vector<MarketDataContinuitySnapshot>
+            continuity_snapshots() const;
             void process();
             [[nodiscard]] bool is_shutdown_complete() const noexcept;
             void shutdown() noexcept;
@@ -332,8 +354,14 @@ namespace optionx::market_data {
                     std::uint64_t generation,
                     BarHistoryResult result);
             void notify_continuity(
+                RoutedSubscriptionId router_id,
+                MarketDataContinuityUpdate update);
+            static void record_continuity_update_no_lock(
+                    const std::shared_ptr<Entry>& entry,
+                    const MarketDataContinuityUpdate& update);
+            void record_continuity_update(
                     RoutedSubscriptionId router_id,
-                    MarketDataContinuityUpdate update);
+                    const MarketDataContinuityUpdate& update);
             static MarketDataContinuityUpdate make_continuity_update(
                     const MarketDataSubscriptionHandle& subscription,
                     MarketDataContinuityStatus status,
@@ -387,6 +415,11 @@ namespace optionx::market_data {
             static void record_bar_progress_no_lock(
                     const std::shared_ptr<Entry>& entry,
                     const std::vector<Bar>& bars) noexcept;
+            static std::uint64_t duration_to_milliseconds(
+                    std::chrono::steady_clock::duration duration) noexcept;
+            static MarketDataContinuitySnapshot make_continuity_snapshot_no_lock(
+                    const std::shared_ptr<Entry>& entry,
+                    std::chrono::steady_clock::time_point now);
             static std::chrono::steady_clock::duration continuity_retry_delay(
                     const MarketDataContinuityRetryPolicy& policy,
                     std::size_t attempt) noexcept;
@@ -1298,6 +1331,7 @@ namespace optionx::market_data {
                 subscriber->on_market_data_status(replay);
             }
             for (auto& delivery : replay_continuity_deliveries) {
+                record_continuity_update(router_id, delivery.second);
                 delivery.first->on_market_data_continuity(delivery.second);
             }
             for (const auto replay_router_id : replay_prefill_routes) {
@@ -1312,7 +1346,6 @@ namespace optionx::market_data {
                 RoutedSubscriptionId router_id,
                 MarketDataSubscriptionHandle subscription) {
             PendingContinuityRequest pending;
-            std::shared_ptr<IMarketDataSubscriber> subscriber;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto entry_it = m_entries.find(router_id);
@@ -1358,11 +1391,11 @@ namespace optionx::market_data {
                 pending.requested_items = entry->continuity.prefill_bars;
                 entry->continuity_state.phase = ContinuityPhase::PREFILLING;
                 entry->continuity_state.request_in_flight = true;
-                subscriber = entry->subscriber.lock();
             }
 
-            if (subscriber) {
-                subscriber->on_market_data_continuity(make_continuity_update(
+            notify_continuity(
+                router_id,
+                make_continuity_update(
                     subscription,
                     MarketDataContinuityStatus::PREFILLING,
                     pending.from_time_ms,
@@ -1370,7 +1403,6 @@ namespace optionx::market_data {
                     pending.requested_items,
                     0,
                     "Requesting historical bar prefill."));
-            }
             request_continuity_history(
                 pending.router_id,
                 std::move(pending.subscription),
@@ -1386,7 +1418,6 @@ namespace optionx::market_data {
         inline void MarketDataRouterState::start_reconnect_recovery(
                 RoutedSubscriptionId router_id) {
             PendingContinuityRequest pending;
-            std::shared_ptr<IMarketDataSubscriber> subscriber;
             MarketDataSubscriptionHandle live_subscription;
             bool notify_live = false;
 
@@ -1462,7 +1493,6 @@ namespace optionx::market_data {
                     continuity.phase = ContinuityPhase::LIVE;
                     continuity.reconnect_target_time_ms = 0;
                     live_subscription = entry->control->provider_subscription;
-                    subscriber = entry->subscriber.lock();
                     notify_live = true;
                 } else if (from_time_ms > last_closed_time_ms) {
                     // A dirty current candle cannot be verified until it closes.
@@ -1517,8 +1547,9 @@ namespace optionx::market_data {
             }
 
             if (notify_live) {
-                if (subscriber) {
-                    subscriber->on_market_data_continuity(make_continuity_update(
+                notify_continuity(
+                    router_id,
+                    make_continuity_update(
                         live_subscription,
                         MarketDataContinuityStatus::LIVE,
                         0,
@@ -1526,7 +1557,6 @@ namespace optionx::market_data {
                         0,
                         0,
                         "No observed bars required reconnect recovery."));
-                }
                 return;
             }
 
@@ -1570,6 +1600,26 @@ namespace optionx::market_data {
                 }
                 generation = entry_it->second->continuity_state.generation;
                 provider = entry_it->second->provider;
+                auto& continuity = entry_it->second->continuity_state;
+                switch (kind) {
+                case ContinuityRequestKind::PREFILL:
+                    continuity.last_operation =
+                        MarketDataContinuityOperation::PREFILL;
+                    break;
+                case ContinuityRequestKind::GAP_BACKFILL:
+                    continuity.last_operation =
+                        MarketDataContinuityOperation::GAP_BACKFILL;
+                    break;
+                case ContinuityRequestKind::RECONNECT_BACKFILL:
+                    continuity.last_operation =
+                        MarketDataContinuityOperation::RECONNECT_BACKFILL;
+                    break;
+                }
+                continuity.requested_from_time_ms = from_time_ms;
+                continuity.requested_to_time_ms = to_time_ms;
+                continuity.requested_items = requested_items;
+                ++continuity.history_request_count;
+                if (attempt > 1) ++continuity.retry_count;
                 if (provider) ++m_continuity_operations_in_flight;
             }
             if (!provider) return;
@@ -1894,6 +1944,18 @@ namespace optionx::market_data {
                 (kind == ContinuityRequestKind::PREFILL ||
                  delivered_history_items > 0) &&
                 history_covers_recovery_range;
+            std::uint64_t confirmed_from_time_ms = 0;
+            std::uint64_t confirmed_to_time_ms = 0;
+            for (const auto& bar : history_batch.items) {
+                if (bar.time_ms == 0) continue;
+                if (confirmed_from_time_ms == 0 ||
+                    bar.time_ms < confirmed_from_time_ms) {
+                    confirmed_from_time_ms = bar.time_ms;
+                }
+                confirmed_to_time_ms = std::max(
+                    confirmed_to_time_ms,
+                    bar.time_ms);
+            }
 
             bool retry_scheduled = false;
             if (!history_success) {
@@ -1977,16 +2039,37 @@ namespace optionx::market_data {
                 }
                 if (!usable_history) {
                     mark_unverified_no_lock(entry, from_time_ms);
-                } else if (recovery_requires_full_range) {
-                    const bool has_more_reconnect_history =
-                        kind == ContinuityRequestKind::RECONNECT_BACKFILL &&
-                        entry->continuity_state.reconnect_target_time_ms > to_time_ms;
-                    record_verified_range_no_lock(
-                        entry,
-                        from_time_ms,
-                        to_time_ms,
-                        timeframe_ms,
-                        has_more_reconnect_history);
+                    ++entry->continuity_state.failure_count;
+                } else {
+                    if (delivered_history_items == 0) {
+                        confirmed_from_time_ms = from_time_ms;
+                        confirmed_to_time_ms = to_time_ms;
+                    }
+                    if (delivered_history_items > 0) {
+                        entry->continuity_state.confirmed_from_time_ms =
+                            confirmed_from_time_ms;
+                        entry->continuity_state.confirmed_through_time_ms =
+                            confirmed_to_time_ms;
+                        entry->continuity_state.confirmed_items =
+                            delivered_history_items;
+                    } else {
+                        entry->continuity_state.confirmed_from_time_ms =
+                            confirmed_from_time_ms;
+                        entry->continuity_state.confirmed_through_time_ms =
+                            confirmed_to_time_ms;
+                        entry->continuity_state.confirmed_items = 0;
+                    }
+                    if (recovery_requires_full_range) {
+                        const bool has_more_reconnect_history =
+                            kind == ContinuityRequestKind::RECONNECT_BACKFILL &&
+                            entry->continuity_state.reconnect_target_time_ms > to_time_ms;
+                        record_verified_range_no_lock(
+                            entry,
+                            from_time_ms,
+                            to_time_ms,
+                            timeframe_ms,
+                            has_more_reconnect_history);
+                    }
                 }
             }
 
@@ -2559,17 +2642,21 @@ namespace optionx::market_data {
                 }
                 continuity.phase = ContinuityPhase::WAITING_FOR_READY;
 
-                if (announce_stale && subscriber) {
-                    continuity_deliveries.emplace_back(
-                        subscriber,
-                        make_continuity_update(
-                            entry->control->provider_subscription,
-                            MarketDataContinuityStatus::STALE,
-                            0,
-                            0,
-                            0,
-                            0,
-                            "Transport loss invalidated market-data continuity."));
+                if (announce_stale) {
+                    const auto stale_update = make_continuity_update(
+                        entry->control->provider_subscription,
+                        MarketDataContinuityStatus::STALE,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "Transport loss invalidated market-data continuity.");
+                    record_continuity_update_no_lock(entry, stale_update);
+                    if (subscriber) {
+                        continuity_deliveries.emplace_back(
+                            subscriber,
+                            stale_update);
+                    }
                 }
             }
 
@@ -2674,6 +2761,138 @@ namespace optionx::market_data {
             return update;
         }
 
+        inline std::uint64_t
+        MarketDataRouterState::duration_to_milliseconds(
+                std::chrono::steady_clock::duration duration) noexcept {
+            if (duration <= std::chrono::steady_clock::duration::zero()) {
+                return 0;
+            }
+
+            using milliseconds = std::chrono::milliseconds;
+            const auto value = std::chrono::duration_cast<milliseconds>(duration).count();
+            if (value <= 0) return 0;
+            const auto unsigned_value = static_cast<std::uintmax_t>(value);
+            return unsigned_value > std::numeric_limits<std::uint64_t>::max()
+                ? std::numeric_limits<std::uint64_t>::max()
+                : static_cast<std::uint64_t>(unsigned_value);
+        }
+
+        inline MarketDataContinuitySnapshot
+        MarketDataRouterState::make_continuity_snapshot_no_lock(
+                const std::shared_ptr<Entry>& entry,
+                std::chrono::steady_clock::time_point now) {
+            MarketDataContinuitySnapshot snapshot;
+            if (!entry) return snapshot;
+
+            const auto& continuity = entry->continuity_state;
+            snapshot.route = entry->router_id;
+            if (entry->control) {
+                std::lock_guard<std::mutex> control_lock(entry->control->mutex);
+                snapshot.subscription = entry->control->provider_subscription;
+            }
+            snapshot.type = entry->stream.type;
+            snapshot.symbol = entry->stream.symbol;
+            snapshot.timeframe = entry->stream.timeframe;
+            snapshot.enabled = entry->continuity.enabled();
+            snapshot.last_status = continuity.last_status;
+            snapshot.last_operation = continuity.last_operation;
+            snapshot.request_in_flight = continuity.request_in_flight;
+            snapshot.last_observed_time_ms = continuity.last_observed_time_ms;
+            snapshot.requested_from_time_ms = continuity.requested_from_time_ms;
+            snapshot.requested_to_time_ms = continuity.requested_to_time_ms;
+            snapshot.requested_items = continuity.requested_items;
+            snapshot.last_confirmed_from_time_ms = continuity.confirmed_from_time_ms;
+            snapshot.last_confirmed_to_time_ms = continuity.confirmed_through_time_ms;
+            snapshot.last_confirmed_items = continuity.confirmed_items;
+            snapshot.verified_through_time_ms = continuity.verified_through_time_ms;
+            snapshot.unverified_from_time_ms = continuity.unverified_from_time_ms;
+            snapshot.buffered_batches = continuity.buffer.size();
+            snapshot.buffered_items = continuity.buffered_items;
+            snapshot.history_request_count = continuity.history_request_count;
+            snapshot.retry_count = continuity.retry_count;
+            snapshot.failure_count = continuity.failure_count;
+            snapshot.last_failure = continuity.last_failure;
+
+            switch (continuity.phase) {
+            case ContinuityPhase::LIVE:
+                snapshot.phase = MarketDataContinuityPhase::LIVE;
+                break;
+            case ContinuityPhase::PREFILLING:
+                snapshot.phase = MarketDataContinuityPhase::PREFILLING;
+                break;
+            case ContinuityPhase::WAITING_FOR_READY:
+                snapshot.phase = MarketDataContinuityPhase::WAITING_FOR_READY;
+                break;
+            case ContinuityPhase::RECOVERING:
+                snapshot.phase = MarketDataContinuityPhase::RECOVERING;
+                break;
+            case ContinuityPhase::FLUSHING:
+                snapshot.phase = MarketDataContinuityPhase::FLUSHING;
+                break;
+            case ContinuityPhase::DEGRADED:
+                snapshot.phase = MarketDataContinuityPhase::DEGRADED;
+                break;
+            }
+
+            auto stale_duration = continuity.stale_duration;
+            if (continuity.stale_since != std::chrono::steady_clock::time_point{}) {
+                stale_duration += now - continuity.stale_since;
+            }
+            snapshot.stale_duration_ms = duration_to_milliseconds(stale_duration);
+
+            auto degraded_duration = continuity.degraded_duration;
+            if (continuity.degraded_since != std::chrono::steady_clock::time_point{}) {
+                degraded_duration += now - continuity.degraded_since;
+            }
+            snapshot.degraded_duration_ms = duration_to_milliseconds(degraded_duration);
+            return snapshot;
+        }
+
+        inline void MarketDataRouterState::record_continuity_update_no_lock(
+                const std::shared_ptr<Entry>& entry,
+                const MarketDataContinuityUpdate& update) {
+            if (!entry) return;
+
+            auto& continuity = entry->continuity_state;
+            const auto now = std::chrono::steady_clock::now();
+            if (continuity.stale_since !=
+                    std::chrono::steady_clock::time_point{} &&
+                update.status != MarketDataContinuityStatus::STALE) {
+                continuity.stale_duration += now - continuity.stale_since;
+                continuity.stale_since = {};
+            }
+            if (continuity.degraded_since !=
+                    std::chrono::steady_clock::time_point{} &&
+                update.status != MarketDataContinuityStatus::DEGRADED) {
+                continuity.degraded_duration += now - continuity.degraded_since;
+                continuity.degraded_since = {};
+            }
+            if (update.status == MarketDataContinuityStatus::STALE &&
+                continuity.stale_since == std::chrono::steady_clock::time_point{}) {
+                continuity.stale_since = now;
+            }
+            if (update.status == MarketDataContinuityStatus::DEGRADED &&
+                continuity.degraded_since == std::chrono::steady_clock::time_point{}) {
+                continuity.degraded_since = now;
+            }
+
+            continuity.last_status = update.status;
+            if (update.status == MarketDataContinuityStatus::FAILED &&
+                !update.message.empty()) {
+                continuity.last_failure = update.message;
+            }
+        }
+
+        inline void MarketDataRouterState::record_continuity_update(
+                RoutedSubscriptionId router_id,
+                const MarketDataContinuityUpdate& update) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto entry_it = m_entries.find(router_id);
+            if (entry_it != m_entries.end()) {
+                record_continuity_update_no_lock(entry_it->second, update);
+            }
+        }
+
         inline void MarketDataRouterState::notify_continuity(
                 RoutedSubscriptionId router_id,
                 MarketDataContinuityUpdate update) {
@@ -2685,6 +2904,7 @@ namespace optionx::market_data {
                     entry_it->second->phase != EntryPhase::ACTIVE) {
                     return;
                 }
+                record_continuity_update_no_lock(entry_it->second, update);
                 subscriber = entry_it->second->subscriber.lock();
             }
             if (subscriber) subscriber->on_market_data_continuity(update);
@@ -2716,6 +2936,7 @@ namespace optionx::market_data {
                      options.max_buffered_items - batch_items);
 
             if (!exceeds_batch_limit && !exceeds_item_limit) {
+                record_bar_progress_no_lock(entry, batch.items);
                 if (push_front) {
                     continuity.buffer.push_front(std::move(batch));
                 } else {
@@ -2743,26 +2964,26 @@ namespace optionx::market_data {
             continuity.retry_at = {};
             entry->continuity.mode = MarketDataContinuityMode::LIVE_ONLY;
 
-            continuity_deliveries.emplace_back(
-                subscriber,
-                make_continuity_update(
-                    entry->control->provider_subscription,
-                    MarketDataContinuityStatus::FAILED,
-                    0,
-                    0,
-                    0,
-                    0,
-                    "Continuity buffer limit exceeded; live delivery continues."));
-            continuity_deliveries.emplace_back(
-                subscriber,
-                make_continuity_update(
-                    entry->control->provider_subscription,
-                    MarketDataContinuityStatus::DEGRADED,
-                    0,
-                    0,
-                    0,
-                    0,
-                    "Live delivery resumed without verified continuity after buffer overflow."));
+            const auto failed_update = make_continuity_update(
+                entry->control->provider_subscription,
+                MarketDataContinuityStatus::FAILED,
+                0,
+                0,
+                0,
+                0,
+                "Continuity buffer limit exceeded; live delivery continues.");
+            const auto degraded_update = make_continuity_update(
+                entry->control->provider_subscription,
+                MarketDataContinuityStatus::DEGRADED,
+                0,
+                0,
+                0,
+                0,
+                "Live delivery resumed without verified continuity after buffer overflow.");
+            record_continuity_update_no_lock(entry, failed_update);
+            record_continuity_update_no_lock(entry, degraded_update);
+            continuity_deliveries.emplace_back(subscriber, failed_update);
+            continuity_deliveries.emplace_back(subscriber, degraded_update);
             return false;
         }
 
@@ -3120,6 +3341,31 @@ namespace optionx::market_data {
                 [](const auto& item) {
                     return item.second->phase == EntryPhase::CLEANUP_FAILED;
                 }));
+        }
+
+        inline std::optional<MarketDataContinuitySnapshot>
+        MarketDataRouterState::continuity_snapshot(
+                RoutedSubscriptionId route) const {
+            if (!route.valid()) return std::nullopt;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto entry_it = m_entries.find(route);
+            if (entry_it == m_entries.end()) return std::nullopt;
+            return make_continuity_snapshot_no_lock(
+                entry_it->second,
+                std::chrono::steady_clock::now());
+        }
+
+        inline std::vector<MarketDataContinuitySnapshot>
+        MarketDataRouterState::continuity_snapshots() const {
+            std::vector<MarketDataContinuitySnapshot> snapshots;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            snapshots.reserve(m_entries.size());
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto& [route, entry] : m_entries) {
+                (void)route;
+                snapshots.push_back(make_continuity_snapshot_no_lock(entry, now));
+            }
+            return snapshots;
         }
 
         inline std::size_t MarketDataRouterState::retry_failed_unsubscribes() {
@@ -3613,6 +3859,20 @@ namespace optionx::market_data {
 
     inline std::size_t MarketDataRouter::failed_unsubscribe_count() const {
         return m_state ? m_state->failed_unsubscribe_count() : 0;
+    }
+
+    inline std::optional<MarketDataContinuitySnapshot>
+    MarketDataRouter::continuity_snapshot(RoutedSubscriptionId route) const {
+        return m_state
+            ? m_state->continuity_snapshot(route)
+            : std::nullopt;
+    }
+
+    inline std::vector<MarketDataContinuitySnapshot>
+    MarketDataRouter::continuity_snapshots() const {
+        return m_state
+            ? m_state->continuity_snapshots()
+            : std::vector<MarketDataContinuitySnapshot>{};
     }
 
     inline std::size_t MarketDataRouter::retry_failed_unsubscribes() {

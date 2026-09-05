@@ -23,6 +23,9 @@ namespace optionx::market_data {
         /// \brief Callback that receives historical bars or a typed failure.
         using bar_history_callback_t = std::function<void(BarHistoryResult)>;
 
+        /// \brief Callback that receives historical ticks or a typed failure.
+        using tick_history_callback_t = std::function<void(TickHistoryResult)>;
+
         /// \brief Callback that receives subscribe/unsubscribe acceptance results.
         /// \details A successful subscribe result means the provider accepted
         ///          desired state and returned a handle. Live transport
@@ -268,6 +271,23 @@ namespace optionx::market_data {
         virtual bool fetch_bar_history(
                 const BarHistoryRequest& request,
                 bar_history_callback_t callback) {
+            (void)request;
+            (void)callback;
+            return false;
+        }
+
+        /// \brief Requests historical ticks for an inclusive millisecond range.
+        /// \details Providers must return ticks ordered by `time_ms`. The
+        ///          result's `range_complete` flag is the provider's explicit
+        ///          proof that the range can be used for continuity; returned
+        ///          observations alone do not imply dense coverage.
+        /// \param request Historical tick request parameters.
+        /// \param callback Callback receiving ticks or a typed failure.
+        /// \return True if the request was accepted for processing; false when
+        ///         tick history is unsupported or the request was rejected.
+        virtual bool fetch_tick_history(
+                const TickHistoryRequest& request,
+                tick_history_callback_t callback) {
             (void)request;
             (void)callback;
             return false;

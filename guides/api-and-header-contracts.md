@@ -328,9 +328,11 @@ Contract rules:
   plain `PREFILL` remains startup-only. A cached invalidating status applies the
   same transition before a newly accepted route may start prefill. Completed
   `PREFILL` routes do not acquire reconnect or timestamp-gap recovery implicitly.
-- Generic history continuity is currently defined for bars only. Tick history
-  remains a separate provider contract. Router does not apply a universal
-  timestamp deduplication policy; consumers decide how to upsert revisions.
+- Bar continuity is currently implemented by Router. The provider API also
+  defines a separate `fetch_tick_history()` contract with inclusive
+  millisecond ranges, explicit `range_complete`, and ordered results. No
+  current provider implements authoritative tick history yet; Router does not
+  apply tick continuity or a universal timestamp deduplication policy.
 
 `MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 

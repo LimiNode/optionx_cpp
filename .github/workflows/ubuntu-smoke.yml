@@ -201,10 +201,16 @@ jobs:
       - name: Build market_data_continuity_test and example
         run: cmake --build build-linux --target market_data_continuity_test market_data_continuity_example -j
 
+      - name: Build market_data_tick_history_contract_test
+        run: cmake --build build-linux --target market_data_tick_history_contract_test -j
+
       - name: Run market_data_continuity_test and example
         run: |
           ./build-linux/market_data_continuity_test --gtest_brief=1
           ./build-linux/market_data_continuity_example
+
+      - name: Run market_data_tick_history_contract_test
+        run: ./build-linux/market_data_tick_history_contract_test --gtest_brief=1
 
       - name: Build market_data_subscriber_base_test and example
         run: cmake --build build-linux --target market_data_subscriber_base_test market_data_subscriber_base_example -j
