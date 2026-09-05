@@ -289,6 +289,10 @@ Router не вызывает пользовательский код, удерж
   нового маршрута. Удаление последнего маршрута освобождает callbacks и cache.
 - Replay выполняется отдельно для каждого маршрута. Две логические подписки
   получают события со своими provider handles.
+- Сохранённый инвалидирующий статус (`DISCONNECTED`, `RECONNECTING`, `FAILED`
+  или `STOPPED`) применяется к continuity state нового route до запуска initial
+  prefill. Route остаётся `STALE`, пока последующий live-статус `READY` не
+  разрешит инициализацию или recovery.
 
 Это lifecycle replay, а не восстановление исторических рыночных данных.
 Предварительная история и заполнение разрывов относятся к
@@ -317,8 +321,9 @@ auto route = router.subscribe_bars("intrade", chart, request);
 Значения options имеют следующий смысл:
 
 - `LIVE_ONLY` оставляет live-доставку без изменений. `PREFILL` запрашивает
-  `prefill_bars` перед первой live-доставкой. `PREFILL_AND_RECOVER` делает оба
-  действия и дополнительно восстанавливает разрывы по timestamp.
+  `prefill_bars` перед первой live-доставкой и не восстанавливает последующие
+  разрывы транспорта или timestamps. `PREFILL_AND_RECOVER` делает оба действия
+  и продолжает восстанавливать continuity после инициализации.
 - `prefill_bars` задаёт глубину начальной истории в барах. Router выравнивает
   конец inclusive-диапазона к началу текущего timeframe bucket и запрашивает
   `prefill_bars` slots: от `boundary - (N - 1) * timeframe` до `boundary`.
@@ -362,6 +367,19 @@ history operation, поэтому граница history-to-live сохраня�
 удерживается только suffix. Несколько накопленных gap восстанавливаются
 последовательно, и только после этого route получает финальный `LIVE`.
 
+Если транспорт потерян, пока initial prefill ещё не завершён, Router
+инвалидирует старый asynchronous completion и ждёт следующего `READY`. Затем он
+повторяет исходный prefill range; вызов `process()` не может запустить его, пока
+транспорт остаётся отключённым. Такой restart применяется к обоим history
+режимам, потому что сохраняет незавершённый контракт инициализации. Для
+`PREFILL_AND_RECOVER` после успешного restart Router также восстанавливает
+диапазон от самой исходной границы prefill до последней закрытой candle. Recovery
+включает исходную boundary-свечу, потому что в момент потери транспорта она могла
+быть ещё открыта; `LIVE` публикуется только после проверки закрытой boundary и
+всего хвоста outage. Обычный `PREFILL` остаётся startup-only: он повторяет
+исходный диапазон и не добавляет outage recovery. После его завершения
+последующие transport statuses не включают recovery неявно.
+
 В режиме `PREFILL_AND_RECOVER` Router сравнивает возрастающие timestamps баров
 с заданным timeframe. Если более поздний бар перескакивает один или несколько
 ожидаемых buckets, возникают события:
@@ -382,6 +400,55 @@ continuity GAP_DETECTED
 нужно показывать или записывать это состояние. Эти события отделены от
 stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNECTED`.
 
+### Восстановление После Потери Транспорта
+
+Для инициализированного bar route в режиме `PREFILL_AND_RECOVER` статусы
+`DISCONNECTED`, `RECONNECTING`, `FAILED` или `STOPPED` инвалидируют доказанную
+границу history-to-live. Router оставляет логический route активным, публикует
+`STALE` и начинает удерживать последующие live bars. Recovery разрешается
+только после следующего `READY`: периодические вызовы `process()` при
+отключённом транспорте не запускают history work. После `READY` Router начинает
+ограниченное overlap-восстановление:
+
+```text
+transport DISCONNECTED / RECONNECTING / FAILED / STOPPED
+  -> continuity STALE
+  -> live bars удерживаются как LIVE_SOURCE | CATCHUP
+transport READY
+  -> historical overlap для закрытых timeframe slots
+  -> накопленные live bars без уже подтверждённых overlap slots
+  -> continuity LIVE
+```
+
+`READY` только разрешает начать recovery и ещё не означает, что route снова
+непрерывен. Router хранит trust watermark последнего непрерывного проверенного
+finalized slot и запоминает самый ранний невосстановленный slot. История
+запрашивается от этой границы до последней закрытой candle. Если текущая свеча
+ещё не закрыта, Router ждёт следующий `process()` после её закрытия. Так
+повреждённый текущий snapshot не становится доверенным только из-за
+восстановления транспорта.
+
+Reconnect history доставляется как `HISTORICAL`: это проверочная история, а не
+`BACKFILL` для timestamp gap. После успешного overlap Router не доставляет ещё
+раз накопленные live snapshots для timestamp slots, подтверждённых историей.
+Это узкая дедупликация только на recovery boundary; обычные live revisions по-
+прежнему передаются consumer, который должен делать upsert mutable bars по
+stream и `time_ms`. Provider может дополнить history response данными за
+пределами запроса; Router обрезает reconnect и gap-recovery payloads до
+inclusive-диапазона `[from_time_ms, to_time_ms]` перед проверкой, доставкой,
+обновлением progress и дедупликацией накопленных live data.
+
+Если reconnect history завершилась ошибкой, была отклонена или не покрыла весь
+запрошенный диапазон, Router публикует `FAILED` для этой операции, выпускает
+накопленные live data по safety policy и завершает route в `DEGRADED`. Route
+остаётся активным и продолжает live-доставку, но больше не обещает проверенную
+целостность. Потеря доверия sticky: успешное восстановление другого, более
+нового gap не может скрыть старый пропуск или опубликовать `LIVE`. Следующий
+overlap recovery должен покрыть диапазон от самого раннего невосстановленного
+slot до текущей закрытой границы; только после этого trust watermark продвинется
+и вернётся `LIVE`. `DEGRADED` описывает состояние route после невозможности
+доказать recovery, а `FAILED` описывает одну неудачную history operation.
+
 `max_backfill_bars` ограничивает каждый отдельный provider request, а не весь
 отсутствующий интервал. Если provider вернул неполный, но непустой backfill,
 Router считает такое восстановление неуспешным: неполный batch не доставляется
@@ -393,6 +460,20 @@ Router считает такое восстановление неуспешны
 live data и не зацикливает запрос того же диапазона. Успешный пустой prefill
 тоже является terminal result: исторический batch не доставляется, а Router
 переходит к накопленному live-потоку без retry.
+отсутствующий интервал. Router требует, чтобы каждый ограниченный gap или
+reconnect response покрывал все timeframe slots соответствующего запроса.
+Полный chunk продвигает watermark, после чего накопленные live data могут
+обнаружить следующий ограниченный chunk. Неполный или пустой response считается
+failed recovery и не доставляется как доверенная история. Успешный пустой
+prefill является terminal result: исторический batch не доставляется, а Router
+переходит к накопленному live-потоку без retry, поскольку prefill является
+count-based запросом и у provider может законно не быть баров в этом диапазоне.
+
+Текущая проверка полноты предполагает плотные timeframe slots. Для provider на
+рынках с торговыми сессиями в будущем может понадобиться capability или явный
+результат `range_complete`, чтобы Router отличал закрытую сессию от пропущенной
+свечи. Последняя закрытая граница также вычисляется по wall clock приложения;
+при существенном расхождении с часами брокера это ограничение нужно учитывать.
 
 `max_backfill_bars` применяется до отправки provider request. Поэтому
 continuity updates содержат фактические bounded `from_time_ms`,
@@ -435,10 +516,12 @@ broker timestamp в текущий.
 Router публикует `FAILED`, выпускает накопленные live batches, затем публикует
 `DEGRADED`. Route остаётся пригодным для работы, live-доставка продолжается, а
 невосстановленный исторический диапазон явно сообщается consumer. Router
-сохраняет revisions баров от provider и не применяет универсальную
-timestamp-дедупликацию. Если графику или storage нужно одно текущее значение
-на candle, consumer должен делать upsert по stream и `time_ms`, сохраняя
-возможность принять более позднюю finalized revision.
+сохраняет обычные revisions баров от provider и не применяет универсальную
+timestamp-дедупликацию. После успешного reconnect overlap Router удаляет из
+buffer live snapshots, чьи timestamps уже подтверждены историей, поэтому одна
+recovery candle не доставляется дважды. Если графику или storage нужно одно
+текущее значение на candle, consumer всё равно должен делать upsert по stream и
+`time_ms`, сохраняя возможность принять более позднюю finalized revision.
 
 `MarketDataContinuityService` остаётся низкоуровневым helper для приложений,
 которые хотят запрашивать историю напрямую. Он превращает `BarHistoryResult` в

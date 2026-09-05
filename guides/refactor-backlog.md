@@ -13,6 +13,10 @@ series. Keep it short and remove items once they are handled.
   historical, backfill, and live bar snapshots.
 - Add route-scoped continuity metrics and failure visibility for applications
   that need to prove that a chart or strategy has a complete time series.
+- Replace the dense-bar assumption with an explicit provider completeness
+  capability or `range_complete` history result for session-based markets.
+- Allow reconnect candle boundaries to use a broker-aligned clock instead of
+  relying only on the application wall clock.
 - Add a fuller CMake package/export story for consumers that do not use the
   project as a direct submodule. The current `optionx_cpp::optionx_cpp`
   interface target covers build-tree/submodule consumption.

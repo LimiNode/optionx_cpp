@@ -299,13 +299,35 @@ Contract rules:
 - Successful empty history is terminal: an empty prefill proceeds to live
   delivery, while an empty gap backfill reports failed recovery and releases
   buffered live data without retrying the same range.
-- Router preserves provider bar revisions and leaves timestamp upsert or
-  deduplication to the consumer. A chart or storage component should upsert by
-  stream and `time_ms` when it needs one current candle value.
+- Router preserves ordinary provider bar revisions and leaves general timestamp
+  upsert to the consumer. After a successful reconnect overlap, Router removes
+  buffered live snapshots whose timestamps were already confirmed by returned
+  historical bars, so the same recovery candle is not delivered twice. A chart
+  or storage component should still upsert by stream and `time_ms` when it needs
+  one current candle value.
 - Continuity updates carry the concrete provider subscription handle and must
   not be confused with stream-level `MarketDataStatusUpdate`. History failure
-  does not terminate the live route: Router reports `FAILED`, releases buffered
-  live batches, and ends in `DEGRADED` after the retry budget is exhausted.
+  does not terminate the live route: Router reports operation-level `FAILED`,
+  releases buffered live batches, and returns to `DEGRADED` after the retry
+  budget is exhausted. `LIVE` means that the route's history-to-live continuity
+  has no known unresolved history range; `DEGRADED` means that live delivery
+  continues without proof of the complete range. `DEGRADED` remains sticky
+  while any earlier unverified range exists; repairing a later independent gap
+  cannot emit `LIVE`.
+- For initialized `PREFILL_AND_RECOVER` bar routes, transport loss
+  (`DISCONNECTED`, `RECONNECTING`, `FAILED`, or `STOPPED`) emits route-scoped
+  `STALE`. History recovery cannot start before a later `READY`. Router then
+  revalidates from its earliest unverified slot through the last closed candle,
+  waiting for a dirty current candle to close when necessary. Gap and reconnect
+  responses are clipped to their requested range and must cover every requested
+  timeframe slot; a partial response finishes as `FAILED` then `DEGRADED`.
+- A disconnect while initial prefill is pending invalidates its old completion
+  and repeats the original prefill range after `READY`. In
+  `PREFILL_AND_RECOVER`, Router then revalidates the original boundary candle
+  after it closes and repairs later closed outage slots before emitting `LIVE`;
+  plain `PREFILL` remains startup-only. A cached invalidating status applies the
+  same transition before a newly accepted route may start prefill. Completed
+  `PREFILL` routes do not acquire reconnect or timestamp-gap recovery implicitly.
 - Generic history continuity is currently defined for bars only. Tick history
   remains a separate provider contract. Router does not apply a universal
   timestamp deduplication policy; consumers decide how to upsert revisions.
