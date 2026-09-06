@@ -551,7 +551,7 @@ live-only routes without treating them as continuity-verified.
 The provider contract now has a separate `fetch_tick_history(...)` operation:
 
 ```cpp
-md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000, 10000);
+md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000);
 provider.fetch_tick_history(
     request,
     [](md::TickHistoryResult result) {
@@ -562,22 +562,24 @@ provider.fetch_tick_history(
 
 The range is inclusive and expressed in the same Unix milliseconds used by
 `Tick::time_ms`. A successful result must contain only ticks in that range and
-must set `ordered=true` when timestamps are non-decreasing. Equal timestamps
-are allowed: a tick feed is event-oriented, not a dense timeframe grid. The
-provider must set `range_complete=true` only when it can account for the whole
-requested range; an empty range can be complete when the provider can
-authoritatively say that no ticks occurred. `false` means the observations may
-be useful but do not prove continuity. Exact duplicate handling and any
-provider sequence identity remain a consumer/provider policy; the base `Tick`
-DTO currently has no universal sequence field.
+must return them in non-decreasing timestamp order. Equal timestamps are
+allowed: a tick feed is event-oriented, not a dense timeframe grid. A
+non-empty `sequence.symbol` must match the requested symbol; an empty value is
+allowed as metadata fallback. The provider must set `range_complete=true` only
+when it can account for the whole requested range; an empty range can be
+complete when the provider can authoritatively say that no ticks occurred.
+`false` means the observations may be useful but do not prove continuity.
+The adapter validates symbol, range, and ordering. Exact duplicate handling
+and any provider sequence identity remain a consumer/provider policy; the
+base `Tick` DTO currently has no universal sequence field.
 
 `MarketDataContinuityService::request_tick_history_batch()` is a thin adapter
-for providers that implement the operation. It validates range/order, converts
-`TickSequence` into a `TickDataBatch`, and marks items as `HISTORICAL` (and
- optionally `BACKFILL`). By default it can deliver an incomplete result as
- observations. Pass `require_complete_range=true` after the error callback when
- the caller needs the provider assertion before accepting the batch as a
- continuity proof. It does not add retries:
+for providers that implement the operation. It validates symbol, range, and
+ordering, converts `TickSequence` into a `TickDataBatch`, and marks items as
+`HISTORICAL` (and optionally `BACKFILL`). By default it rejects an incomplete
+result because the converted batch does not retain `range_complete`. Pass
+`require_complete_range=false` explicitly when the caller wants incomplete
+observations rather than a continuity proof. It does not add retries:
 
 ```cpp
 service.request_tick_history_batch(

@@ -277,7 +277,9 @@ namespace optionx::market_data {
         }
 
         /// \brief Requests historical ticks for an inclusive millisecond range.
-        /// \details Providers must return ticks ordered by `time_ms`. The
+        /// \details Providers must return ticks in non-decreasing `time_ms`
+        ///          order. A non-empty result symbol must match the request;
+        ///          an empty symbol is allowed as metadata fallback. The
         ///          result's `range_complete` flag is the provider's explicit
         ///          proof that the range can be used for continuity; returned
         ///          observations alone do not imply dense coverage.

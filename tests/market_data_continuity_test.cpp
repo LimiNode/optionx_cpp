@@ -303,6 +303,60 @@ TEST(MarketDataContinuity, SnapshotRetainsTerminalFailureVisibility) {
     EXPECT_GE(snapshot->degraded_duration_ms, 0U);
 }
 
+TEST(MarketDataContinuity, BufferedBarsDoNotHideGapDuringPrefill) {
+    ScopedTestClock clock(720000);
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+
+    provider.emit_live_bar(900000);
+    const auto buffered = router.continuity_snapshot(route.router_id());
+    ASSERT_TRUE(buffered.has_value());
+    EXPECT_EQ(buffered->last_observed_time_ms, 900000U);
+    EXPECT_EQ(buffered->buffered_items, 1U);
+
+    provider.complete_history(make_history({720000}));
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(provider.history_requests[1].from_ts, 780);
+    EXPECT_EQ(provider.history_requests[1].to_ts, 840);
+    ASSERT_EQ(subscriber->bars.size(), 1U);
+    EXPECT_EQ(subscriber->bars.front().items.front().time_ms, 720000U);
+    EXPECT_EQ(
+        std::count_if(
+            subscriber->continuity.begin(),
+            subscriber->continuity.end(),
+            [](const MarketDataContinuityUpdate& update) {
+                return update.status == MarketDataContinuityStatus::LIVE;
+            }),
+        0U);
+
+    provider.complete_history(make_history({780000, 840000}));
+    ASSERT_EQ(subscriber->bars.size(), 3U);
+    EXPECT_EQ(subscriber->bars[1].items.size(), 2U);
+    EXPECT_EQ(subscriber->bars[2].items.front().time_ms, 900000U);
+    expect_live_delivery(subscriber->bars[2].items.front(), true);
+    EXPECT_EQ(
+        std::count_if(
+            subscriber->continuity.begin(),
+            subscriber->continuity.end(),
+            [](const MarketDataContinuityUpdate& update) {
+                return update.status == MarketDataContinuityStatus::LIVE;
+            }),
+        1U);
+
+    const auto live = router.continuity_snapshot(route.router_id());
+    ASSERT_TRUE(live.has_value());
+    EXPECT_EQ(live->phase, MarketDataContinuityPhase::LIVE);
+    EXPECT_EQ(live->last_observed_time_ms, 900000U);
+}
+
 BarSubscriptionRequest continuity_request(MarketDataContinuityMode mode) {
     BarSubscriptionRequest request(
         "EURUSD",

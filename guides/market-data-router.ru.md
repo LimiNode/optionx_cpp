@@ -706,7 +706,7 @@ if (state && state->enabled) {
 В provider contract появилась отдельная операция `fetch_tick_history(...)`:
 
 ```cpp
-md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000, 10000);
+md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000);
 provider.fetch_tick_history(
     request,
     [](md::TickHistoryResult result) {
@@ -716,10 +716,12 @@ provider.fetch_tick_history(
 ```
 
 Диапазон inclusive и задаётся в Unix milliseconds, как `Tick::time_ms`.
-Успешный result должен содержать только ticks из этого диапазона и выставлять
-`ordered=true`, если timestamps идут в неубывающем порядке. Одинаковые
+Успешный result должен содержать только ticks из этого диапазона.
+Provider должен возвращать timestamps в неубывающем порядке. Одинаковые
 timestamps разрешены: поток тиков событийный, а не плотная сетка timeframe
-слотов. Provider выставляет `range_complete=true` только когда может
+слотов. Непустой `sequence.symbol` должен совпадать с запрошенным symbol;
+пустое значение допустимо как fallback metadata. Provider выставляет
+`range_complete=true` только когда может
 ответственно подтвердить весь запрошенный диапазон; пустой диапазон может
 быть complete, если provider авторитетно знает, что ticks не было. `false`
 означает, что наблюдения можно использовать, но они не доказывают continuity.
@@ -728,12 +730,12 @@ timestamps разрешены: поток тиков событийный, а н
 sequence field.
 
 `MarketDataContinuityService::request_tick_history_batch()` — тонкий adapter
-для provider, который реализует операцию. Он проверяет range/order, превращает
-`TickSequence` в `TickDataBatch` и помечает items как `HISTORICAL` (и при
-необходимости `BACKFILL`). По умолчанию неполный result можно передать как
-наблюдения. Если вызывающей стороне нужно сначала получить assertion provider
-о полной покрытости, после error callback передайте `require_complete_range=true`.
-Adapter не добавляет retries:
+для provider, который реализует операцию. Он проверяет symbol, range и order,
+превращает `TickSequence` в `TickDataBatch` и помечает items как `HISTORICAL`
+(и при необходимости `BACKFILL`). По умолчанию он отклоняет неполный result,
+поскольку созданный batch не сохраняет `range_complete`. Передайте
+`require_complete_range=false` явно, если вызывающей стороне нужны неполные
+observations, а не proof continuity. Adapter не добавляет retries:
 
 ```cpp
 service.request_tick_history_batch(

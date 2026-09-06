@@ -21,14 +21,14 @@ public:
         callback(TickHistoryResult::ok(
             std::move(next_sequence),
             next_range_complete,
-            next_ordered));
+            next_status_code));
         return true;
     }
 
     TickHistoryRequest last_request;
     TickSequence next_sequence;
     bool next_range_complete = true;
-    bool next_ordered = true;
+    long next_status_code = TickHistoryResult::NO_HTTP_STATUS;
 };
 
 TickSequence make_ticks(std::initializer_list<std::uint64_t> times) {
@@ -59,7 +59,7 @@ TEST(MarketDataTickHistoryContract, ProviderHookReturnsTypedResult) {
     provider.next_sequence = make_ticks({1000, 2000});
     TickHistoryResult result;
 
-    const auto request = TickHistoryRequest("EURUSD", 1000, 2000, 10);
+    const auto request = TickHistoryRequest("EURUSD", 1000, 2000);
     ASSERT_TRUE(provider.fetch_tick_history(
         request,
         [&result](TickHistoryResult update) {
@@ -69,10 +69,8 @@ TEST(MarketDataTickHistoryContract, ProviderHookReturnsTypedResult) {
     EXPECT_EQ(provider.last_request.symbol, "EURUSD");
     EXPECT_EQ(provider.last_request.from_time_ms, 1000U);
     EXPECT_EQ(provider.last_request.to_time_ms, 2000U);
-    EXPECT_EQ(provider.last_request.max_items, 10U);
     EXPECT_TRUE(result.success);
     EXPECT_TRUE(result.range_complete);
-    EXPECT_TRUE(result.ordered);
     EXPECT_EQ(result.sequence.ticks.size(), 2U);
 }
 
@@ -113,7 +111,7 @@ TEST(MarketDataTickHistoryContract, ServiceBuildsHistoricalTickBatch) {
     }
 }
 
-TEST(MarketDataTickHistoryContract, ServiceCanRequireCompleteRange) {
+TEST(MarketDataTickHistoryContract, ServiceRejectsIncompleteRangeByDefault) {
     FakeTickHistoryProvider provider;
     provider.next_sequence = make_ticks({1500});
     provider.next_range_complete = false;
@@ -129,9 +127,7 @@ TEST(MarketDataTickHistoryContract, ServiceCanRequireCompleteRange) {
         },
         [&failure](TickHistoryResult result) {
             failure = std::move(result);
-        },
-        false,
-        true));
+        }));
 
     EXPECT_FALSE(batch);
     EXPECT_FALSE(failure.success);
@@ -154,7 +150,9 @@ TEST(MarketDataTickHistoryContract, ServiceDeliversIncompleteRangeAsObservations
         },
         [&failure](TickHistoryResult result) {
             failure = std::move(result);
-        }));
+        },
+        false,
+        false));
 
     ASSERT_TRUE(batch);
     ASSERT_EQ(batch->items.size(), 1U);
@@ -185,10 +183,34 @@ TEST(MarketDataTickHistoryContract, ServiceAllowsAuthoritativeEmptyRange) {
     EXPECT_TRUE(failure.error_desc.empty());
 }
 
+TEST(MarketDataTickHistoryContract, ServiceRejectsForeignSymbol) {
+    FakeTickHistoryProvider provider;
+    provider.next_sequence = make_ticks({1000, 2000});
+    provider.next_sequence.symbol = "GBPUSD";
+    provider.next_status_code = 422;
+    MarketDataContinuityService service(provider);
+    std::unique_ptr<TickDataBatch> batch;
+    TickHistoryResult failure;
+
+    ASSERT_TRUE(service.request_tick_history_batch(
+        TickHistoryRequest("EURUSD", 1000, 2000),
+        {},
+        [&batch](std::unique_ptr<TickDataBatch> update) {
+            batch = std::move(update);
+        },
+        [&failure](TickHistoryResult result) {
+            failure = std::move(result);
+        }));
+
+    EXPECT_FALSE(batch);
+    EXPECT_FALSE(failure.success);
+    EXPECT_EQ(failure.status_code, 422);
+    EXPECT_NE(failure.error_desc.find("symbol"), std::string::npos);
+}
+
 TEST(MarketDataTickHistoryContract, ServiceRejectsUnorderedOrOutOfRangeTicks) {
     FakeTickHistoryProvider provider;
     provider.next_sequence = make_ticks({2000, 1000});
-    provider.next_ordered = true;
     MarketDataContinuityService service(provider);
     std::unique_ptr<TickDataBatch> batch;
     TickHistoryResult failure;

@@ -330,7 +330,9 @@ Contract rules:
   `PREFILL` routes do not acquire reconnect or timestamp-gap recovery implicitly.
 - Bar continuity is currently implemented by Router. The provider API also
   defines a separate `fetch_tick_history()` contract with inclusive
-  millisecond ranges, explicit `range_complete`, and ordered results. No
+  millisecond ranges, explicit `range_complete`, and non-decreasing timestamp
+  order validated by the adapter. A non-empty result symbol must match the
+  request. No
   current provider implements authoritative tick history yet; Router does not
   apply tick continuity or a universal timestamp deduplication policy.
 

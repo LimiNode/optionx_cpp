@@ -147,7 +147,8 @@ namespace optionx::market_data {
         /// \param backfill_marks Whether to add BACKFILL in addition to HISTORICAL.
         /// \param require_complete_range Whether an incomplete provider result
         ///        should be reported as a validation failure instead of being
-        ///        delivered as observations.
+        ///        delivered as observations. Defaults to true because the
+        ///        converted batch does not retain range-completeness metadata.
         /// \return True if the provider accepted the history request.
         bool request_tick_history_batch(
                 TickHistoryRequest request,
@@ -155,7 +156,7 @@ namespace optionx::market_data {
                 BaseMarketDataProvider::ticks_callback_t callback,
                 tick_history_error_callback_t error_callback = nullptr,
                 bool backfill_marks = false,
-                bool require_complete_range = false) {
+                bool require_complete_range = true) {
             if (!callback || !request.valid()) return false;
 
             const auto callback_request = request;
@@ -181,13 +182,24 @@ namespace optionx::market_data {
                         return;
                     }
 
-                    if (!result.ordered || !ticks_fit_range(
+                    if (!result.sequence.symbol.empty() &&
+                        result.sequence.symbol != request.symbol) {
+                        if (error_callback) {
+                            error_callback(TickHistoryResult::fail(
+                                "Historical tick response does not match the requested symbol.",
+                                result.status_code));
+                        }
+                        return;
+                    }
+
+                    if (!ticks_fit_range(
                             result.sequence,
                             request.from_time_ms,
                             request.to_time_ms)) {
                         if (error_callback) {
                             error_callback(TickHistoryResult::fail(
-                                "Historical tick response is outside the requested range or unordered."));
+                                "Historical tick response is outside the requested range or unordered.",
+                                result.status_code));
                         }
                         return;
                     }

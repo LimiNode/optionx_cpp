@@ -26,7 +26,6 @@ namespace optionx {
         bool success = false; ///< Whether the provider completed the request.
         long status_code = NO_HTTP_STATUS; ///< Transport status, when available.
         bool range_complete = false; ///< Whether the provider proved range completeness.
-        bool ordered = false; ///< Whether ticks are non-decreasing by timestamp.
         std::string error_desc; ///< Human-readable failure reason.
         TickSequence sequence; ///< Returned ticks and source metadata.
 
@@ -34,13 +33,11 @@ namespace optionx {
         static TickHistoryResult ok(
                 TickSequence tick_sequence,
                 bool range_complete,
-                bool ordered = true,
                 long status = NO_HTTP_STATUS) {
             TickHistoryResult result;
             result.success = true;
             result.status_code = status;
             result.range_complete = range_complete;
-            result.ordered = ordered;
             result.sequence = std::move(tick_sequence);
             return result;
         }
