@@ -92,6 +92,47 @@ Registration has the following contract:
 - `registered_provider_id(runtime_id)` maps an event's runtime provider identity
   back to the stable application ID while the registration exists.
 
+### Provider Profiles
+
+A registration may also carry configuration-only defaults for new bar requests.
+Profiles are keyed by the stable `MarketDataProviderId`; they can be queried by
+that ID or by any exact alias:
+
+```cpp
+md::MarketDataProviderProfile intrade_profile;
+intrade_profile.continuity_defaults.mode =
+    md::MarketDataContinuityMode::PREFILL_AND_RECOVER;
+intrade_profile.continuity_defaults.prefill_bars = 500;
+intrade_profile.continuity_defaults.retry.max_attempts = 5;
+intrade_profile.continuity_defaults.retry.initial_backoff_ms = 500;
+
+router.register_provider(
+    intrade_id,
+    intrade_platform,
+    {"intrade", "primary-options"},
+    intrade_profile);
+```
+
+The Router does not apply a profile implicitly. A bot can select a provider by
+alias, copy the profile into its request, and override the policy for that one
+route:
+
+```cpp
+auto request = md::BarSubscriptionRequest("EURUSD", 60);
+const auto registered_profile = router.provider_profile("intrade");
+if (registered_profile) {
+    request.continuity = registered_profile->continuity_defaults;
+}
+request.continuity.retry.max_attempts = 10;
+
+auto route = router.subscribe_bars("intrade", bot, request);
+```
+
+`set_provider_profile()` changes defaults for future requests only. Existing
+routes retain their own copied continuity options. Direct provider-reference
+subscriptions are also unchanged and do not have a profile unless the caller
+applies one explicitly.
+
 Provider selection changes only how Router finds the provider. These calls use
 the same routing implementation:
 

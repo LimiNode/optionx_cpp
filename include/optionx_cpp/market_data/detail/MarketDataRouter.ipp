@@ -145,12 +145,14 @@ namespace optionx::market_data {
                 BaseMarketDataProvider* provider = nullptr;
                 ProviderInstanceId instance_id = kInvalidProviderInstanceId;
                 std::vector<std::string> aliases;
+                MarketDataProviderProfile profile;
             };
 
             bool register_provider(
                     MarketDataProviderId id,
                     BaseMarketDataProvider& provider,
-                    std::vector<std::string> aliases);
+                    std::vector<std::string> aliases,
+                    MarketDataProviderProfile profile);
             bool add_provider_alias(MarketDataProviderId id, std::string alias);
             bool unregister_provider(MarketDataProviderId id);
             [[nodiscard]] std::size_t registered_provider_count() const;
@@ -158,6 +160,13 @@ namespace optionx::market_data {
                     ProviderInstanceId provider_id) const;
             [[nodiscard]] std::vector<std::string> provider_aliases(
                     MarketDataProviderId id) const;
+            bool set_provider_profile(
+                    MarketDataProviderId id,
+                    MarketDataProviderProfile profile);
+            [[nodiscard]] std::optional<MarketDataProviderProfile> provider_profile(
+                    MarketDataProviderId id) const;
+            [[nodiscard]] std::optional<MarketDataProviderProfile> provider_profile(
+                    std::string_view provider_alias) const;
 
             MarketDataRouterSubscription subscribe_ticks(
                     BaseMarketDataProvider& provider,
@@ -656,8 +665,9 @@ namespace optionx::market_data {
         inline bool MarketDataRouterState::register_provider(
                 MarketDataProviderId id,
                 BaseMarketDataProvider& provider,
-                std::vector<std::string> aliases) {
-            if (!id.valid()) return false;
+                std::vector<std::string> aliases,
+                MarketDataProviderProfile profile) {
+            if (!id.valid() || !profile.valid()) return false;
             for (std::size_t i = 0; i < aliases.size(); ++i) {
                 if (aliases[i].empty()) return false;
                 for (std::size_t j = i + 1; j < aliases.size(); ++j) {
@@ -682,6 +692,7 @@ namespace optionx::market_data {
             registration.provider = &provider;
             registration.instance_id = provider.provider_id();
             registration.aliases = std::move(aliases);
+            registration.profile = std::move(profile);
             for (const auto& alias : registration.aliases) {
                 m_provider_aliases.emplace(alias, id);
             }
@@ -752,6 +763,37 @@ namespace optionx::market_data {
             return it == m_registered_providers.end()
                 ? std::vector<std::string>{}
                 : it->second.aliases;
+        }
+
+        inline bool MarketDataRouterState::set_provider_profile(
+                MarketDataProviderId id,
+                MarketDataProviderProfile profile) {
+            if (!id.valid() || !profile.valid()) return false;
+
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_shutdown) return false;
+            const auto it = m_registered_providers.find(id);
+            if (it == m_registered_providers.end()) return false;
+            it->second.profile = std::move(profile);
+            return true;
+        }
+
+        inline std::optional<MarketDataProviderProfile>
+        MarketDataRouterState::provider_profile(MarketDataProviderId id) const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto it = m_registered_providers.find(id);
+            if (it == m_registered_providers.end()) return std::nullopt;
+            return it->second.profile;
+        }
+
+        inline std::optional<MarketDataProviderProfile>
+        MarketDataRouterState::provider_profile(
+                std::string_view provider_alias) const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto id = provider_id_for_alias_no_lock(provider_alias);
+            const auto it = m_registered_providers.find(id);
+            if (it == m_registered_providers.end()) return std::nullopt;
+            return it->second.profile;
         }
 
         inline BaseMarketDataProvider* MarketDataRouterState::registered_provider_no_lock(
@@ -3643,11 +3685,13 @@ namespace optionx::market_data {
     inline bool MarketDataRouter::register_provider(
             MarketDataProviderId id,
             BaseMarketDataProvider& provider,
-            std::vector<std::string> aliases) {
+            std::vector<std::string> aliases,
+            MarketDataProviderProfile profile) {
         return m_state && m_state->register_provider(
             id,
             provider,
-            std::move(aliases));
+            std::move(aliases),
+            std::move(profile));
     }
 
     inline bool MarketDataRouter::add_provider_alias(
@@ -3672,6 +3716,26 @@ namespace optionx::market_data {
     inline std::vector<std::string> MarketDataRouter::provider_aliases(
             MarketDataProviderId id) const {
         return m_state ? m_state->provider_aliases(id) : std::vector<std::string>{};
+    }
+
+    inline bool MarketDataRouter::set_provider_profile(
+            MarketDataProviderId id,
+            MarketDataProviderProfile profile) {
+        return m_state && m_state->set_provider_profile(id, std::move(profile));
+    }
+
+    inline std::optional<MarketDataProviderProfile>
+    MarketDataRouter::provider_profile(MarketDataProviderId id) const {
+        return m_state
+            ? m_state->provider_profile(id)
+            : std::nullopt;
+    }
+
+    inline std::optional<MarketDataProviderProfile>
+    MarketDataRouter::provider_profile(std::string_view provider_alias) const {
+        return m_state
+            ? m_state->provider_profile(provider_alias)
+            : std::nullopt;
     }
 
     inline bool MarketDataRouter::post_to_owner(owner_task_t task) const {

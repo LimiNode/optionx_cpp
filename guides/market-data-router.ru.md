@@ -92,6 +92,46 @@ const bool registered = router.register_provider(
 - `registered_provider_id(runtime_id)` преобразует runtime identity из события
   обратно в стабильный ID приложения, пока регистрация существует.
 
+### Профили провайдеров
+
+Регистрация может также содержать defaults только для конфигурации новых
+bar-запросов. Профили привязаны к стабильному `MarketDataProviderId`; получить
+их можно по этому ID или по любому точному alias:
+
+```cpp
+md::MarketDataProviderProfile intrade_profile;
+intrade_profile.continuity_defaults.mode =
+    md::MarketDataContinuityMode::PREFILL_AND_RECOVER;
+intrade_profile.continuity_defaults.prefill_bars = 500;
+intrade_profile.continuity_defaults.retry.max_attempts = 5;
+intrade_profile.continuity_defaults.retry.initial_backoff_ms = 500;
+
+router.register_provider(
+    intrade_id,
+    intrade_platform,
+    {"intrade", "primary-options"},
+    intrade_profile);
+```
+
+Router не применяет profile неявно. Бот может выбрать provider по alias,
+скопировать profile в request и переопределить policy только для этого route:
+
+```cpp
+auto request = md::BarSubscriptionRequest("EURUSD", 60);
+const auto registered_profile = router.provider_profile("intrade");
+if (registered_profile) {
+    request.continuity = registered_profile->continuity_defaults;
+}
+request.continuity.retry.max_attempts = 10;
+
+auto route = router.subscribe_bars("intrade", bot, request);
+```
+
+`set_provider_profile()` меняет defaults только для будущих запросов. Уже
+существующие routes сохраняют собственные скопированные continuity options.
+Подписки через прямую ссылку на provider также не меняются и не получают
+profile, пока вызывающий код не применит его явно.
+
 Способ выбора меняет только поиск провайдера. Эти вызовы используют одну и ту же
 реализацию маршрутизации:
 

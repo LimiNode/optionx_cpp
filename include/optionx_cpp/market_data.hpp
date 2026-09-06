@@ -31,6 +31,7 @@
 #include "data/ticks.hpp"
 #include "market_data/enums.hpp"
 #include "market_data/MarketDataContinuityOptions.hpp"
+#include "market_data/MarketDataProviderProfile.hpp"
 #include "market_data/MarketDataSubscription.hpp"
 #include "market_data/MarketDataRouterIds.hpp"
 #include "market_data/MarketDataContinuity.hpp"
