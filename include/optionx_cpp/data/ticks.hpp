@@ -10,5 +10,7 @@
 #include "ticks/Tick.hpp"
 #include "ticks/SingleTick.hpp"
 #include "ticks/TickSequence.hpp"
+#include "ticks/TickHistoryRequest.hpp"
+#include "ticks/TickHistoryResult.hpp"
 
 #endif // OPTIONX_HEADER_DATA_TICKS_HPP_INCLUDED

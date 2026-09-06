@@ -670,3 +670,89 @@ owner-loop shutdown order.
 - `MarketDataHub`: non-owning альтернатива для stream fan-out.
 - `MarketDataContinuityService`: граница historical prefill и gap recovery.
 - `BaseTradingPlatform::post_task()`: ingress в owner loop платформы.
+
+## Наблюдаемость Continuity
+
+`MarketDataRouter` предоставляет копию состояния, которое хранится для
+каждого route. Запрос не вызывает provider или subscriber, поэтому его можно
+делать из потока мониторинга:
+
+```cpp
+const auto state = router.continuity_snapshot(route.router_id());
+if (state && state->enabled) {
+    std::cout << "phase=" << md::to_str(state->phase)
+              << " status=" << md::to_str(state->last_status)
+              << " retries=" << state->retry_count
+              << " buffered=" << state->buffered_items
+              << " verified_through=" << state->verified_through_time_ms
+              << " unverified_from=" << state->unverified_from_time_ms
+              << '\n';
+}
+```
+
+Успешный пустой `PREFILL` обновляет запрошенный диапазон, но не выдаёт его за
+подтверждённый: последний непустой подтверждённый диапазон остаётся без
+изменений.
+
+`continuity_snapshots()` возвращает такие же point-in-time копии для всех
+сохранённых routes. Snapshot содержит route и concrete provider handle,
+текущие phase/status, последнюю operation, признак in-flight, последний
+запрошенный и последний непустой подтверждённый диапазон, watermark
+`verified_through_time_ms` и `unverified_from_time_ms`, размер buffer,
+счётчики requests/retries/failures и последнюю причину failure.
+`stale_duration_ms` и `degraded_duration_ms` считают время по монотонным часам;
+это накопленные длительности, а не Unix timestamps. Route с
+`enabled=false` тоже возвращается, поэтому можно наблюдать обычную live-only
+подписку, не выдавая её за continuity-verified.
+
+## Общий Контракт Истории Тиков
+
+В provider contract появилась отдельная операция `fetch_tick_history(...)`:
+
+```cpp
+md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000);
+provider.fetch_tick_history(
+    request,
+    [](md::TickHistoryResult result) {
+        if (!result) return; // причина находится в result.error_desc
+        // result.range_complete — assertion провайдера о полноте диапазона.
+    });
+```
+
+Диапазон inclusive и задаётся в Unix milliseconds, как `Tick::time_ms`.
+Успешный result должен содержать только ticks из этого диапазона.
+Provider должен возвращать timestamps в неубывающем порядке. Одинаковые
+timestamps разрешены: поток тиков событийный, а не плотная сетка timeframe
+слотов. Непустой `sequence.symbol` должен совпадать с запрошенным symbol;
+пустое значение допустимо как fallback metadata. Provider выставляет
+`range_complete=true` только когда может
+ответственно подтвердить весь запрошенный диапазон; пустой диапазон может
+быть complete, если provider авторитетно знает, что ticks не было. `false`
+означает, что наблюдения можно использовать, но они не доказывают continuity.
+Обработка точных дублей и provider sequence identity остаётся политикой
+конкретного provider/consumer; у базового `Tick` сейчас нет универсального
+sequence field.
+
+`MarketDataContinuityService::request_tick_history_batch()` — тонкий adapter
+для provider, который реализует операцию. Он проверяет symbol, range и order,
+превращает `TickSequence` в `TickDataBatch` и помечает items как `HISTORICAL`
+(и при необходимости `BACKFILL`). По умолчанию он отклоняет неполный result,
+поскольку созданный batch не сохраняет `range_complete`. Передайте
+`require_complete_range=false` явно, если вызывающей стороне нужны неполные
+observations, а не proof continuity. Adapter не добавляет retries:
+
+```cpp
+service.request_tick_history_batch(
+    request,
+    route.provider_subscription(),
+    on_ticks,
+    on_history_error,
+    false,
+    true); // require_complete_range
+```
+
+`MarketDataRouter` пока интегрирует continuity только для bars. Ни один
+текущий provider в этом репозитории не предоставляет authoritative tick
+history, поэтому базовая операция возвращает `false`, пока не появятся
+конкретный endpoint и его семантика. Это намеренно: текущий price snapshot
+нельзя выдавать за исторические ticks.

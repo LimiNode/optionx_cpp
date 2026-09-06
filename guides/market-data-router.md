@@ -517,6 +517,88 @@ helper for route-owned prefill and recovery. See
 `examples/market_data_continuity_example.cpp` for a deterministic chart-like
 consumer and provider.
 
+## Continuity Observability
+
+`MarketDataRouter` exposes a copy of the state retained for every route. The
+query does not call a provider or subscriber and can therefore be used by a
+monitoring thread:
+
+```cpp
+const auto state = router.continuity_snapshot(route.router_id());
+if (state && state->enabled) {
+    std::cout << "phase=" << md::to_str(state->phase)
+              << " status=" << md::to_str(state->last_status)
+              << " retries=" << state->retry_count
+              << " buffered=" << state->buffered_items
+              << " verified_through=" << state->verified_through_time_ms
+              << " unverified_from=" << state->unverified_from_time_ms
+              << '\n';
+}
+```
+
+`continuity_snapshots()` returns the same point-in-time copies for all retained
+routes. The snapshot includes the route and concrete provider handle, current
+phase/status, last operation, in-flight state, last requested and last non-empty
+confirmed ranges, the `verified_through_time_ms` and `unverified_from_time_ms`
+watermarks, buffer size, request/retry/failure counters, and the last failure
+message. An empty successful `PREFILL` updates the requested range but leaves the
+last non-empty confirmed range unchanged. `stale_duration_ms` and
+`degraded_duration_ms` use a monotonic clock;
+they are accumulated durations and are not Unix timestamps. A route with
+`enabled=false` is still returned, which makes it possible to inspect ordinary
+live-only routes without treating them as continuity-verified.
+
+## Generic Tick History Contract
+
+The provider contract now has a separate `fetch_tick_history(...)` operation:
+
+```cpp
+md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000);
+provider.fetch_tick_history(
+    request,
+    [](md::TickHistoryResult result) {
+        if (!result) return; // inspect result.error_desc
+        // result.range_complete is the provider's continuity assertion.
+    });
+```
+
+The range is inclusive and expressed in the same Unix milliseconds used by
+`Tick::time_ms`. A successful result must contain only ticks in that range and
+must return them in non-decreasing timestamp order. Equal timestamps are
+allowed: a tick feed is event-oriented, not a dense timeframe grid. A
+non-empty `sequence.symbol` must match the requested symbol; an empty value is
+allowed as metadata fallback. The provider must set `range_complete=true` only
+when it can account for the whole requested range; an empty range can be
+complete when the provider can authoritatively say that no ticks occurred.
+`false` means the observations may be useful but do not prove continuity.
+The adapter validates symbol, range, and ordering. Exact duplicate handling
+and any provider sequence identity remain a consumer/provider policy; the
+base `Tick` DTO currently has no universal sequence field.
+
+`MarketDataContinuityService::request_tick_history_batch()` is a thin adapter
+for providers that implement the operation. It validates symbol, range, and
+ordering, converts `TickSequence` into a `TickDataBatch`, and marks items as
+`HISTORICAL` (and optionally `BACKFILL`). By default it rejects an incomplete
+result because the converted batch does not retain `range_complete`. Pass
+`require_complete_range=false` explicitly when the caller wants incomplete
+observations rather than a continuity proof. It does not add retries:
+
+```cpp
+service.request_tick_history_batch(
+    request,
+    route.provider_subscription(),
+    on_ticks,
+    on_history_error,
+    false,
+    true); // require_complete_range
+```
+
+`MarketDataRouter` still integrates continuity only for bars. No current
+provider in this repository exposes authoritative tick history, so the base
+operation returns `false` until a provider-specific endpoint and semantics are
+implemented. This is intentional: a current-price snapshot cannot be reused as
+historical tick data.
+
 ## Owner Loop And Bot Threads
 
 Without an owner dispatcher, Router preserves synchronous behavior. Subscribe,

@@ -17,16 +17,19 @@
 namespace optionx::market_data {
 
     /// \class MarketDataContinuityService
-    /// \brief Bridges historical bar requests into the live market-data batch pipeline.
+    /// \brief Bridges historical requests into the market-data batch pipeline.
     ///
     /// The service intentionally stays thin: providers still own transport and
     /// stream lifecycle, while Router owns route-level retry policy. This helper
-    /// only tags recovered payloads as historical/backfill data and packages
-    /// them into BarDataBatch objects.
+    /// only validates basic tick ordering, tags historical payloads, and
+    /// packages provider sequences into delivery batches.
     class MarketDataContinuityService {
     public:
         /// \brief Callback that receives a failed history request.
         using error_callback_t = std::function<void(BarHistoryResult)>;
+
+        /// \brief Callback that receives a failed tick-history request.
+        using tick_history_error_callback_t = std::function<void(TickHistoryResult)>;
 
         /// \brief Constructs the service around a market-data provider.
         /// \param provider Provider used for historical data requests.
@@ -136,6 +139,80 @@ namespace optionx::market_data {
                 });
         }
 
+        /// \brief Requests historical ticks and delivers them as one batch.
+        /// \param request Inclusive millisecond range to fetch.
+        /// \param subscription Optional live subscription related to the history.
+        /// \param callback Batch callback used by the consumer pipeline.
+        /// \param error_callback Optional callback for typed fetch or validation failures.
+        /// \param backfill_marks Whether to add BACKFILL in addition to HISTORICAL.
+        /// \param require_complete_range Whether an incomplete provider result
+        ///        should be reported as a validation failure instead of being
+        ///        delivered as observations. Defaults to true because the
+        ///        converted batch does not retain range-completeness metadata.
+        /// \return True if the provider accepted the history request.
+        bool request_tick_history_batch(
+                TickHistoryRequest request,
+                MarketDataSubscriptionHandle subscription,
+                BaseMarketDataProvider::ticks_callback_t callback,
+                tick_history_error_callback_t error_callback = nullptr,
+                bool backfill_marks = false,
+                bool require_complete_range = true) {
+            if (!callback || !request.valid()) return false;
+
+            const auto callback_request = request;
+            return m_provider.fetch_tick_history(
+                request,
+                [request = callback_request,
+                 subscription = std::move(subscription),
+                 callback = std::move(callback),
+                 error_callback = std::move(error_callback),
+                 backfill_marks,
+                 require_complete_range](TickHistoryResult result) mutable {
+                    if (!result) {
+                        if (error_callback) error_callback(std::move(result));
+                        return;
+                    }
+
+                    if (require_complete_range && !result.range_complete) {
+                        if (error_callback) {
+                            error_callback(TickHistoryResult::fail(
+                                "Historical tick response does not prove the requested range is complete.",
+                                result.status_code));
+                        }
+                        return;
+                    }
+
+                    if (!result.sequence.symbol.empty() &&
+                        result.sequence.symbol != request.symbol) {
+                        if (error_callback) {
+                            error_callback(TickHistoryResult::fail(
+                                "Historical tick response does not match the requested symbol.",
+                                result.status_code));
+                        }
+                        return;
+                    }
+
+                    if (!ticks_fit_range(
+                            result.sequence,
+                            request.from_time_ms,
+                            request.to_time_ms)) {
+                        if (error_callback) {
+                            error_callback(TickHistoryResult::fail(
+                                "Historical tick response is outside the requested range or unordered.",
+                                result.status_code));
+                        }
+                        return;
+                    }
+
+                    auto batch = make_tick_batch(
+                        std::move(result.sequence),
+                        request,
+                        std::move(subscription),
+                        backfill_marks);
+                    callback(std::move(batch));
+                });
+        }
+
         /// \brief Converts a historical bar sequence into a market-data batch.
         /// \param sequence Historical sequence returned by a provider.
         /// \param request Original request used as metadata fallback.
@@ -169,7 +246,48 @@ namespace optionx::market_data {
             return batch;
         }
 
+        /// \brief Converts a historical tick sequence into a market-data batch.
+        /// \param sequence Historical ticks returned by a provider.
+        /// \param request Original request used as metadata fallback.
+        /// \param subscription Optional related live subscription handle.
+        /// \param backfill_marks Whether to add the BACKFILL flag.
+        /// \return Batch ready for tick consumers.
+        static std::unique_ptr<TickDataBatch> make_tick_batch(
+                TickSequence sequence,
+                const TickHistoryRequest& request,
+                MarketDataSubscriptionHandle subscription = {},
+                bool backfill_marks = false) {
+            auto batch = std::make_unique<TickDataBatch>();
+            batch->subscription = std::move(subscription);
+            batch->type = MarketDataType::TICKS;
+            batch->symbol = sequence.symbol.empty() ? request.symbol : sequence.symbol;
+            batch->timeframe = 0;
+            batch->price_digits = sequence.price_digits;
+            batch->volume_digits = sequence.volume_digits;
+            batch->items = std::move(sequence.ticks);
+
+            for (auto& tick : batch->items) {
+                mark_historical_payload(tick.flags, backfill_marks);
+            }
+            return batch;
+        }
+
     private:
+        static bool ticks_fit_range(
+                const TickSequence& sequence,
+                std::uint64_t from_time_ms,
+                std::uint64_t to_time_ms) noexcept {
+            std::uint64_t previous_time_ms = 0;
+            for (const auto& tick : sequence.ticks) {
+                if (tick.time_ms < from_time_ms || tick.time_ms > to_time_ms ||
+                    (previous_time_ms != 0 && tick.time_ms < previous_time_ms)) {
+                    return false;
+                }
+                previous_time_ms = tick.time_ms;
+            }
+            return true;
+        }
+
         static std::uint64_t safe_multiply(
                 std::uint64_t left,
                 std::uint64_t right) noexcept {

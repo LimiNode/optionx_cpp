@@ -7,6 +7,10 @@
 
 #include "MarketDataRouterIds.hpp"
 #include "MarketDataRouterSubscription.hpp"
+#include "MarketDataContinuity.hpp"
+
+#include <optional>
+#include <vector>
 
 namespace optionx::market_data {
 
@@ -209,6 +213,20 @@ namespace optionx::market_data {
 
         /// \brief Returns the number of failed physical unsubscriptions awaiting retry.
         [[nodiscard]] std::size_t failed_unsubscribe_count() const;
+
+        /// \brief Returns a monitoring snapshot for one route.
+        /// \details The returned copy can be queried from a monitoring thread.
+        ///          It never invokes subscriber callbacks or provider code.
+        /// \param route Router-local route identifier.
+        /// \return Snapshot while the route is retained, otherwise `std::nullopt`.
+        [[nodiscard]] std::optional<MarketDataContinuitySnapshot>
+        continuity_snapshot(RoutedSubscriptionId route) const;
+
+        /// \brief Returns monitoring snapshots for all retained routes.
+        /// \details The result is a point-in-time copy and may include pending
+        ///          or failed-cleanup routes until their lifecycle completes.
+        [[nodiscard]] std::vector<MarketDataContinuitySnapshot>
+        continuity_snapshots() const;
 
         /// \brief Retries physical cleanup retained after unsubscribe failures.
         /// \return Number of retry operations accepted by providers.

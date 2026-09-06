@@ -146,9 +146,11 @@ Subscription rules:
   `READY`, while a plain or completed `PREFILL` route does not gain outage
   recovery. Tick routes do not have this guarantee because the provider contract
   still lacks generic tick-history.
-- Router continuity is currently bar-only because providers expose
-  `fetch_bar_history()` but no generic tick-history operation. See the complete
-  EN/RU Router guides and `market_data_continuity_example.cpp`.
+- Router continuity is currently bar-only. Providers have a separate
+  `fetch_tick_history()` contract with inclusive millisecond ranges and an
+  explicit `range_complete` result, but no current provider implements
+  authoritative tick history yet. See the complete EN/RU Router guides and
+  `market_data_continuity_example.cpp`.
 - `BaseMarketDataProvider` is non-copyable and non-movable so provider identity
   cannot be duplicated after handles were issued.
 - Public subscriptions describe consumer routing. Internal platform polling or
