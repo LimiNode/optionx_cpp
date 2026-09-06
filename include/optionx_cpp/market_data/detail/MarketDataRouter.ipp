@@ -2043,12 +2043,6 @@ namespace optionx::market_data {
                             confirmed_to_time_ms;
                         entry->continuity_state.confirmed_items =
                             delivered_history_items;
-                    } else {
-                        entry->continuity_state.confirmed_from_time_ms =
-                            confirmed_from_time_ms;
-                        entry->continuity_state.confirmed_through_time_ms =
-                            confirmed_to_time_ms;
-                        entry->continuity_state.confirmed_items = 0;
                     }
                     if (recovery_requires_full_range) {
                         const bool has_more_reconnect_history =

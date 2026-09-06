@@ -281,6 +281,32 @@ TEST(MarketDataContinuity, SnapshotExposesRouteScopedProgressAndWatermarks) {
     EXPECT_EQ(router.continuity_snapshots().size(), 1U);
 }
 
+TEST(MarketDataContinuity, EmptyPrefillDoesNotReportConfirmedRange) {
+    ScopedTestClock clock(240000ULL);
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL));
+    ASSERT_TRUE(route.active());
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+
+    provider.complete_history(make_history({}));
+
+    const auto snapshot = router.continuity_snapshot(route.router_id());
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->requested_from_time_ms, 240000U);
+    EXPECT_EQ(snapshot->requested_to_time_ms, 240000U);
+    EXPECT_EQ(snapshot->requested_items, 1U);
+    EXPECT_EQ(snapshot->last_confirmed_from_time_ms, 0U);
+    EXPECT_EQ(snapshot->last_confirmed_to_time_ms, 0U);
+    EXPECT_EQ(snapshot->last_confirmed_items, 0U);
+    EXPECT_EQ(snapshot->verified_through_time_ms, 0U);
+}
+
 TEST(MarketDataContinuity, SnapshotRetainsTerminalFailureVisibility) {
     FakeHistoryProvider provider;
     provider.reject_history = true;

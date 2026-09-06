@@ -144,9 +144,9 @@ namespace optionx::market_data {
         std::uint64_t requested_from_time_ms = 0; ///< Last history range start.
         std::uint64_t requested_to_time_ms = 0; ///< Last history range end.
         std::size_t requested_items = 0; ///< Last history operation item count.
-        std::uint64_t last_confirmed_from_time_ms = 0; ///< Last usable history range start.
-        std::uint64_t last_confirmed_to_time_ms = 0; ///< Last usable history range end.
-        std::size_t last_confirmed_items = 0; ///< Item count in the last usable history result.
+        std::uint64_t last_confirmed_from_time_ms = 0; ///< Last non-empty usable history range start.
+        std::uint64_t last_confirmed_to_time_ms = 0; ///< Last non-empty usable history range end.
+        std::size_t last_confirmed_items = 0; ///< Item count in the last non-empty usable history result.
         std::uint64_t verified_through_time_ms = 0; ///< Continuous verified watermark.
         std::uint64_t unverified_from_time_ms = 0; ///< Earliest unresolved trust boundary.
         std::size_t buffered_batches = 0; ///< Number of live batches held for continuity.

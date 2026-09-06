@@ -538,10 +538,12 @@ if (state && state->enabled) {
 
 `continuity_snapshots()` returns the same point-in-time copies for all retained
 routes. The snapshot includes the route and concrete provider handle, current
-phase/status, last operation, in-flight state, last requested and confirmed
-ranges, the `verified_through_time_ms` and `unverified_from_time_ms`
+phase/status, last operation, in-flight state, last requested and last non-empty
+confirmed ranges, the `verified_through_time_ms` and `unverified_from_time_ms`
 watermarks, buffer size, request/retry/failure counters, and the last failure
-message. `stale_duration_ms` and `degraded_duration_ms` use a monotonic clock;
+message. An empty successful `PREFILL` updates the requested range but leaves the
+last non-empty confirmed range unchanged. `stale_duration_ms` and
+`degraded_duration_ms` use a monotonic clock;
 they are accumulated durations and are not Unix timestamps. A route with
 `enabled=false` is still returned, which makes it possible to inspect ordinary
 live-only routes without treating them as continuity-verified.

@@ -690,10 +690,14 @@ if (state && state->enabled) {
 }
 ```
 
+Успешный пустой `PREFILL` обновляет запрошенный диапазон, но не выдаёт его за
+подтверждённый: последний непустой подтверждённый диапазон остаётся без
+изменений.
+
 `continuity_snapshots()` возвращает такие же point-in-time копии для всех
 сохранённых routes. Snapshot содержит route и concrete provider handle,
-текущие phase/status, последнюю operation, признак in-flight, последние
-запрошенный и подтверждённый диапазоны, watermark
+текущие phase/status, последнюю operation, признак in-flight, последний
+запрошенный и последний непустой подтверждённый диапазон, watermark
 `verified_through_time_ms` и `unverified_from_time_ms`, размер buffer,
 счётчики requests/retries/failures и последнюю причину failure.
 `stale_duration_ms` и `degraded_duration_ms` считают время по монотонным часам;
