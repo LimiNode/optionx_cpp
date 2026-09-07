@@ -212,6 +212,16 @@ jobs:
       - name: Run market_data_tick_history_contract_test
         run: ./build-linux/market_data_tick_history_contract_test --gtest_brief=1
 
+      - name: Build market data tick continuity and observed history tests
+        run: >
+          cmake --build build-linux --target
+          market_data_tick_continuity_test intrade_observed_tick_history_test -j
+
+      - name: Run market data tick continuity and observed history tests
+        run: |
+          ./build-linux/market_data_tick_continuity_test --gtest_brief=1
+          ./build-linux/intrade_observed_tick_history_test --gtest_brief=1
+
       - name: Build market_data_subscriber_base_test and example
         run: cmake --build build-linux --target market_data_subscriber_base_test market_data_subscriber_base_example -j
 
