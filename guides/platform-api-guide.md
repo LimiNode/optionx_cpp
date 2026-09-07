@@ -148,15 +148,19 @@ Subscription rules:
   slots before emitting `LIVE`.
   Cached invalidating status replay blocks the same work until a later live
   `READY`, while a plain or completed `PREFILL` route does not gain outage
-  recovery. Tick routes do not have this guarantee because the provider contract
-  still lacks generic tick-history.
-- Router continuity is currently bar-first. Intrade additionally exposes a
-  bounded, session-scoped observed-tick archive populated by `/price_now`.
+  recovery. Tick routes can use `TickSubscriptionRequest::continuity` with the
+  same history-first lifecycle when the provider implements
+  `fetch_tick_history()`.
+- Router continuity supports bars and tick routes. Intrade additionally exposes
+  a bounded, session-scoped observed-tick archive populated by `/price_now`.
   Its timestamps have one-second broker granularity, and `range_complete=true`
   means every expected observed second is present in the retained archive, not
   that every broker micro-event was captured. The archive is non-persistent and
   starts empty for a new authenticated session. `trade_check2.php` remains a
-  settlement/trade-result endpoint and is not used for tick history.
+  settlement/trade-result endpoint and is not used for tick history. Router
+  tick continuity uses the archive's explicit `range_complete` assertion,
+  keeps incomplete ranges `DEGRADED`, and preserves distinct same-second
+  observations while removing only exact overlaps.
 - `BaseMarketDataProvider` is non-copyable and non-movable so provider identity
   cannot be duplicated after handles were issued.
 - Public subscriptions describe consumer routing. Internal platform polling or

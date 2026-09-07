@@ -634,10 +634,11 @@ service.request_tick_history_batch(
     true); // require_complete_range
 ```
 
-`MarketDataRouter` still has its mature continuity state machine on bars. The
-Intrade Bar provider now also implements `fetch_tick_history()` as a bounded,
+`MarketDataRouter` also applies the history contract to tick routes. The
+Intrade Bar provider implements `fetch_tick_history()` as a bounded,
 session-scoped archive of observed `/price_now` snapshots. This is useful for
-short reconnect windows, but it is not an authoritative broker tick archive:
+short prefill and reconnect windows, but it is not an authoritative broker tick
+archive:
 
 - broker timestamps have one-second granularity;
 - the archive starts empty for a new authenticated session and evicts old data;
@@ -648,9 +649,47 @@ short reconnect windows, but it is not an authoritative broker tick archive:
 - `trade_check2.php` remains a settlement/trade-result API and is not used for
   range history.
 
-Router tick continuity is the next layer. Until that integration is enabled,
-callers can use the provider operation directly and must treat
-`range_complete=false` as an observation result rather than continuity proof.
+### Tick continuity in Router
+
+Set `TickSubscriptionRequest::continuity` to enable history-first delivery for
+one tick route:
+
+```cpp
+md::TickSubscriptionRequest request("EURUSD");
+request.continuity.mode = md::MarketDataContinuityMode::PREFILL_AND_RECOVER;
+request.continuity.prefill_lookback_ms = 60'000;
+request.continuity.expected_interval_ms = 1'000;
+request.continuity.max_backfill_ms = 60'000;
+
+auto route = router.subscribe_ticks(provider, bot, request);
+```
+
+`PREFILL` requests the configured lookback before releasing live ticks.
+`PREFILL_AND_RECOVER` also holds the live tail when the difference between
+successive observed timestamps exceeds `expected_interval_ms`. That value is a
+gap-detection hint, not a claim that every tick must arrive on a fixed grid;
+equal timestamps and sub-second live ticks are valid. The provider's
+`range_complete` remains the authority for whether a requested history range
+proves continuity.
+
+The Router sends historical ticks first, marks them `HISTORICAL`, and then
+replays held live ticks as `LIVE_SOURCE | CATCHUP`. A complete result is required
+before the route can report `LIVE`. An incomplete result may still be delivered
+as observations, but it reports `FAILED` followed by sticky `DEGRADED`; a later
+unrelated successful range cannot hide the earlier unresolved watermark.
+History requests are bounded by `max_backfill_ms` and are scheduled by
+`process()`, so tick continuity does not create a timer thread.
+
+On reconnect, tick continuity reports `STALE`, waits for `READY`, and requests
+the unresolved range through the latest observed time. Exact overlap is removed
+by `(time_ms, ask, bid, last, volume)` identity. `received_ms` and flags do not
+make an otherwise identical observation distinct, while different observations
+with the same second remain separate events. If the continuity buffer exceeds
+its batch or item limit, Router releases the held live data, reports
+`FAILED`/`DEGRADED`, disables continuity for that route, and resumes ordinary
+live delivery. If transport is interrupted during the initial prefill, Router
+restarts from the original lookback start after `READY` and extends the request
+through the current time, so the interrupted interval is not silently skipped.
 
 ## Owner Loop And Bot Threads
 

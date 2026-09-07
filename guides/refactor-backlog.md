@@ -19,11 +19,15 @@ series. Keep it short and remove items once they are handled.
   `/price_now`. It preserves distinct same-second snapshots and reports
   `range_complete` only for proven one-second coverage; it is not a persistent
   or authoritative broker tick archive.
+- Router tick continuity now uses that provider history contract for opt-in
+  `PREFILL` and `PREFILL_AND_RECOVER` routes. It buffers live ticks, treats
+  `range_complete` as the authority, retries transport failures through
+  `process()`, performs bounded recovery, preserves distinct same-second
+  events, removes only exact overlaps, and keeps incomplete history
+  `DEGRADED`.
 
 ## Next PR Candidates
 
-- Integrate Intrade's observed-tick archive with Router continuity while keeping
-  incomplete ranges fail-closed and documenting the session/retention limit.
 - Add an authoritative provider tick-history implementation only if a broker
   later exposes one; do not treat `trade_check2.php` as a range-history API.
 - Replace the dense-bar assumption with an explicit provider completeness
