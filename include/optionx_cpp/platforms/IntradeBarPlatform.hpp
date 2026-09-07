@@ -14,6 +14,7 @@
 #include "IntradeBarPlatform/AuthData.hpp"
 #include "IntradeBarPlatform/AccountInfoData.hpp"
 #include "IntradeBarPlatform/ApiResponses.hpp"
+#include "IntradeBarPlatform/ObservedTickHistory.hpp"
 #include "IntradeBarPlatform/http_utils.hpp"
 #include "IntradeBarPlatform/http_parsers.hpp"
 #include "IntradeBarPlatform/HttpClientComponent.hpp"
@@ -46,7 +47,8 @@ namespace optionx::platforms {
         ///
         /// Initializes all required components, including HTTP communication, authentication,
         /// balance tracking, trade execution, and price updates.
-        IntradeBarPlatform()
+        explicit IntradeBarPlatform(
+                intrade_bar::IntradeObservedTickHistoryOptions tick_history_options = {})
             : BaseTradingPlatform(std::make_shared<intrade_bar::AccountInfoData>()),
               m_http_client(*this),
               m_request_manager(*this, m_http_client),
@@ -55,7 +57,8 @@ namespace optionx::platforms {
               m_balance_manager(*this, m_request_manager, m_account_info),
               m_active_trades_sync_manager(*this, m_request_manager, m_account_info),
               m_trading_condition_manager(*this, m_account_info),
-              m_price_manager(*this, m_request_manager),
+              m_tick_history(std::move(tick_history_options)),
+              m_price_manager(*this, m_request_manager, m_tick_history),
               m_btc_price_manager(*this),
               m_fx_price_websocket_manager(*this),
               m_market_data_subscriptions(
@@ -153,6 +156,18 @@ namespace optionx::platforms {
             return true;
         }
 
+        /// \brief Returns observed Intrade polling ticks from the in-memory archive.
+        /// \param request Inclusive broker-time range in milliseconds.
+        /// \param callback Callback receiving observations or a typed failure.
+        /// \return True when the request was accepted for local processing.
+        bool fetch_tick_history(
+                const TickHistoryRequest& request,
+                market_data::BaseMarketDataProvider::tick_history_callback_t callback) override {
+            if (!callback || !request.valid()) return false;
+            callback(m_tick_history.fetch(request));
+            return true;
+        }
+
         /// \brief Returns the live bar data callback.
         market_data::BaseMarketDataProvider::bars_callback_t& on_bar_data() override {
             return m_bar_data_callback;
@@ -236,6 +251,7 @@ namespace optionx::platforms {
         intrade_bar::BalanceManager       m_balance_manager;  ///< Tracks account balance.
         intrade_bar::ActiveTradesSyncManager m_active_trades_sync_manager; ///< Syncs broker active trade snapshots.
         intrade_bar::TradingConditionManager m_trading_condition_manager; ///< Publishes current trading conditions.
+        intrade_bar::IntradeObservedTickHistory m_tick_history; ///< Bounded polling tick archive.
         intrade_bar::PriceManager         m_price_manager;    ///< Retrieves and updates price data.
         intrade_bar::BtcPriceManager      m_btc_price_manager;///< Retrieves BTC/USDT quotes from the websocket stream.
         intrade_bar::FxPriceWebSocketManager m_fx_price_websocket_manager; ///< Retrieves FX quotes from websocket streams.

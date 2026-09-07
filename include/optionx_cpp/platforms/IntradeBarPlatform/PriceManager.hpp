@@ -5,6 +5,8 @@
 /// \file PriceManager.hpp
 /// \brief Defines the PriceManager class responsible for handling price updates and related events.
 
+#include "ObservedTickHistory.hpp"
+
 namespace optionx::platforms::intrade_bar {
 
     /// \class PriceManager
@@ -21,8 +23,11 @@ namespace optionx::platforms::intrade_bar {
         /// \param request_manager Reference to the request manager for making HTTP requests.
         explicit PriceManager(
                 BaseTradingPlatform& platform,
-                RequestManager& request_manager)
-                : BaseComponent(platform.event_bus()), m_request_manager(request_manager) {
+                RequestManager& request_manager,
+                IntradeObservedTickHistory& tick_history)
+                : BaseComponent(platform.event_bus()),
+                  m_request_manager(request_manager),
+                  m_tick_history(tick_history) {
             subscribe<events::ConnectRequestEvent>();
             subscribe<events::DisconnectRequestEvent>();
             subscribe<events::AccountInfoUpdateEvent>();
@@ -44,6 +49,7 @@ namespace optionx::platforms::intrade_bar {
 
     private:
         RequestManager&    m_request_manager; ///< Reference to the request manager.
+        IntradeObservedTickHistory& m_tick_history; ///< Bounded polling observation archive.
         utils::TaskManager m_task_manager;    ///< Task manager for handling asynchronous tasks.
         std::unordered_map<std::string, Tick> m_ticks; ///< Latest tick payload by symbol.
         bool m_has_price_update = false; ///< Flag indicating whether a price update is in progress.
@@ -84,12 +90,14 @@ namespace optionx::platforms::intrade_bar {
         LOGIT_0TRACE();
         m_task_manager.shutdown();
         m_ticks.clear();
+        m_tick_history.clear();
     }
 
     inline void PriceManager::handle_event(const events::DisconnectRequestEvent& event) {
         LOGIT_0TRACE();
         m_task_manager.shutdown();
         m_ticks.clear();
+        m_tick_history.clear();
     }
 
     inline void PriceManager::handle_event(const events::AccountInfoUpdateEvent& event) {
@@ -112,6 +120,7 @@ namespace optionx::platforms::intrade_bar {
             LOGIT_0TRACE();
             m_task_manager.shutdown();
             m_ticks.clear();
+            m_tick_history.clear();
         }
     }
 
@@ -143,6 +152,8 @@ namespace optionx::platforms::intrade_bar {
 
             task->set_period(time_shield::MS_PER_SEC);
             LOGIT_DEBUG("Intrade Bar price: snapshot received. batches=", batches.size());
+
+            m_tick_history.record(batches);
 
             for (auto& batch : batches) {
                 for (auto& tick : batch.items) {
