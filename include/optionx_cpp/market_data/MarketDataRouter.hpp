@@ -8,6 +8,7 @@
 #include "MarketDataRouterIds.hpp"
 #include "MarketDataRouterSubscription.hpp"
 #include "MarketDataContinuity.hpp"
+#include "MarketDataProviderProfile.hpp"
 
 #include <optional>
 #include <vector>
@@ -81,11 +82,13 @@ namespace optionx::market_data {
         /// \param id Stable non-zero application-assigned provider ID.
         /// \param provider Provider that outlives its registration and Router use.
         /// \param aliases Optional selection aliases for configuration-facing code.
+        /// \param profile Optional defaults available to requests selected through this registration.
         /// \return True when the complete registration was added atomically.
         bool register_provider(
                 MarketDataProviderId id,
                 BaseMarketDataProvider& provider,
-                std::vector<std::string> aliases = {});
+                std::vector<std::string> aliases = {},
+                MarketDataProviderProfile profile = {});
 
         /// \brief Adds one exact alias to an existing provider registration.
         bool add_provider_alias(MarketDataProviderId id, std::string alias);
@@ -104,6 +107,23 @@ namespace optionx::market_data {
         /// \brief Returns a copy of the aliases assigned to a registered provider.
         [[nodiscard]] std::vector<std::string> provider_aliases(
                 MarketDataProviderId id) const;
+
+        /// \brief Replaces defaults for future requests through a registration.
+        /// \details Existing routes keep their own copied continuity options.
+        /// \return False when the provider is unknown, shut down, or the profile is invalid.
+        bool set_provider_profile(
+                MarketDataProviderId id,
+                MarketDataProviderProfile profile);
+
+        /// \brief Returns a copy of a registered provider profile by stable ID.
+        /// \return The profile, or empty when the ID is not registered.
+        [[nodiscard]] std::optional<MarketDataProviderProfile> provider_profile(
+                MarketDataProviderId id) const;
+
+        /// \brief Returns a copy of a registered provider profile by exact alias.
+        /// \return The profile, or empty when the alias is not registered.
+        [[nodiscard]] std::optional<MarketDataProviderProfile> provider_profile(
+                std::string_view provider_alias) const;
 
         /// \brief Posts work to the configured provider owner loop.
         /// \return False when no dispatcher is configured or it rejects the task.

@@ -348,6 +348,81 @@ TEST(MarketDataRouter, RoutesRegisteredProvidersByStableIdAndAlias) {
     ASSERT_EQ(bar_subscriber->bars.size(), 1u);
 }
 
+TEST(MarketDataRouter, StoresProviderProfileByStableIdAndAlias) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    const MarketDataProviderId provider_id{1001};
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    MarketDataProviderProfile profile;
+    profile.continuity_defaults.mode =
+        MarketDataContinuityMode::PREFILL_AND_RECOVER;
+    profile.continuity_defaults.prefill_bars = 100;
+    profile.continuity_defaults.max_backfill_bars = 500;
+    profile.continuity_defaults.retry.max_attempts = 5;
+    profile.continuity_defaults.retry.initial_backoff_ms = 500;
+    profile.continuity_defaults.retry.max_backoff_ms = 5000;
+
+    ASSERT_TRUE(router.register_provider(
+        provider_id,
+        provider,
+        {"intrade", "primary-options"},
+        profile));
+
+    const auto by_id = router.provider_profile(provider_id);
+    ASSERT_TRUE(by_id.has_value());
+    EXPECT_EQ(
+        by_id->continuity_defaults.mode,
+        MarketDataContinuityMode::PREFILL_AND_RECOVER);
+    EXPECT_EQ(by_id->continuity_defaults.prefill_bars, 100U);
+    EXPECT_EQ(by_id->continuity_defaults.max_backfill_bars, 500U);
+    EXPECT_EQ(by_id->continuity_defaults.retry.max_attempts, 5U);
+    EXPECT_EQ(by_id->continuity_defaults.retry.initial_backoff_ms, 500U);
+    EXPECT_EQ(by_id->continuity_defaults.retry.max_backoff_ms, 5000U);
+
+    const auto by_alias = router.provider_profile("primary-options");
+    ASSERT_TRUE(by_alias.has_value());
+    EXPECT_EQ(
+        by_alias->continuity_defaults.mode,
+        MarketDataContinuityMode::PREFILL_AND_RECOVER);
+    EXPECT_EQ(by_alias->continuity_defaults.prefill_bars, 100U);
+
+    auto route = router.subscribe_bars(
+        "intrade",
+        subscriber,
+        BarSubscriptionRequest("EURUSD", 60));
+    ASSERT_TRUE(route.active());
+    const auto route_state = router.continuity_snapshot(route.router_id());
+    ASSERT_TRUE(route_state.has_value());
+    EXPECT_FALSE(route_state->enabled);
+
+    auto updated = profile;
+    updated.continuity_defaults.retry.max_attempts = 10;
+    ASSERT_TRUE(router.set_provider_profile(provider_id, updated));
+    const auto updated_profile = router.provider_profile(provider_id);
+    ASSERT_TRUE(updated_profile.has_value());
+    EXPECT_EQ(updated_profile->continuity_defaults.retry.max_attempts, 10U);
+
+    const auto missing_id = router.provider_profile(MarketDataProviderId{2001});
+    const auto missing_alias = router.provider_profile("unknown");
+    EXPECT_FALSE(missing_id.has_value());
+    EXPECT_FALSE(missing_alias.has_value());
+}
+
+TEST(MarketDataRouter, RejectsInvalidProviderProfile) {
+    FakeMarketDataProvider provider;
+    MarketDataRouter router;
+    MarketDataProviderProfile invalid;
+    invalid.continuity_defaults.mode = MarketDataContinuityMode::PREFILL;
+
+    EXPECT_FALSE(router.register_provider(
+        MarketDataProviderId{1001},
+        provider,
+        {"intrade"},
+        invalid));
+    EXPECT_EQ(router.registered_provider_count(), 0U);
+}
+
 TEST(MarketDataRouter, RejectsProviderRegistrationCollisions) {
     FakeMarketDataProvider first;
     FakeMarketDataProvider second;
