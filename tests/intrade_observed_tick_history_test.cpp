@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include <optionx_cpp/platforms/IntradeBarPlatform/ObservedTickHistory.hpp>
+#include <optionx_cpp/platforms.hpp>
 
 using namespace optionx;
 using namespace optionx::events;
