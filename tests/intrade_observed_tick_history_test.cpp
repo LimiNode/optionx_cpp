@@ -48,6 +48,7 @@ TEST(IntradeObservedTickHistory, ReturnsSortedInclusiveObservations) {
     archive.record({make_batch(
         "EURUSD",
         {make_tick(1.1002, 1.1004, 3000),
+         make_tick(1.1003, 1.1005, 2000),
          make_tick(1.1000, 1.1002, 1000),
          make_tick(1.1001, 1.1003, 2000)})});
 
@@ -55,10 +56,11 @@ TEST(IntradeObservedTickHistory, ReturnsSortedInclusiveObservations) {
 
     ASSERT_TRUE(result);
     EXPECT_TRUE(result.range_complete);
-    ASSERT_EQ(result.sequence.ticks.size(), 3U);
+    ASSERT_EQ(result.sequence.ticks.size(), 4U);
     EXPECT_EQ(result.sequence.ticks[0].time_ms, 1000U);
     EXPECT_EQ(result.sequence.ticks[1].time_ms, 2000U);
-    EXPECT_EQ(result.sequence.ticks[2].time_ms, 3000U);
+    EXPECT_EQ(result.sequence.ticks[2].time_ms, 2000U);
+    EXPECT_EQ(result.sequence.ticks[3].time_ms, 3000U);
     EXPECT_EQ(result.sequence.symbol, "EURUSD");
     EXPECT_EQ(result.sequence.provider, "INTRADE_BAR");
 }

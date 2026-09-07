@@ -123,7 +123,7 @@ namespace optionx::platforms::intrade_bar {
                 });
 
             const bool complete = has_complete_coverage(
-                history,
+                sequence.ticks,
                 request.from_time_ms,
                 request.to_time_ms);
             return TickHistoryResult::ok(std::move(sequence), complete);
@@ -214,7 +214,7 @@ namespace optionx::platforms::intrade_bar {
         }
 
         bool has_complete_coverage(
-                const SymbolHistory& history,
+                const std::vector<Tick>& ticks,
                 std::uint64_t from_time_ms,
                 std::uint64_t to_time_ms) const noexcept {
             const auto interval = m_options.sampling_interval_ms;
@@ -223,15 +223,17 @@ namespace optionx::platforms::intrade_bar {
                 return false;
             }
 
+            std::size_t tick_index = 0;
             std::uint64_t expected = from_time_ms;
             while (true) {
-                const bool found = std::any_of(
-                    history.items.begin(),
-                    history.items.end(),
-                    [expected](const StoredTick& stored) {
-                        return stored.tick.time_ms == expected;
-                    });
-                if (!found) return false;
+                while (tick_index < ticks.size() &&
+                       ticks[tick_index].time_ms < expected) {
+                    ++tick_index;
+                }
+                if (tick_index == ticks.size() ||
+                    ticks[tick_index].time_ms != expected) {
+                    return false;
+                }
                 if (expected == to_time_ms) return true;
                 if (expected > std::numeric_limits<std::uint64_t>::max() - interval) {
                     return false;
