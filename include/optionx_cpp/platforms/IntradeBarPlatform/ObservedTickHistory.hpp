@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include <optionx_cpp/utils/fixed_point.hpp>
 #include <optionx_cpp/data/ticks.hpp>
 #include <optionx_cpp/utils/pubsub.hpp>
 #include <optionx_cpp/data/events/PriceUpdateEvent.hpp>
