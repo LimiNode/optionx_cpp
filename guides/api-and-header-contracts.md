@@ -70,6 +70,28 @@
 `include`. Он совпадает с consumer contract `<optionx_cpp/...>` и не маскирует
 неверные cross-domain quoted includes во вложенных headers.
 
+### Internal Leaf Include Context
+
+Classify a header before adding a project include. A supported public
+aggregate/facade owns the include closure for its internal leaves; a leaf is
+not automatically a standalone include target.
+
+- Headers under `platforms/<Platform>/`, `market_data/`, and `data/*` are
+  internal leaves unless this document explicitly lists them as public entry
+  points.
+- Do not add a cross-domain project include, `../` path, or broad aggregate to
+  an internal leaf solely to make a direct include compile. Put the prerequisite
+  in the owning aggregate, in the intended order, using the installed
+  `<optionx_cpp/...>` spelling for cross-domain edges.
+- For example, `platforms.hpp` prepares shared `utils`, `data`, `components`,
+  and platform prerequisites before including `platforms/IntradeBarPlatform.hpp`.
+  The latter then includes `platforms/IntradeBarPlatform/ObservedTickHistory.hpp`
+  through the prepared context.
+- Include-contract tests and examples must include the supported aggregate
+  (`<optionx_cpp/platforms.hpp>` in this case), not the internal leaf. A direct
+  leaf test is appropriate only when standalone leaf compilation is an
+  intentional documented contract.
+
 ## Header-Only Ownership
 
 `optionx_cpp` - header-only C++17 библиотека. Большая часть публичной

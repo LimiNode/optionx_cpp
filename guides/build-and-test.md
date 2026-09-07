@@ -191,8 +191,7 @@ destination `OptionX` folders.
 обновляй тест, который подключает intended public entry point:
 
 ```cpp
-#include <optionx_cpp/data.hpp>
-#include <optionx_cpp/platforms/IntradeBarPlatform.hpp>
+#include <optionx_cpp/platforms.hpp>
 ```
 
 Direct leaf includes допустимы для white-box tests only when that domain

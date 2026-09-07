@@ -26,6 +26,10 @@
   prefix, for example `<optionx_cpp/data/trading.hpp>` or
   `<optionx_cpp/utils/tasks.hpp>`. Do not use quoted `"optionx_cpp/..."` paths
   and do not rely on `include/optionx_cpp` as an additional include root.
+- This cross-domain rule applies to supported aggregates and facades. Internal
+  leaves receive that context from their owner and must not add a project
+  cross-domain include, `../` path, or broad aggregate solely to compile in
+  isolation.
 - Prefer the nearest aggregate header for public-domain and cross-domain
   dependencies; do not rebuild aggregate include order inside leaf DTO headers.
 - Do not use `../` in `#include` directives.
