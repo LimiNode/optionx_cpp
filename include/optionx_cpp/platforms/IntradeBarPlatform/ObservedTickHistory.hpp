@@ -16,10 +16,7 @@
 #include <utility>
 #include <vector>
 
-#include "../../utils/fixed_point.hpp"
-#include "../../utils/pubsub.hpp"
-#include "../../data/ticks.hpp"
-#include "../../data/events/PriceUpdateEvent.hpp"
+#include <optionx_cpp/data.hpp>
 
 namespace optionx::platforms::intrade_bar {
 
