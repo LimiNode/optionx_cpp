@@ -87,6 +87,25 @@ namespace optionx::market_data {
             return m_status_callback;
         }
 
+        /// \brief Returns the provider's current market-data timestamp.
+        /// \details The value is optional. A provider may return zero when it
+        ///          cannot estimate its own clock. Router continuity falls back
+        ///          to the local clock in that case. Providers with a discrete
+        ///          history grid should return a timestamp aligned to that grid.
+        /// \return Current provider timestamp in milliseconds, or zero when unavailable.
+        virtual std::uint64_t provider_time_ms() const noexcept {
+            return 0;
+        }
+
+        /// \brief Returns the provider tick-history sampling grid.
+        /// \details This describes the history backend, not a generic live-tick
+        ///          gap threshold. Zero means that history uses continuous time
+        ///          or has no provider-specific alignment requirement.
+        /// \return Positive history grid size in milliseconds, or zero.
+        virtual std::uint64_t tick_history_interval_ms() const noexcept {
+            return 0;
+        }
+
         /// \brief Requests a live tick stream subscription.
         /// \param request Tick subscription parameters.
         /// \param callback Callback receiving desired-subscription acceptance or failure.

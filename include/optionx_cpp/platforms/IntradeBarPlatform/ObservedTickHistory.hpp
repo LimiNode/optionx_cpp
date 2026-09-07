@@ -32,6 +32,10 @@ namespace optionx::platforms::intrade_bar {
         /// It is used only to make a conservative completeness assertion.
         std::uint64_t sampling_interval_ms = 1000;
 
+        /// Number of recent local/provider offset samples used by the median
+        /// broker-clock estimate.
+        std::size_t clock_offset_sample_count = 9;
+
         /// \brief Returns true when the archive can be used safely.
         [[nodiscard]] bool valid() const noexcept {
             return max_items_per_symbol > 0 && sampling_interval_ms > 0;
@@ -71,6 +75,7 @@ namespace optionx::platforms::intrade_bar {
                     if (tick.time_ms == 0 || contains_observation(history, tick)) {
                         continue;
                     }
+                    record_clock_offset(tick);
                     history.items.push_back(StoredTick{tick});
                 }
                 prune(history);
@@ -133,6 +138,7 @@ namespace optionx::platforms::intrade_bar {
         void clear() noexcept {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_symbols.clear();
+            m_clock_offsets_ms.clear();
         }
 
         /// \brief Returns the number of retained observations for a symbol.
@@ -145,6 +151,24 @@ namespace optionx::platforms::intrade_bar {
         /// \brief Returns the immutable archive options.
         [[nodiscard]] const IntradeObservedTickHistoryOptions& options() const noexcept {
             return m_options;
+        }
+
+        /// \brief Returns the current broker-aligned time estimate.
+        /// \param local_time_ms Current local wall-clock time in milliseconds.
+        /// \details The estimate uses the median of recent
+        ///          `tick.time_ms - tick.received_ms` observations and is then
+        ///          rounded down to the provider's sampling grid. With no
+        ///          usable samples this still provides a conservative aligned
+        ///          local-time fallback.
+        [[nodiscard]] std::uint64_t provider_time_ms(
+                std::uint64_t local_time_ms) const noexcept {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const auto adjusted = add_offset(
+                local_time_ms,
+                median_clock_offset_no_lock());
+            const auto interval = m_options.sampling_interval_ms;
+            if (interval == 0) return adjusted;
+            return adjusted - adjusted % interval;
         }
 
     private:
@@ -178,6 +202,80 @@ namespace optionx::platforms::intrade_bar {
                 [&tick](const StoredTick& stored) {
                     return same_market_observation(stored.tick, tick);
                 });
+        }
+
+        static std::int64_t observation_offset(
+                const Tick& tick) noexcept {
+            const auto max_int64 = static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)());
+            if (tick.time_ms > max_int64 || tick.received_ms > max_int64) {
+                return 0;
+            }
+            const auto broker_time = static_cast<std::int64_t>(tick.time_ms);
+            const auto received_time = static_cast<std::int64_t>(tick.received_ms);
+            if (broker_time >= received_time) {
+                return broker_time - received_time;
+            }
+            const auto difference = received_time - broker_time;
+            return difference == (std::numeric_limits<std::int64_t>::max)()
+                ? (std::numeric_limits<std::int64_t>::min)()
+                : -difference;
+        }
+
+        void record_clock_offset(const Tick& tick) {
+            if (tick.received_ms == 0 || m_options.clock_offset_sample_count == 0) {
+                return;
+            }
+            m_clock_offsets_ms.push_back(observation_offset(tick));
+            while (m_clock_offsets_ms.size() > m_options.clock_offset_sample_count) {
+                m_clock_offsets_ms.pop_front();
+            }
+        }
+
+        [[nodiscard]] std::int64_t median_clock_offset_no_lock() const noexcept {
+            if (m_clock_offsets_ms.empty()) return 0;
+            const auto select = [this](std::size_t rank) noexcept {
+                std::int64_t selected = 0;
+                bool has_selected = false;
+                for (const auto candidate : m_clock_offsets_ms) {
+                    std::size_t not_greater = 0;
+                    for (const auto value : m_clock_offsets_ms) {
+                        if (value <= candidate) ++not_greater;
+                    }
+                    if (not_greater > rank &&
+                        (!has_selected || candidate < selected)) {
+                        selected = candidate;
+                        has_selected = true;
+                    }
+                }
+                return selected;
+            };
+
+            const auto middle = m_clock_offsets_ms.size() / 2U;
+            if (m_clock_offsets_ms.size() % 2U != 0) {
+                return select(middle);
+            }
+            const auto lower = select(middle - 1U);
+            const auto upper = select(middle);
+            return static_cast<std::int64_t>(
+                (static_cast<long double>(lower) +
+                 static_cast<long double>(upper)) / 2.0L);
+        }
+
+        static std::uint64_t add_offset(
+                std::uint64_t local_time_ms,
+                std::int64_t offset_ms) noexcept {
+            if (offset_ms >= 0) {
+                const auto positive = static_cast<std::uint64_t>(offset_ms);
+                return local_time_ms >
+                        (std::numeric_limits<std::uint64_t>::max)() - positive
+                    ? (std::numeric_limits<std::uint64_t>::max)()
+                    : local_time_ms + positive;
+            }
+            const auto negative = offset_ms == (std::numeric_limits<std::int64_t>::min)()
+                ? static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) + 1U
+                : static_cast<std::uint64_t>(-offset_ms);
+            return local_time_ms < negative ? 0U : local_time_ms - negative;
         }
 
         void prune(SymbolHistory& history) {
@@ -245,6 +343,7 @@ namespace optionx::platforms::intrade_bar {
         IntradeObservedTickHistoryOptions m_options;
         mutable std::mutex m_mutex;
         std::unordered_map<std::string, SymbolHistory> m_symbols;
+        std::deque<std::int64_t> m_clock_offsets_ms;
     };
 
 } // namespace optionx::platforms::intrade_bar

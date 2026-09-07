@@ -806,6 +806,17 @@ tick archive:
 - `trade_check2.php` остаётся settlement/trade-result API и не используется
   для range history.
 
+Провайдер может дополнительно реализовать метаданные времени через
+`BaseMarketDataProvider::provider_time_ms()` и
+`BaseMarketDataProvider::tick_history_interval_ms()`. Первый метод возвращает
+оценку времени провайдера в миллисекундах, второй описывает сетку backend
+истории и не является порогом live gap detection. Intrade получает эту оценку
+по недавним samples `(Tick::time_ms - Tick::received_ms)`, берёт их медиану,
+чтобы отфильтровать polling jitter, и округляет результат вниз до секундной
+сетки истории. Если оценка недоступна, Router использует локальные часы.
+Провайдеры без дискретной сетки оставляют оба optional hook со значениями по
+умолчанию.
+
 ### Tick continuity в Router
 
 Чтобы включить history-first delivery для одного tick route, настройте
@@ -827,6 +838,16 @@ auto route = router.subscribe_ticks(provider, bot, request);
 gap-detection hint, а не требование плотной сетки: equal timestamps и live
 ticks чаще одной секунды допустимы. Для доказательства continuity Router
 доверяет только значению `range_complete` в provider result.
+
+Recovery использует inclusive timestamp ranges. Для event-oriented provider
+Router не синтезирует пропущенные tick slots, а сохраняет в buffer live tick,
+который запустил recovery. Если provider объявляет history grid, Router
+округляет начало вниз, а конец вверх для unbounded request, чтобы observation
+с timestamp между grid points не выпала из диапазона. Bounded chunks сохраняют
+лимит размера и перекрываются в предыдущей конечной точке, когда такой overlap
+позволяет продвинуть диапазон. Если лимит меньше шага provider grid, Router
+переходит к следующей provider boundary, а не повторяет тот же запрос. Overlap
+удаляется только по exact observation identity.
 
 Router сначала отправляет historical ticks с флагом `HISTORICAL`, затем
 воспроизводит удержанные live ticks с флагами `LIVE_SOURCE | CATCHUP`. До

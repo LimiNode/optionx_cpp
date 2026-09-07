@@ -649,6 +649,17 @@ archive:
 - `trade_check2.php` remains a settlement/trade-result API and is not used for
   range history.
 
+Providers may expose optional history-clock metadata through
+`BaseMarketDataProvider::provider_time_ms()` and
+`BaseMarketDataProvider::tick_history_interval_ms()`. The first is a provider
+time estimate in milliseconds; the second describes the history backend's
+sampling grid and is not the live gap-detection threshold. Intrade estimates
+its provider time from recent `(Tick::time_ms - Tick::received_ms)` samples,
+uses their median to reject polling jitter, and rounds the estimate down to
+the one-second history grid. With no estimate, Router falls back to the local
+clock. Providers without a discrete history grid leave both optional hooks at
+their defaults.
+
 ### Tick continuity in Router
 
 Set `TickSubscriptionRequest::continuity` to enable history-first delivery for
@@ -671,6 +682,17 @@ gap-detection hint, not a claim that every tick must arrive on a fixed grid;
 equal timestamps and sub-second live ticks are valid. The provider's
 `range_complete` remains the authority for whether a requested history range
 proves continuity.
+
+Recovery requests use inclusive timestamp ranges. For an event-oriented
+provider, the suspicious interval is requested without inventing missing tick
+slots, and the live tick that triggered recovery remains buffered. When a
+provider declares a history grid, Router aligns the start down and (for an
+unbounded request) the end up so an off-grid observation is not excluded.
+Bounded chunks keep their size limit and overlap at the previous end point
+whenever that overlap can advance the range; if the limit is smaller than a
+provider grid step, Router advances to the next provider boundary instead of
+repeating the same request. The overlap is removed only by exact observation
+identity.
 
 The Router sends historical ticks first, marks them `HISTORICAL`, and then
 replays held live ticks as `LIVE_SOURCE | CATCHUP`. A complete result is required

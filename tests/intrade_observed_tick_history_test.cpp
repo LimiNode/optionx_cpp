@@ -139,6 +139,21 @@ TEST(IntradeObservedTickHistory, ClearDropsSessionObservations) {
     EXPECT_EQ(archive.size("EURUSD"), 0U);
 }
 
+TEST(IntradeObservedTickHistory, EstimatesBrokerAlignedTimeFromMedianOffsets) {
+    IntradeObservedTickHistoryOptions options;
+    options.clock_offset_sample_count = 5;
+    IntradeObservedTickHistory archive(options);
+    archive.record({make_batch(
+        "EURUSD",
+        {make_tick(1.1000, 1.1002, 1000, 1123),
+         make_tick(1.1001, 1.1003, 2000, 2123),
+         make_tick(1.1002, 1.1004, 3000, 3123),
+         make_tick(1.1003, 1.1005, 4000, 1000),
+         make_tick(1.1004, 1.1006, 5000, 5123)})});
+
+    EXPECT_EQ(archive.provider_time_ms(4123), 4000U);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

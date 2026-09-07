@@ -38,12 +38,23 @@ public:
 
 class FakeTickHistoryProvider final : public BaseMarketDataProvider {
 public:
+    std::uint64_t provider_now_ms = 0;
+    std::uint64_t history_interval_ms = 0;
+
     ticks_callback_t& on_tick_data() override {
         return m_tick_callback;
     }
 
     status_callback_t& on_market_data_status() override {
         return m_status_callback;
+    }
+
+    std::uint64_t provider_time_ms() const noexcept override {
+        return provider_now_ms;
+    }
+
+    std::uint64_t tick_history_interval_ms() const noexcept override {
+        return history_interval_ms;
     }
 
     bool subscribe_ticks(
@@ -245,6 +256,27 @@ TEST(MarketDataTickContinuity, CompletesPrefillAndDeliversDirectRealtime) {
     EXPECT_EQ(snapshot->unverified_from_time_ms, 0U);
 }
 
+TEST(MarketDataTickContinuity, UsesProviderAlignedClockForPrefill) {
+    ScopedTestClock clock(3123);
+    FakeTickHistoryProvider provider;
+    provider.provider_now_ms = 3000;
+    provider.history_interval_ms = 1000;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    MarketDataRouter router;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        continuity_request());
+    ASSERT_TRUE(route.valid());
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+    EXPECT_EQ(provider.history_requests.front().from_time_ms, 1000U);
+    EXPECT_EQ(provider.history_requests.front().to_time_ms, 3000U);
+
+    provider.complete_history(make_history({1000, 2000, 3000}));
+    EXPECT_EQ(count_status(*subscriber, MarketDataContinuityStatus::LIVE), 1U);
+}
+
 TEST(MarketDataTickContinuity, IncompletePrefillStaysDegraded) {
     ScopedTestClock clock(3000);
     FakeTickHistoryProvider provider;
@@ -325,9 +357,9 @@ TEST(MarketDataTickContinuity, ChecksGapsInsidePrefillBacklog) {
 
     provider.complete_history(make_history({1000, 2000, 3000}));
     ASSERT_EQ(provider.history_requests.size(), 2U);
-    EXPECT_EQ(provider.history_requests.back().from_time_ms, 5000U);
-    EXPECT_EQ(provider.history_requests.back().to_time_ms, 5000U);
-    provider.complete_history(make_history({5000}));
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 4000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 6000U);
+    provider.complete_history(make_history({4000, 5000}));
 
     ASSERT_FALSE(subscriber->ticks.empty());
     const auto& prefix = subscriber->ticks[1];
@@ -364,14 +396,16 @@ TEST(MarketDataTickContinuity, RepairsGapAndPreservesDistinctSameSecondTicks) {
     provider.emit_ticks({first, second});
 
     ASSERT_EQ(provider.history_requests.size(), 2U);
-    EXPECT_EQ(provider.history_requests.back().from_time_ms, 5000U);
-    EXPECT_EQ(provider.history_requests.back().to_time_ms, 5000U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 4000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 6000U);
     const auto before_repair_ticks = subscriber->ticks.size();
 
-    provider.complete_history(make_history({5000}));
+    provider.complete_history(make_history({4000, 5000}));
     ASSERT_EQ(subscriber->ticks.size(), before_repair_ticks + 2U);
     const auto& history_batch = subscriber->ticks[before_repair_ticks];
-    EXPECT_TRUE(only_tick(history_batch).has_flag(MarketDataFlags::HISTORICAL));
+    ASSERT_EQ(history_batch.items.size(), 2U);
+    EXPECT_TRUE(history_batch.items[0].has_flag(MarketDataFlags::HISTORICAL));
+    EXPECT_TRUE(history_batch.items[1].has_flag(MarketDataFlags::HISTORICAL));
     const auto& catchup_batch = subscriber->ticks[before_repair_ticks + 1U];
     ASSERT_EQ(catchup_batch.items.size(), 2U);
     EXPECT_EQ(catchup_batch.items[0].time_ms, 6000U);
@@ -380,6 +414,112 @@ TEST(MarketDataTickContinuity, RepairsGapAndPreservesDistinctSameSecondTicks) {
     EXPECT_TRUE(catchup_batch.items[0].has_flag(MarketDataFlags::CATCHUP));
     EXPECT_TRUE(catchup_batch.items[1].has_flag(MarketDataFlags::CATCHUP));
     EXPECT_EQ(count_status(*subscriber, MarketDataContinuityStatus::LIVE), 2U);
+}
+
+TEST(MarketDataTickContinuity, PreservesNonGridTriggeringTickDuringRecovery) {
+    ScopedTestClock clock(1000);
+    FakeTickHistoryProvider provider;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    MarketDataRouter router;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        continuity_request());
+    ASSERT_TRUE(route.valid());
+    provider.complete_history(make_history({1000}));
+
+    provider.emit_ticks({make_tick(2501)});
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 1000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 2501U);
+
+    provider.complete_history(make_history({1000, 2000}));
+
+    bool saw_triggering_tick = false;
+    for (const auto& batch : subscriber->ticks) {
+        for (const auto& tick : batch.items) {
+            if (tick.time_ms == 2501U) saw_triggering_tick = true;
+        }
+    }
+    EXPECT_TRUE(saw_triggering_tick);
+}
+
+TEST(MarketDataTickContinuity, AlignsProviderGridRecoveryEndOutward) {
+    ScopedTestClock clock(1000);
+    FakeTickHistoryProvider provider;
+    provider.history_interval_ms = 1000;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    MarketDataRouter router;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        continuity_request());
+    ASSERT_TRUE(route.valid());
+    ASSERT_EQ(provider.history_requests.size(), 1U);
+    provider.complete_history(make_history({1000}));
+
+    provider.emit_ticks({make_tick(2501)});
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 1000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 3000U);
+
+    provider.complete_history(make_history({1000, 2000}));
+    bool saw_triggering_tick = false;
+    for (const auto& batch : subscriber->ticks) {
+        for (const auto& tick : batch.items) {
+            if (tick.time_ms == 2501U) saw_triggering_tick = true;
+        }
+    }
+    EXPECT_TRUE(saw_triggering_tick);
+}
+
+TEST(MarketDataTickContinuity, KeepsBoundedProviderGridChunksOverlapped) {
+    ScopedTestClock clock(1000);
+    FakeTickHistoryProvider provider;
+    provider.history_interval_ms = 1000;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    MarketDataRouter router;
+
+    auto route = router.subscribe_ticks(
+        provider,
+        subscriber,
+        continuity_request(
+            MarketDataContinuityMode::PREFILL_AND_RECOVER,
+            1,
+            1500));
+    ASSERT_TRUE(route.valid());
+    provider.complete_history(make_history({1000}));
+    provider.emit_ticks({make_tick(4501)});
+
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 1000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 2000U);
+    provider.complete_history(make_history({1000, 2000}));
+
+    ASSERT_EQ(provider.history_requests.size(), 3U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 2000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 3000U);
+    provider.complete_history(make_history({2000, 3000}));
+
+    ASSERT_EQ(provider.history_requests.size(), 4U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 3000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 4000U);
+    provider.complete_history(make_history({3000, 4000}));
+
+    ASSERT_EQ(provider.history_requests.size(), 5U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 4000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 5000U);
+    provider.complete_history(make_history({4000, 5000}));
+
+    bool saw_triggering_tick = false;
+    for (const auto& batch : subscriber->ticks) {
+        for (const auto& tick : batch.items) {
+            if (tick.time_ms == 4501U) saw_triggering_tick = true;
+        }
+    }
+    EXPECT_TRUE(saw_triggering_tick);
 }
 
 TEST(MarketDataTickContinuity, UsesBoundedGapRequests) {
@@ -398,23 +538,33 @@ TEST(MarketDataTickContinuity, UsesBoundedGapRequests) {
     provider.emit_ticks({make_tick(10000)});
 
     ASSERT_EQ(provider.history_requests.size(), 1U);
-    EXPECT_EQ(provider.history_requests.back().from_time_ms, 2000U);
-    EXPECT_EQ(provider.history_requests.back().to_time_ms, 4000U);
-    provider.complete_history(make_history({2000, 3000, 4000}));
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 1000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 3999U);
+    provider.complete_history(make_history({1000, 2000, 3000, 3999}));
     ASSERT_EQ(provider.history_requests.size(), 2U);
-    EXPECT_EQ(provider.history_requests.back().from_time_ms, 5000U);
-    EXPECT_EQ(provider.history_requests.back().to_time_ms, 7000U);
-    provider.complete_history(make_history({5000, 6000, 7000}));
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 3999U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 6998U);
+    provider.complete_history(make_history({3999, 5000, 6000, 6998}));
     ASSERT_EQ(provider.history_requests.size(), 3U);
-    EXPECT_EQ(provider.history_requests.back().from_time_ms, 8000U);
-    EXPECT_EQ(provider.history_requests.back().to_time_ms, 9000U);
-    provider.complete_history(make_history({8000, 9000}));
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 6998U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 9997U);
+    provider.complete_history(make_history({6998, 8000, 9000, 9997}));
+    ASSERT_EQ(provider.history_requests.size(), 4U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 9997U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 10000U);
+    provider.complete_history(make_history({9997, 10000}));
 
     const auto snapshot = router.continuity_snapshot(route.router_id());
     ASSERT_TRUE(snapshot.has_value());
     EXPECT_EQ(snapshot->phase, MarketDataContinuityPhase::LIVE);
     EXPECT_EQ(snapshot->unverified_from_time_ms, 0U);
-    EXPECT_EQ(snapshot->history_request_count, 3U);
+    EXPECT_EQ(snapshot->history_request_count, 4U);
+
+    for (std::size_t index = 1; index < provider.history_requests.size(); ++index) {
+        EXPECT_EQ(
+            provider.history_requests[index].from_time_ms,
+            provider.history_requests[index - 1U].to_time_ms);
+    }
 }
 
 TEST(MarketDataTickContinuity, RetriesFailedHistoryFromProcess) {
@@ -470,10 +620,10 @@ TEST(MarketDataTickContinuity, ReconnectDeduplicatesOnlyExactOverlap) {
 
     provider.emit_status(MarketDataStreamStatus::READY);
     ASSERT_EQ(provider.history_requests.size(), 2U);
-    EXPECT_EQ(provider.history_requests.back().from_time_ms, 4000U);
+    EXPECT_EQ(provider.history_requests.back().from_time_ms, 3000U);
     EXPECT_EQ(provider.history_requests.back().to_time_ms, 5000U);
 
-    TickSequence history = make_history({4000});
+    TickSequence history = make_history({3000, 4000});
     history.ticks.push_back(make_tick(5000, 1.0));
     provider.complete_history(std::move(history));
 

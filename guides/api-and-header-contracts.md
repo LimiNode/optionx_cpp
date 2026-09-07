@@ -295,6 +295,11 @@ Contract rules:
   assertion; successful observations with `false` must not be used as proof of
   continuity. Equal timestamps are valid, and exact duplicate removal remains
   provider/consumer policy.
+- `BaseMarketDataProvider::provider_time_ms()` and
+  `BaseMarketDataProvider::tick_history_interval_ms()` are optional metadata
+  hooks for providers whose history backend has its own clock or sampling grid.
+  A zero value means that Router should use its local clock or event-oriented
+  range semantics.
 
 ### Intrade observed tick history
 
