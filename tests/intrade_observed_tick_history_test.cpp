@@ -6,7 +6,11 @@
 #include <utility>
 #include <vector>
 
-#include <optionx_cpp/platforms.hpp>
+#include <optionx_cpp/utils/fixed_point.hpp>
+#include <optionx_cpp/data/ticks.hpp>
+#include <optionx_cpp/utils/pubsub.hpp>
+#include <optionx_cpp/data/events/PriceUpdateEvent.hpp>
+#include <optionx_cpp/platforms/IntradeBarPlatform/ObservedTickHistory.hpp>
 
 using namespace optionx;
 using namespace optionx::events;
