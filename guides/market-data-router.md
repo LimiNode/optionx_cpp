@@ -721,6 +721,15 @@ unrelated successful range cannot hide the earlier unresolved watermark.
 History requests are bounded by `max_backfill_ms` and are scheduled by
 `process()`, so tick continuity does not create a timer thread.
 
+The same bound applies to the initial prefill. When `max_backfill_ms` is
+non-zero, Router splits the lookback into inclusive chunks, starts the next
+chunk at the previous end point when overlap can advance the range, and keeps
+the live tail buffered until the final chunk reaches the prefill boundary.
+With a provider history grid narrower than the bound, the resulting requests
+are `5000..6000`, `6000..7000`, and so on; if the bound cannot contain one
+grid step, Router advances to the next provider boundary to avoid repeating a
+request. A zero bound keeps the provider range unbounded.
+
 On reconnect, tick continuity reports `STALE`, waits for `READY`, and requests
 the unresolved range through the latest observed time. History overlap is
 removed according to the selected tick identity policy. The default provider
@@ -730,8 +739,9 @@ make an otherwise identical observation distinct. If the continuity buffer excee
 its batch or item limit, Router releases the held live data, reports
 `FAILED`/`DEGRADED`, disables continuity for that route, and resumes ordinary
 live delivery. If transport is interrupted during the initial prefill, Router
-restarts from the original lookback start after `READY` and extends the request
-through the current time, so the interrupted interval is not silently skipped.
+restarts from the original lookback start after `READY` and extends the
+chunked request sequence through the current time, so the interrupted interval
+is not silently skipped.
 
 ## Owner Loop And Bot Threads
 

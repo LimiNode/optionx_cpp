@@ -877,6 +877,14 @@ Router сначала отправляет historical ticks с флагом `HIS
 ограничивает каждый history request, а `process()` обслуживает retries без
 создания отдельного timer thread.
 
+То же ограничение действует для initial prefill: если значение не равно
+нулю, Router делит lookback на inclusive chunks и удерживает live tail в
+buffer до завершения последнего chunk. При provider grid и лимите, который
+допускает overlap, запросы идут как `5000..6000`, `6000..7000` и так далее.
+Если лимит меньше одного шага grid, Router переходит к следующей provider
+boundary, чтобы не повторять тот же запрос. Нулевой лимит оставляет диапазон
+provider без ограничения.
+
 После reconnect tick continuity публикует `STALE`, ждёт `READY` и запрашивает
 unresolved range до последнего observed time. History overlap удаляется по
 выбранной tick identity policy. Provider default для Intrade использует только
@@ -886,5 +894,6 @@ snapshot новым. При переполнении buffer Router освобо�
 `FAILED`/`DEGRADED`, отключает continuity для этого route и возобновляет
 обычную live delivery.
 Если transport прервался во время initial prefill, после `READY` Router
-начинает повторный запрос с исходного начала lookback и расширяет его до
-текущего времени, поэтому прерванный интервал не пропускается молча.
+начинает повторную chunked-последовательность с исходного начала lookback и
+расширяет её до текущего времени, поэтому прерванный интервал не пропускается
+молча.
