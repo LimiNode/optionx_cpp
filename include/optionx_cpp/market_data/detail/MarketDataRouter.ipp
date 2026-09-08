@@ -6,11 +6,46 @@
 /// \brief Implements subscription-scoped market-data routing utilities.
 
 #include <chrono>
+#include <functional>
 #include <optional>
+#include <unordered_set>
 
 namespace optionx::market_data {
 
     namespace detail {
+
+        struct TickObservationKey {
+            std::uint64_t time_ms = 0;
+            double ask = 0.0;
+            double bid = 0.0;
+            double last = 0.0;
+            double volume = 0.0;
+
+            [[nodiscard]] bool operator==(
+                    const TickObservationKey& other) const noexcept {
+                return time_ms == other.time_ms &&
+                    ask == other.ask &&
+                    bid == other.bid &&
+                    last == other.last &&
+                    volume == other.volume;
+            }
+        };
+
+        struct TickObservationKeyHash {
+            [[nodiscard]] std::size_t operator()(
+                    const TickObservationKey& key) const noexcept {
+                const auto combine = [](std::size_t seed, std::size_t value) noexcept {
+                    return seed ^ (value + static_cast<std::size_t>(0x9e3779b9) +
+                        (seed << 6U) + (seed >> 2U));
+                };
+                auto hash = std::hash<std::uint64_t>{}(key.time_ms);
+                hash = combine(hash, std::hash<double>{}(key.ask));
+                hash = combine(hash, std::hash<double>{}(key.bid));
+                hash = combine(hash, std::hash<double>{}(key.last));
+                hash = combine(hash, std::hash<double>{}(key.volume));
+                return hash;
+            }
+        };
 
         struct MarketDataRouterSubscriptionControl {
             mutable std::mutex mutex;
@@ -147,6 +182,8 @@ namespace optionx::market_data {
                 std::chrono::steady_clock::duration degraded_duration{};
                 std::chrono::steady_clock::time_point stale_since{};
                 std::chrono::steady_clock::time_point degraded_since{};
+                std::uint64_t last_delivered_tick_time_ms = 0;
+                std::vector<Tick> last_delivered_tick_observations;
                 std::optional<PendingTickContinuityRequest> retry_request;
                 std::chrono::steady_clock::time_point retry_at;
 
@@ -169,6 +206,8 @@ namespace optionx::market_data {
                 ContinuityState continuity_state;
                 MarketDataTickContinuityOptions tick_continuity;
                 TickContinuityState tick_continuity_state;
+                MarketDataTickDeduplicationMode tick_deduplication_mode =
+                    MarketDataTickDeduplicationMode::EXACT_OBSERVATION;
                 MarketDataSubscriptionHandle retained_cleanup_subscription;
                 MarketDataSubscriptionResult unsubscribe_completion;
                 bool subscribe_completion_posted = false;
@@ -326,6 +365,9 @@ namespace optionx::market_data {
             static StreamDescriptor stream_from(const TickSubscriptionRequest& request);
             static StreamDescriptor stream_from(const BarSubscriptionRequest& request);
             static StreamDescriptor stream_from(const MarketDataSubscriptionHandle& subscription);
+            static MarketDataTickDeduplicationMode resolve_tick_deduplication_mode(
+                    BaseMarketDataProvider& provider,
+                    MarketDataTickDeduplicationMode requested) noexcept;
 
             static bool same_status_stream(
                     const MarketDataStatusUpdate& lhs,
@@ -521,8 +563,16 @@ namespace optionx::market_data {
                     std::uint64_t expected_interval_ms) noexcept;
             static bool same_tick_observation(
                     const Tick& lhs,
-                    const Tick& rhs) noexcept;
+                    const Tick& rhs,
+                    MarketDataTickDeduplicationMode mode) noexcept;
+            static TickObservationKey tick_observation_key(
+                    const Tick& tick,
+                    MarketDataTickDeduplicationMode mode) noexcept;
             static void deduplicate_tick_items(
+                    std::vector<Tick>& ticks,
+                    MarketDataTickDeduplicationMode mode);
+            static void deduplicate_tick_items_against_last_delivery_no_lock(
+                    const std::shared_ptr<Entry>& entry,
                     std::vector<Tick>& ticks);
             static void clip_history_to_range(
                     BarDataBatch& batch,
@@ -549,7 +599,7 @@ namespace optionx::market_data {
                     std::uint64_t to_time_ms) noexcept;
             static void record_tick_progress_no_lock(
                     const std::shared_ptr<Entry>& entry,
-                    const std::vector<Tick>& ticks) noexcept;
+                    const std::vector<Tick>& ticks);
             static std::uint64_t provider_time_ms(
                     BaseMarketDataProvider& provider) noexcept;
             static std::uint64_t tick_history_interval_ms(
@@ -812,6 +862,24 @@ namespace optionx::market_data {
             stream.price_source = subscription.price_source;
             stream.transport = subscription.transport;
             return stream;
+        }
+
+        inline MarketDataTickDeduplicationMode
+        MarketDataRouterState::resolve_tick_deduplication_mode(
+                BaseMarketDataProvider& provider,
+                MarketDataTickDeduplicationMode requested) noexcept {
+            auto mode = requested == MarketDataTickDeduplicationMode::PROVIDER_DEFAULT
+                ? provider.tick_deduplication_mode()
+                : requested;
+            switch (mode) {
+            case MarketDataTickDeduplicationMode::TIMESTAMP:
+            case MarketDataTickDeduplicationMode::TIME_AND_PRICES:
+            case MarketDataTickDeduplicationMode::EXACT_OBSERVATION:
+                return mode;
+            case MarketDataTickDeduplicationMode::PROVIDER_DEFAULT:
+            default:
+                return MarketDataTickDeduplicationMode::EXACT_OBSERVATION;
+            }
         }
 
         inline bool MarketDataRouterState::register_provider(
@@ -1145,6 +1213,9 @@ namespace optionx::market_data {
                 entry->stream = std::move(stream);
                 entry->continuity = std::move(continuity);
                 entry->tick_continuity = std::move(tick_continuity);
+                entry->tick_deduplication_mode = resolve_tick_deduplication_mode(
+                    provider,
+                    entry->tick_continuity.deduplication_mode);
                 entry->continuity_state.initial_prefill_pending =
                     entry->continuity.enabled() && entry->continuity.prefill_bars > 0;
                 entry->continuity_state.phase =
@@ -2402,44 +2473,120 @@ namespace optionx::market_data {
             }
         }
 
+        inline TickObservationKey MarketDataRouterState::tick_observation_key(
+                const Tick& tick,
+                MarketDataTickDeduplicationMode mode) noexcept {
+            TickObservationKey key;
+            key.time_ms = tick.time_ms;
+            switch (mode) {
+            case MarketDataTickDeduplicationMode::TIMESTAMP:
+                break;
+            case MarketDataTickDeduplicationMode::TIME_AND_PRICES:
+                key.ask = tick.ask;
+                key.bid = tick.bid;
+                key.last = tick.last;
+                break;
+            case MarketDataTickDeduplicationMode::EXACT_OBSERVATION:
+            case MarketDataTickDeduplicationMode::PROVIDER_DEFAULT:
+            default:
+                key.ask = tick.ask;
+                key.bid = tick.bid;
+                key.last = tick.last;
+                key.volume = tick.volume;
+                break;
+            }
+            return key;
+        }
+
         inline bool MarketDataRouterState::same_tick_observation(
                 const Tick& lhs,
-                const Tick& rhs) noexcept {
-            return lhs.time_ms == rhs.time_ms &&
-                lhs.ask == rhs.ask &&
-                lhs.bid == rhs.bid &&
-                lhs.last == rhs.last &&
-                lhs.volume == rhs.volume;
+                const Tick& rhs,
+                MarketDataTickDeduplicationMode mode) noexcept {
+            return tick_observation_key(lhs, mode) ==
+                tick_observation_key(rhs, mode);
         }
 
         inline void MarketDataRouterState::deduplicate_tick_items(
+                std::vector<Tick>& ticks,
+                MarketDataTickDeduplicationMode mode) {
+            std::unordered_set<TickObservationKey, TickObservationKeyHash> seen;
+            seen.reserve(ticks.size());
+            auto unique_end = std::remove_if(
+                ticks.begin(),
+                ticks.end(),
+                [&seen, mode](Tick& tick) {
+                    return !seen.insert(tick_observation_key(tick, mode)).second;
+                });
+            ticks.erase(unique_end, ticks.end());
+        }
+
+        inline void
+        MarketDataRouterState::deduplicate_tick_items_against_last_delivery_no_lock(
+                const std::shared_ptr<Entry>& entry,
                 std::vector<Tick>& ticks) {
-            std::vector<Tick> unique;
-            unique.reserve(ticks.size());
-            for (auto& tick : ticks) {
-                const auto duplicate = std::any_of(
-                    unique.begin(),
-                    unique.end(),
-                    [&tick](const Tick& existing) {
-                        return same_tick_observation(existing, tick);
-                    });
-                if (!duplicate) unique.push_back(std::move(tick));
+            if (!entry || ticks.empty()) return;
+            const auto& continuity = entry->tick_continuity_state;
+            if (continuity.last_delivered_tick_time_ms == 0 ||
+                continuity.last_delivered_tick_observations.empty()) {
+                return;
             }
-            ticks = std::move(unique);
+
+            const auto mode = entry->tick_deduplication_mode;
+            std::unordered_set<TickObservationKey, TickObservationKeyHash> delivered;
+            delivered.reserve(
+                continuity.last_delivered_tick_observations.size());
+            for (const auto& tick : continuity.last_delivered_tick_observations) {
+                delivered.insert(tick_observation_key(tick, mode));
+            }
+
+            const auto unique_end = std::remove_if(
+                ticks.begin(),
+                ticks.end(),
+                [&delivered, mode](const Tick& tick) {
+                    return delivered.find(tick_observation_key(tick, mode)) !=
+                        delivered.end();
+                });
+            ticks.erase(unique_end, ticks.end());
         }
 
         inline void MarketDataRouterState::record_tick_progress_no_lock(
                 const std::shared_ptr<Entry>& entry,
-                const std::vector<Tick>& ticks) noexcept {
+                const std::vector<Tick>& ticks) {
             if (!entry) return;
             auto& continuity = entry->tick_continuity_state;
+            std::uint64_t latest_delivery_time_ms = 0;
             for (const auto& tick : ticks) {
                 if (tick.time_ms > continuity.last_observed_time_ms) {
                     continuity.last_observed_time_ms = tick.time_ms;
                 }
+                latest_delivery_time_ms = std::max(
+                    latest_delivery_time_ms,
+                    tick.time_ms);
                 if (continuity.unverified_from_time_ms == 0 &&
                     tick.time_ms > continuity.verified_through_time_ms) {
                     continuity.verified_through_time_ms = tick.time_ms;
+                }
+            }
+
+            if (latest_delivery_time_ms == 0) return;
+            const auto mode = entry->tick_deduplication_mode;
+            if (latest_delivery_time_ms > continuity.last_delivered_tick_time_ms) {
+                continuity.last_delivered_tick_time_ms = latest_delivery_time_ms;
+                continuity.last_delivered_tick_observations.clear();
+            }
+            if (latest_delivery_time_ms != continuity.last_delivered_tick_time_ms) {
+                return;
+            }
+
+            std::unordered_set<TickObservationKey, TickObservationKeyHash> seen;
+            seen.reserve(continuity.last_delivered_tick_observations.size() + ticks.size());
+            for (const auto& tick : continuity.last_delivered_tick_observations) {
+                seen.insert(tick_observation_key(tick, mode));
+            }
+            for (const auto& tick : ticks) {
+                if (tick.time_ms == latest_delivery_time_ms &&
+                    seen.insert(tick_observation_key(tick, mode)).second) {
+                    continuity.last_delivered_tick_observations.push_back(tick);
                 }
             }
         }
@@ -3018,6 +3165,8 @@ namespace optionx::market_data {
                 std::uint64_t generation,
                 TickHistoryResult result) {
             StreamDescriptor expected_stream;
+            MarketDataTickDeduplicationMode deduplication_mode =
+                MarketDataTickDeduplicationMode::EXACT_OBSERVATION;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 const auto entry_it = m_entries.find(router_id);
@@ -3029,6 +3178,7 @@ namespace optionx::market_data {
                     return;
                 }
                 expected_stream = entry_it->second->stream;
+                deduplication_mode = entry_it->second->tick_deduplication_mode;
                 entry_it->second->tick_continuity_state.request_in_flight = false;
                 entry_it->second->tick_continuity_state.phase =
                     MarketDataContinuityPhase::FLUSHING;
@@ -3063,7 +3213,7 @@ namespace optionx::market_data {
                         request,
                         subscription,
                         kind != ContinuityRequestKind::PREFILL);
-                    deduplicate_tick_items(history_batch.items);
+                    deduplicate_tick_items(history_batch.items, deduplication_mode);
                     delivered_history_items = history_batch.items.size();
                 }
             }
@@ -3207,6 +3357,8 @@ namespace optionx::market_data {
                         !entry_it->second->release_requested;
                     if (active) {
                         auto& continuity = entry_it->second->tick_continuity_state;
+                        const auto current_deduplication_mode =
+                            entry_it->second->tick_deduplication_mode;
                         for (auto batch_it = continuity.buffer.begin();
                              batch_it != continuity.buffer.end();) {
                             auto& items = batch_it->items;
@@ -3214,14 +3366,15 @@ namespace optionx::market_data {
                                 std::remove_if(
                                     items.begin(),
                                     items.end(),
-                                    [&history_batch](const Tick& tick) {
+                                    [&history_batch, current_deduplication_mode](const Tick& tick) {
                                         return std::any_of(
                                             history_batch.items.begin(),
                                             history_batch.items.end(),
-                                            [&tick](const Tick& history_tick) {
+                                            [&tick, current_deduplication_mode](const Tick& history_tick) {
                                                 return same_tick_observation(
                                                     history_tick,
-                                                    tick);
+                                                    tick,
+                                                    current_deduplication_mode);
                                             });
                                     }),
                                 items.end());
@@ -3235,13 +3388,20 @@ namespace optionx::market_data {
                         for (const auto& batch : continuity.buffer) {
                             continuity.buffered_items += batch.items.size();
                         }
-                        record_tick_progress_no_lock(
+                        deduplicate_tick_items_against_last_delivery_no_lock(
                             entry_it->second,
                             history_batch.items);
-                        subscriber = entry_it->second->subscriber.lock();
+                        if (!history_batch.items.empty()) {
+                            record_tick_progress_no_lock(
+                                entry_it->second,
+                                history_batch.items);
+                            subscriber = entry_it->second->subscriber.lock();
+                        }
                     }
                 }
-                if (active && subscriber) subscriber->on_tick_data(history_batch);
+                if (active && subscriber && !history_batch.items.empty()) {
+                    subscriber->on_tick_data(history_batch);
+                }
             }
 
             bool schedule_next = false;
