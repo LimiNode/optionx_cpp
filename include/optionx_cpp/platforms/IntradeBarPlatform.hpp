@@ -179,6 +179,12 @@ namespace optionx::platforms {
             return m_tick_history.options().sampling_interval_ms;
         }
 
+        /// \brief Returns the identity policy for one-second Intrade snapshots.
+        market_data::MarketDataTickDeduplicationMode tick_deduplication_mode()
+                const noexcept override {
+            return market_data::MarketDataTickDeduplicationMode::TIMESTAMP;
+        }
+
         /// \brief Returns the live bar data callback.
         market_data::BaseMarketDataProvider::bars_callback_t& on_bar_data() override {
             return m_bar_data_callback;
