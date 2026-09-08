@@ -14,17 +14,18 @@ series. Keep it short and remove items once they are handled.
   monotonic stale/degraded durations.
 - The generic tick-history foundation now has typed timestamp-range request and
   result DTOs, a provider hook, ordering/range validation, explicit
-  completeness semantics, and a batch adapter. No provider-specific endpoint
-  or Router tick continuity is implied yet.
+  completeness semantics, and a batch adapter.
+- Intrade Bar now exposes a bounded, session-scoped observed-tick archive fed by
+  `/price_now`. It preserves distinct same-second snapshots and reports
+  `range_complete` only for proven one-second coverage; it is not a persistent
+  or authoritative broker tick archive.
 
 ## Next PR Candidates
 
-- Add a provider-specific tick-history implementation only where the provider
-  can supply authoritative historical ticks, then integrate it with Router
-  continuity in a separate change.
-- Integrate tick continuity into Router only after a provider-specific history
-  endpoint defines sequence/timestamp deduplication, retry, and history-to-live
-  boundary semantics.
+- Integrate Intrade's observed-tick archive with Router continuity while keeping
+  incomplete ranges fail-closed and documenting the session/retention limit.
+- Add an authoritative provider tick-history implementation only if a broker
+  later exposes one; do not treat `trade_check2.php` as a range-history API.
 - Replace the dense-bar assumption with an explicit provider completeness
   capability or `range_complete` history result for session-based markets.
 - Allow reconnect candle boundaries to use a broker-aligned clock instead of

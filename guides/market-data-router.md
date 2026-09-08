@@ -634,11 +634,23 @@ service.request_tick_history_batch(
     true); // require_complete_range
 ```
 
-`MarketDataRouter` still integrates continuity only for bars. No current
-provider in this repository exposes authoritative tick history, so the base
-operation returns `false` until a provider-specific endpoint and semantics are
-implemented. This is intentional: a current-price snapshot cannot be reused as
-historical tick data.
+`MarketDataRouter` still has its mature continuity state machine on bars. The
+Intrade Bar provider now also implements `fetch_tick_history()` as a bounded,
+session-scoped archive of observed `/price_now` snapshots. This is useful for
+short reconnect windows, but it is not an authoritative broker tick archive:
+
+- broker timestamps have one-second granularity;
+- the archive starts empty for a new authenticated session and evicts old data;
+- `range_complete=true` means every expected observed second is retained, not
+  that every broker micro-event was captured;
+- distinct snapshots sharing one second are preserved, while exact duplicate
+  snapshots are removed;
+- `trade_check2.php` remains a settlement/trade-result API and is not used for
+  range history.
+
+Router tick continuity is the next layer. Until that integration is enabled,
+callers can use the provider operation directly and must treat
+`range_complete=false` as an observation result rather than continuity proof.
 
 ## Owner Loop And Bot Threads
 

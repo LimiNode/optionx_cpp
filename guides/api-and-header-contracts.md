@@ -70,6 +70,28 @@
 `include`. Он совпадает с consumer contract `<optionx_cpp/...>` и не маскирует
 неверные cross-domain quoted includes во вложенных headers.
 
+### Internal Leaf Include Context
+
+Classify a header before adding a project include. A supported public
+aggregate/facade owns the include closure for its internal leaves; a leaf is
+not automatically a standalone include target.
+
+- Headers under `platforms/<Platform>/`, `market_data/`, and `data/*` are
+  internal leaves unless this document explicitly lists them as public entry
+  points.
+- Do not add a cross-domain project include, `../` path, or broad aggregate to
+  an internal leaf solely to make a direct include compile. Put the prerequisite
+  in the owning aggregate, in the intended order, using the installed
+  `<optionx_cpp/...>` spelling for cross-domain edges.
+- For example, `platforms.hpp` prepares shared `utils`, `data`, `components`,
+  and platform prerequisites before including `platforms/IntradeBarPlatform.hpp`.
+  The latter then includes `platforms/IntradeBarPlatform/ObservedTickHistory.hpp`
+  through the prepared context.
+- Include-contract tests and examples must include the supported aggregate
+  (`<optionx_cpp/platforms.hpp>` in this case), not the internal leaf. A direct
+  leaf test is appropriate only when standalone leaf compilation is an
+  intentional documented contract.
+
 ## Header-Only Ownership
 
 `optionx_cpp` - header-only C++17 библиотека. Большая часть публичной
@@ -268,6 +290,32 @@ Contract rules:
 - `MarketDataContinuityService` is the thin helper for routing recovered history
   into the same bar batch pipeline. It marks payload bars as
   `HISTORICAL` and, for gap recovery, `BACKFILL`.
+- Historical ticks use `TickHistoryRequest` and `TickHistoryResult` with an
+  inclusive millisecond range. `range_complete` is an explicit completeness
+  assertion; successful observations with `false` must not be used as proof of
+  continuity. Equal timestamps are valid, and exact duplicate removal remains
+  provider/consumer policy.
+
+### Intrade observed tick history
+
+`platforms::IntradeBarPlatform::fetch_tick_history()` reads a bounded in-memory
+archive populated by the platform's `/price_now` polling path. These are
+observed quote snapshots, not a historical tick endpoint supplied by the
+broker:
+
+- `Tick::time_ms` keeps the broker timestamp, whose effective granularity is
+  one second.
+- `Tick::received_ms` keeps local receipt time when the polling response was
+  parsed.
+- The archive is per symbol, session-scoped, non-persistent, and bounded by
+  item count and lookback duration.
+- Identical market observations are deduplicated; distinct observations with
+  the same second remain separate.
+- `range_complete=true` is returned only for aligned requests where every
+  expected one-second sample is retained. Missing, unaligned, or evicted
+  samples leave it false while the returned observations remain usable.
+- `trade_check2.php` is a trade settlement/result check keyed by deal ID. It
+  is not the implementation of `fetch_tick_history()`.
 - `BarSubscriptionRequest::continuity` enables Router-owned bar prefill and
   optional timestamp-gap recovery. Router buffers live batches until the
   corresponding history operation completes and reports route-scoped progress

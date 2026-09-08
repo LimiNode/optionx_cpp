@@ -55,6 +55,33 @@
 - [Commit conventions](guides/commit-conventions.md) - формат коммитов, если
   пользователь просит создать commit.
 
+## Header Ownership And Include Context
+
+Before editing a header under `include/optionx_cpp`, classify it as a
+supported public entry point or an internal leaf:
+
+- Supported public entry points are the aggregate/facade headers listed in
+  `guides/api-and-header-contracts.md`. Headers under paths such as
+  `platforms/<Platform>/`, `market_data/`, and `data/*` are internal leaves
+  unless the documentation explicitly promotes them.
+- An internal leaf is not a standalone include target. Do not add a project
+  cross-domain include, a `../` path, or a broad aggregate merely to make the
+  leaf compile in isolation. A leaf may use standard-library, third-party,
+  and same-family dependencies supplied by its owning domain.
+- The nearest owning aggregate/facade owns the complete cross-domain include
+  closure and its order. Add prerequisites there, before including the leaf.
+  For example, `platforms.hpp` prepares `utils.hpp`, `data.hpp`,
+  `components.hpp`, and the platform contracts before including
+  `platforms/IntradeBarPlatform.hpp`; that context transitively supplies
+  `platforms/IntradeBarPlatform/ObservedTickHistory.hpp`.
+- Tests and examples that verify the include contract must include the same
+  supported aggregate used by consumers. Do not use a direct leaf include as
+  an aggregate/include-policy test. A direct leaf test is valid only when the
+  leaf is intentionally documented and tested as self-contained.
+- When the ownership is unclear, inspect the owning aggregate and its include
+  order first, then verify the chosen public path with an aggregate consumer
+  compile before changing a leaf include.
+
 ## Critical Defaults
 
 - Перед правками проверь `git status --short` и не перетирай чужие изменения.

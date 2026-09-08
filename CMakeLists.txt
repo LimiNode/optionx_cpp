@@ -1110,6 +1110,7 @@ if(OPTIONX_BUILD_TESTS)
         telegram_worker_source_test
         trading_view_bridge_test
         market_data_tick_history_contract_test
+        intrade_observed_tick_history_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS

@@ -91,6 +91,7 @@ long-lived condition hub does not retain a stale tradable snapshot.
 | `apply_subscriptions(batch, callback)` | Атомарно применить набор subscribe/unsubscribe изменений | Одиночные helpers являются wrappers над batch |
 | `unsubscribe(handle, callback)` | Остановить live stream | Handle должен принадлежать этому provider instance |
 | `fetch_bar_history(request, callback)` | Запросить исторические бары | Возвращает `BarHistoryResult`, а не пустой массив при ошибке |
+| `fetch_tick_history(request, callback)` | Получить наблюдаемые или исторические ticks | Inclusive millisecond range; `range_complete` отделяет доказанную полноту от observations |
 
 Subscription rules:
 
@@ -128,6 +129,9 @@ Subscription rules:
   timer-based final snapshot to be delivered.
 - `MarketDataContinuityService` routes recovered historical bars into the same
   `BarDataBatch` pipeline and marks them as `HISTORICAL`/`BACKFILL`.
+- `TickHistoryRequest` and `TickHistoryResult` use inclusive millisecond ranges.
+  A successful result may be useful even when `range_complete=false`; that
+  flag is the provider's proof that the requested range is fully accounted for.
 - `BarSubscriptionRequest::continuity` lets `MarketDataRouter` request initial
   bar history before live delivery and optionally recover timestamp gaps. Live
   batches are buffered while history is in flight. Route-scoped progress is
@@ -146,11 +150,13 @@ Subscription rules:
   `READY`, while a plain or completed `PREFILL` route does not gain outage
   recovery. Tick routes do not have this guarantee because the provider contract
   still lacks generic tick-history.
-- Router continuity is currently bar-only. Providers have a separate
-  `fetch_tick_history()` contract with inclusive millisecond ranges and an
-  explicit `range_complete` result, but no current provider implements
-  authoritative tick history yet. See the complete EN/RU Router guides and
-  `market_data_continuity_example.cpp`.
+- Router continuity is currently bar-first. Intrade additionally exposes a
+  bounded, session-scoped observed-tick archive populated by `/price_now`.
+  Its timestamps have one-second broker granularity, and `range_complete=true`
+  means every expected observed second is present in the retained archive, not
+  that every broker micro-event was captured. The archive is non-persistent and
+  starts empty for a new authenticated session. `trade_check2.php` remains a
+  settlement/trade-result endpoint and is not used for tick history.
 - `BaseMarketDataProvider` is non-copyable and non-movable so provider identity
   cannot be duplicated after handles were issued.
 - Public subscriptions describe consumer routing. Internal platform polling or
