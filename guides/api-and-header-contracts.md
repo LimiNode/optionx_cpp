@@ -295,6 +295,11 @@ Contract rules:
   assertion; successful observations with `false` must not be used as proof of
   continuity. Equal timestamps are valid, and exact duplicate removal remains
   provider/consumer policy.
+- `BaseMarketDataProvider::provider_time_ms()` and
+  `BaseMarketDataProvider::tick_history_interval_ms()` are optional metadata
+  hooks for providers whose history backend has its own clock or sampling grid.
+  A zero value means that Router should use its local clock or event-oriented
+  range semantics.
 
 ### Intrade observed tick history
 
@@ -376,13 +381,21 @@ broker:
   plain `PREFILL` remains startup-only. A cached invalidating status applies the
   same transition before a newly accepted route may start prefill. Completed
   `PREFILL` routes do not acquire reconnect or timestamp-gap recovery implicitly.
-- Bar continuity is currently implemented by Router. The provider API also
-  defines a separate `fetch_tick_history()` contract with inclusive
-  millisecond ranges, explicit `range_complete`, and non-decreasing timestamp
-  order validated by the adapter. A non-empty result symbol must match the
-  request. No
-  current provider implements authoritative tick history yet; Router does not
-  apply tick continuity or a universal timestamp deduplication policy.
+- Router continuity supports both bar and tick routes. The provider API defines
+  a separate `fetch_tick_history()` contract with inclusive millisecond ranges,
+  explicit `range_complete`, and non-decreasing timestamp order validated by the
+  adapter. A non-empty result symbol must match the request. Tick routes opt in
+  through `TickSubscriptionRequest::continuity`: `PREFILL` holds live ticks
+  until the requested lookback completes, while `PREFILL_AND_RECOVER` also
+  detects suspicious timestamp gaps and repairs them in bounded ranges.
+- Tick `expected_interval_ms` is only a gap-detection hint because tick streams
+  are event-oriented and may contain sub-second or equal-timestamp events.
+  `range_complete` remains the provider's continuity authority. Router reports
+  incomplete history as operation-level `FAILED` and sticky `DEGRADED`, while
+  still allowing returned observations to be delivered. Reconnect recovery waits
+  for `READY`; exact overlap identity is `(time_ms, ask, bid, last, volume)`, so
+  `received_ms`/flags do not distinguish duplicates and different same-second
+  observations remain distinct.
 
 `MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 

@@ -30,6 +30,7 @@ namespace optionx::market_data {
     struct TickSubscriptionRequest {
         std::string symbol; ///< Broker/provider symbol.
         MarketDataTransport transport = MarketDataTransport::AUTO; ///< Preferred transport.
+        MarketDataTickContinuityOptions continuity; ///< Optional tick history prefill and recovery.
 
         /// \brief Default constructor.
         TickSubscriptionRequest() = default;

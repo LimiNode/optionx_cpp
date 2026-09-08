@@ -168,6 +168,17 @@ namespace optionx::platforms {
             return true;
         }
 
+        /// \brief Returns the broker-aligned Intrade market-data time estimate.
+        std::uint64_t provider_time_ms() const noexcept override {
+            return m_tick_history.provider_time_ms(
+                static_cast<std::uint64_t>(OPTIONX_TIMESTAMP_MS));
+        }
+
+        /// \brief Returns the sampling grid used by observed Intrade history.
+        std::uint64_t tick_history_interval_ms() const noexcept override {
+            return m_tick_history.options().sampling_interval_ms;
+        }
+
         /// \brief Returns the live bar data callback.
         market_data::BaseMarketDataProvider::bars_callback_t& on_bar_data() override {
             return m_bar_data_callback;

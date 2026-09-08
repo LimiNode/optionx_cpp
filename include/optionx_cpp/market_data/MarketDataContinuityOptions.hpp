@@ -3,7 +3,7 @@
 #define OPTIONX_HEADER_MARKET_DATA_MARKET_DATA_CONTINUITY_OPTIONS_HPP_INCLUDED
 
 /// \file MarketDataContinuityOptions.hpp
-/// \brief Defines history prefill and gap-recovery options for bar routes.
+/// \brief Defines history prefill and gap-recovery options for market-data routes.
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 namespace optionx::market_data {
 
     /// \enum MarketDataContinuityMode
-    /// \brief Selects how a routed bar stream is initialized and recovered.
+    /// \brief Selects how a routed market-data stream is initialized and recovered.
     enum class MarketDataContinuityMode {
         LIVE_ONLY = 0,       ///< Deliver live provider payloads immediately.
         PREFILL,             ///< Deliver startup history without later gap recovery.
@@ -63,6 +63,47 @@ namespace optionx::market_data {
         }
 
         /// \brief Returns true when gap repair is enabled.
+        [[nodiscard]] bool recovers_gaps() const noexcept {
+            return mode == MarketDataContinuityMode::PREFILL_AND_RECOVER;
+        }
+    };
+
+    /// \struct MarketDataTickContinuityOptions
+    /// \brief Configures history prefill and recovery for a tick route.
+    ///
+    /// Tick streams do not have a dense timeframe grid. `expected_interval_ms`
+    /// is therefore only a hint for detecting a suspicious live gap; a history
+    /// result's `range_complete` value remains the authority for recovery.
+    struct MarketDataTickContinuityOptions {
+        MarketDataContinuityMode mode = MarketDataContinuityMode::LIVE_ONLY;
+        std::uint64_t prefill_lookback_ms = 0;
+        std::uint64_t expected_interval_ms = 1000;
+        std::uint64_t max_backfill_ms = 60000; ///< Maximum time span per history request; zero is unbounded.
+        MarketDataContinuityRetryPolicy retry;
+        std::size_t max_buffered_batches = 1024;
+        std::size_t max_buffered_items = 100000;
+
+        /// \brief Returns true when the option combination is usable.
+        [[nodiscard]] bool valid() const noexcept {
+            if (!retry.valid()) return false;
+            if (mode == MarketDataContinuityMode::LIVE_ONLY) {
+                return prefill_lookback_ms == 0;
+            }
+            if (mode == MarketDataContinuityMode::PREFILL) {
+                return prefill_lookback_ms > 0;
+            }
+            if (mode == MarketDataContinuityMode::PREFILL_AND_RECOVER) {
+                return expected_interval_ms > 0;
+            }
+            return false;
+        }
+
+        /// \brief Returns true when history work is enabled.
+        [[nodiscard]] bool enabled() const noexcept {
+            return mode != MarketDataContinuityMode::LIVE_ONLY;
+        }
+
+        /// \brief Returns true when live gaps and reconnects are recovered.
         [[nodiscard]] bool recovers_gaps() const noexcept {
             return mode == MarketDataContinuityMode::PREFILL_AND_RECOVER;
         }
