@@ -39,9 +39,29 @@ TEST(TickSubscriptionRequest, BuildsAndValidatesTickRequests) {
     EXPECT_TRUE(request.valid());
     EXPECT_EQ(request.symbol, "EUR/USD");
     EXPECT_EQ(request.transport, MarketDataTransport::WEBSOCKET);
+    EXPECT_EQ(
+        request.continuity.deduplication_mode,
+        MarketDataTickDeduplicationMode::PROVIDER_DEFAULT);
     EXPECT_EQ(to_str(request.transport), std::string("WEBSOCKET"));
 
     EXPECT_FALSE(TickSubscriptionRequest("").valid());
+}
+
+TEST(MarketDataTickContinuityOptions, ValidatesIdentityPolicies) {
+    MarketDataTickContinuityOptions options;
+    EXPECT_TRUE(options.valid());
+
+    options.deduplication_mode = MarketDataTickDeduplicationMode::TIMESTAMP;
+    EXPECT_TRUE(options.valid());
+    options.deduplication_mode =
+        MarketDataTickDeduplicationMode::TIME_AND_PRICES;
+    EXPECT_TRUE(options.valid());
+    options.deduplication_mode =
+        MarketDataTickDeduplicationMode::EXACT_OBSERVATION;
+    EXPECT_TRUE(options.valid());
+    options.deduplication_mode =
+        static_cast<MarketDataTickDeduplicationMode>(99);
+    EXPECT_FALSE(options.valid());
 }
 
 TEST(BarSubscriptionRequest, BuildsAndValidatesBarRequests) {
