@@ -686,13 +686,14 @@ proves continuity.
 Recovery requests use inclusive timestamp ranges. For an event-oriented
 provider, the suspicious interval is requested without inventing missing tick
 slots, and the live tick that triggered recovery remains buffered. When a
-provider declares a history grid, Router aligns the start down and (for an
-unbounded request) the end up so an off-grid observation is not excluded.
-Bounded chunks keep their size limit and overlap at the previous end point
-whenever that overlap can advance the range; if the limit is smaller than a
-provider grid step, Router advances to the next provider boundary instead of
-repeating the same request. The overlap is removed only by exact observation
-identity.
+provider declares a history grid, Router aligns the start down and the history
+end down to the last completed provider boundary. An off-grid live observation
+is not requested as a future history sample: it stays in the continuity buffer
+and is released after the completed range is verified. Bounded chunks keep
+their size limit and overlap at the previous end point whenever that overlap
+can advance the range; if the limit is smaller than a provider grid step,
+Router advances to the next provider boundary instead of repeating the same
+request. The overlap is removed only by exact observation identity.
 
 The Router sends historical ticks first, marks them `HISTORICAL`, and then
 replays held live ticks as `LIVE_SOURCE | CATCHUP`. A complete result is required

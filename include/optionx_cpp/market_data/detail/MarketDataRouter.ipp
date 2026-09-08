@@ -2485,12 +2485,11 @@ namespace optionx::market_data {
                 std::uint64_t time_ms,
                 std::uint64_t interval_ms) noexcept {
             if (time_ms == 0 || interval_ms == 0) return time_ms;
-            const auto remainder = time_ms % interval_ms;
-            if (remainder == 0) return time_ms;
-            const auto increment = interval_ms - remainder;
-            return time_ms > std::numeric_limits<std::uint64_t>::max() - increment
-                ? std::numeric_limits<std::uint64_t>::max()
-                : time_ms + increment;
+            // History completeness can only be established through the last
+            // provider boundary that has already occurred. An off-grid live
+            // observation remains in the continuity buffer until it is
+            // released after this completed range is verified.
+            return time_ms - time_ms % interval_ms;
         }
 
         inline std::uint64_t MarketDataRouterState::bounded_tick_history_to_time_ms(
@@ -3257,12 +3256,16 @@ namespace optionx::market_data {
                 }
                 const auto& entry = entry_it->second;
                 auto& continuity = entry->tick_continuity_state;
+                const auto history_interval_ms =
+                    tick_history_interval_ms(*entry->provider);
+                const auto history_target_time_ms =
+                    align_tick_history_end_time_ms(
+                        continuity.reconnect_target_time_ms,
+                        history_interval_ms);
                 if (usable_history &&
                     kind != ContinuityRequestKind::PREFILL &&
-                    continuity.reconnect_target_time_ms > to_time_ms) {
+                    history_target_time_ms > to_time_ms) {
                     const auto max_backfill_ms = entry->tick_continuity.max_backfill_ms;
-                    const auto history_interval_ms =
-                        tick_history_interval_ms(*entry->provider);
                     // Inclusive ranges overlap at the boundary whenever the
                     // configured limit can contain that overlap. If a
                     // provider grid is wider than the limit, advance to the
@@ -3282,12 +3285,12 @@ namespace optionx::market_data {
                         }
                         next_from = to_time_ms + step;
                     }
-                    if (next_from > continuity.reconnect_target_time_ms) {
+                    if (next_from > history_target_time_ms) {
                         return;
                     }
                     auto next_to = bounded_tick_history_to_time_ms(
                         next_from,
-                        continuity.reconnect_target_time_ms,
+                        history_target_time_ms,
                         max_backfill_ms,
                         history_interval_ms);
                     if (next_to < next_from && history_interval_ms > 0) {

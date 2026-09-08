@@ -445,7 +445,7 @@ TEST(MarketDataTickContinuity, PreservesNonGridTriggeringTickDuringRecovery) {
     EXPECT_TRUE(saw_triggering_tick);
 }
 
-TEST(MarketDataTickContinuity, AlignsProviderGridRecoveryEndOutward) {
+TEST(MarketDataTickContinuity, StopsProviderGridRecoveryAtCompletedBoundary) {
     ScopedTestClock clock(1000);
     FakeTickHistoryProvider provider;
     provider.history_interval_ms = 1000;
@@ -463,9 +463,11 @@ TEST(MarketDataTickContinuity, AlignsProviderGridRecoveryEndOutward) {
     provider.emit_ticks({make_tick(2501)});
     ASSERT_EQ(provider.history_requests.size(), 2U);
     EXPECT_EQ(provider.history_requests.back().from_time_ms, 1000U);
-    EXPECT_EQ(provider.history_requests.back().to_time_ms, 3000U);
+    EXPECT_EQ(provider.history_requests.back().to_time_ms, 2000U);
 
     provider.complete_history(make_history({1000, 2000}));
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(count_status(*subscriber, MarketDataContinuityStatus::LIVE), 2U);
     bool saw_triggering_tick = false;
     for (const auto& batch : subscriber->ticks) {
         for (const auto& tick : batch.items) {
@@ -508,10 +510,8 @@ TEST(MarketDataTickContinuity, KeepsBoundedProviderGridChunksOverlapped) {
     EXPECT_EQ(provider.history_requests.back().to_time_ms, 4000U);
     provider.complete_history(make_history({3000, 4000}));
 
-    ASSERT_EQ(provider.history_requests.size(), 5U);
-    EXPECT_EQ(provider.history_requests.back().from_time_ms, 4000U);
-    EXPECT_EQ(provider.history_requests.back().to_time_ms, 5000U);
-    provider.complete_history(make_history({4000, 5000}));
+    ASSERT_EQ(provider.history_requests.size(), 4U);
+    EXPECT_EQ(count_status(*subscriber, MarketDataContinuityStatus::LIVE), 2U);
 
     bool saw_triggering_tick = false;
     for (const auto& batch : subscriber->ticks) {

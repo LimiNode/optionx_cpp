@@ -842,12 +842,14 @@ ticks чаще одной секунды допустимы. Для доказа
 Recovery использует inclusive timestamp ranges. Для event-oriented provider
 Router не синтезирует пропущенные tick slots, а сохраняет в buffer live tick,
 который запустил recovery. Если provider объявляет history grid, Router
-округляет начало вниз, а конец вверх для unbounded request, чтобы observation
-с timestamp между grid points не выпала из диапазона. Bounded chunks сохраняют
-лимит размера и перекрываются в предыдущей конечной точке, когда такой overlap
-позволяет продвинуть диапазон. Если лимит меньше шага provider grid, Router
-переходит к следующей provider boundary, а не повторяет тот же запрос. Overlap
-удаляется только по exact observation identity.
+округляет начало вниз, а конец history - вниз до последней завершённой
+provider boundary. Off-grid live observation не запрашивается как будущий
+history sample: она остаётся в continuity buffer и выпускается после проверки
+завершённого диапазона. Bounded chunks сохраняют лимит размера и перекрываются
+в предыдущей конечной точке, когда такой overlap позволяет продвинуть диапазон.
+Если лимит меньше шага provider grid, Router переходит к следующей provider
+boundary, а не повторяет тот же запрос. Overlap удаляется только по exact
+observation identity.
 
 Router сначала отправляет historical ticks с флагом `HISTORICAL`, затем
 воспроизводит удержанные live ticks с флагами `LIVE_SOURCE | CATCHUP`. До
