@@ -615,6 +615,13 @@ namespace optionx::market_data {
                     std::uint64_t target_time_ms,
                     std::uint64_t max_backfill_ms,
                     std::uint64_t interval_ms) noexcept;
+            static bool next_tick_history_range(
+                    std::uint64_t previous_to_time_ms,
+                    std::uint64_t target_time_ms,
+                    std::uint64_t max_backfill_ms,
+                    std::uint64_t interval_ms,
+                    std::uint64_t& next_from_time_ms,
+                    std::uint64_t& next_to_time_ms) noexcept;
             static std::uint64_t duration_to_milliseconds(
                     std::chrono::steady_clock::duration duration) noexcept;
             static MarketDataContinuitySnapshot make_continuity_snapshot_no_lock(
@@ -1736,6 +1743,7 @@ namespace optionx::market_data {
                 const auto current_boundary_time_ms = std::max(
                     original_boundary_time_ms,
                     current_time_ms);
+                continuity.reconnect_target_time_ms = current_boundary_time_ms;
                 const auto requested_from_time_ms = original_boundary_time_ms > lookback
                     ? original_boundary_time_ms - lookback
                     : 1U;
@@ -1746,7 +1754,16 @@ namespace optionx::market_data {
                     current_boundary_time_ms >= history_interval_ms) {
                     pending.from_time_ms = history_interval_ms;
                 }
-                pending.to_time_ms = current_boundary_time_ms;
+                pending.to_time_ms = bounded_tick_history_to_time_ms(
+                    pending.from_time_ms,
+                    current_boundary_time_ms,
+                    entry->tick_continuity.max_backfill_ms,
+                    history_interval_ms);
+                if (pending.to_time_ms < pending.from_time_ms &&
+                    history_interval_ms > 0) {
+                    pending.to_time_ms = pending.from_time_ms;
+                }
+                if (pending.to_time_ms < pending.from_time_ms) return;
                 pending.request = TickHistoryRequest(
                     entry->stream.symbol,
                     pending.from_time_ms,
@@ -2663,6 +2680,41 @@ namespace optionx::market_data {
             return aligned_bound >= from_time_ms ? aligned_bound : from_time_ms;
         }
 
+        inline bool MarketDataRouterState::next_tick_history_range(
+                std::uint64_t previous_to_time_ms,
+                std::uint64_t target_time_ms,
+                std::uint64_t max_backfill_ms,
+                std::uint64_t interval_ms,
+                std::uint64_t& next_from_time_ms,
+                std::uint64_t& next_to_time_ms) noexcept {
+            if (target_time_ms <= previous_to_time_ms) return false;
+
+            const bool can_overlap = max_backfill_ms == 0 ||
+                (interval_ms == 0
+                    ? max_backfill_ms > 1U
+                    : max_backfill_ms > interval_ms);
+            next_from_time_ms = previous_to_time_ms;
+            if (!can_overlap) {
+                const auto step = interval_ms > 0 ? interval_ms : 1U;
+                if (previous_to_time_ms >
+                    std::numeric_limits<std::uint64_t>::max() - step) {
+                    return false;
+                }
+                next_from_time_ms = previous_to_time_ms + step;
+            }
+            if (next_from_time_ms > target_time_ms) return false;
+
+            next_to_time_ms = bounded_tick_history_to_time_ms(
+                next_from_time_ms,
+                target_time_ms,
+                max_backfill_ms,
+                interval_ms);
+            if (next_to_time_ms < next_from_time_ms && interval_ms > 0) {
+                next_to_time_ms = next_from_time_ms;
+            }
+            return next_to_time_ms >= next_from_time_ms;
+        }
+
         inline bool MarketDataRouterState::tick_history_covers_range(
                 const TickDataBatch& batch,
                 std::uint64_t from_time_ms,
@@ -3298,7 +3350,9 @@ namespace optionx::market_data {
                 const auto& entry = entry_it->second;
                 auto& continuity = entry->tick_continuity_state;
                 if (kind == ContinuityRequestKind::PREFILL) {
-                    continuity.initial_prefill_pending = false;
+                    if (!usable_history) {
+                        continuity.initial_prefill_pending = false;
+                    }
                 }
                 if (!usable_history) {
                     mark_tick_unverified_no_lock(entry, from_time_ms);
@@ -3405,6 +3459,7 @@ namespace optionx::market_data {
             }
 
             bool schedule_next = false;
+            bool notify_next_prefill = false;
             PendingTickContinuityRequest next_request;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
@@ -3422,39 +3477,55 @@ namespace optionx::market_data {
                     align_tick_history_end_time_ms(
                         continuity.reconnect_target_time_ms,
                         history_interval_ms);
-                if (usable_history &&
-                    kind != ContinuityRequestKind::PREFILL &&
-                    history_target_time_ms > to_time_ms) {
-                    const auto max_backfill_ms = entry->tick_continuity.max_backfill_ms;
-                    // Inclusive ranges overlap at the boundary whenever the
-                    // configured limit can contain that overlap. If a
-                    // provider grid is wider than the limit, advance to the
-                    // next representable boundary to avoid repeating a range.
-                    const bool can_overlap = max_backfill_ms == 0 ||
-                        (history_interval_ms == 0
-                            ? max_backfill_ms > 1U
-                            : max_backfill_ms > history_interval_ms);
-                    std::uint64_t next_from = to_time_ms;
-                    if (!can_overlap) {
-                        const auto step = history_interval_ms > 0
-                            ? history_interval_ms
-                            : 1U;
-                        if (to_time_ms >
-                            std::numeric_limits<std::uint64_t>::max() - step) {
-                            return;
+                if (usable_history && kind == ContinuityRequestKind::PREFILL) {
+                    const auto prefill_target_time_ms = history_target_time_ms > 0
+                        ? history_target_time_ms
+                        : continuity.initial_prefill_boundary_time_ms;
+                    if (prefill_target_time_ms > to_time_ms) {
+                        std::uint64_t next_from = 0;
+                        std::uint64_t next_to = 0;
+                        if (next_tick_history_range(
+                                to_time_ms,
+                                prefill_target_time_ms,
+                                entry->tick_continuity.max_backfill_ms,
+                                history_interval_ms,
+                                next_from,
+                                next_to)) {
+                            next_request.router_id = router_id;
+                            next_request.subscription =
+                                entry->control->provider_subscription;
+                            next_request.request = TickHistoryRequest(
+                                entry->stream.symbol,
+                                next_from,
+                                next_to);
+                            next_request.kind = ContinuityRequestKind::PREFILL;
+                            next_request.from_time_ms = next_from;
+                            next_request.to_time_ms = next_to;
+                            next_request.requested_items = 0;
+                            next_request.attempt = 1;
+                            continuity.phase =
+                                MarketDataContinuityPhase::PREFILLING;
+                            continuity.request_in_flight = true;
+                            schedule_next = true;
+                            notify_next_prefill = true;
                         }
-                        next_from = to_time_ms + step;
                     }
-                    if (next_from > history_target_time_ms) {
+                    if (!schedule_next) {
+                        continuity.initial_prefill_pending = false;
+                    }
+                } else if (usable_history &&
+                           kind != ContinuityRequestKind::PREFILL &&
+                           history_target_time_ms > to_time_ms) {
+                    std::uint64_t next_from = 0;
+                    std::uint64_t next_to = 0;
+                    if (!next_tick_history_range(
+                            to_time_ms,
+                            history_target_time_ms,
+                            entry->tick_continuity.max_backfill_ms,
+                            history_interval_ms,
+                            next_from,
+                            next_to)) {
                         return;
-                    }
-                    auto next_to = bounded_tick_history_to_time_ms(
-                        next_from,
-                        history_target_time_ms,
-                        max_backfill_ms,
-                        history_interval_ms);
-                    if (next_to < next_from && history_interval_ms > 0) {
-                        next_to = next_from;
                     }
                     if (next_to < next_from) return;
                     next_request.router_id = router_id;
@@ -3474,6 +3545,18 @@ namespace optionx::market_data {
                 }
             }
             if (schedule_next) {
+                if (notify_next_prefill) {
+                    notify_tick_continuity(
+                        router_id,
+                        make_continuity_update(
+                            next_request.subscription,
+                            MarketDataContinuityStatus::PREFILLING,
+                            next_request.from_time_ms,
+                            next_request.to_time_ms,
+                            next_request.requested_items,
+                            0,
+                            "Requesting the next historical tick prefill chunk."));
+                }
                 request_tick_continuity_history(
                     next_request.router_id,
                     std::move(next_request.subscription),
