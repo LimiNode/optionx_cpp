@@ -570,8 +570,117 @@ namespace optionx::platforms::intrade_bar {
                 return;
             }
 
-            auto login_result = parse_login(response->content);
-            if (!login_result) {
+            // Newer legacy-broker responses contain an opaque token in a
+            // JavaScript redirect. Follow it so the broker can establish the
+            // user_id/user_hash cookies before continuing with /auth.
+            const auto redirect_url = parse_login_redirect_url(response->content);
+            const bool has_legacy_credentials = redirect_url &&
+                redirect_url->find("id=") != std::string::npos &&
+                redirect_url->find("hash=") != std::string::npos;
+
+            std::string redirect_path;
+            if (redirect_url) {
+                const auto redirect_target = resolve_login_redirect_target(*redirect_url);
+                if (!redirect_target) {
+                    const std::string reason("Malformed login redirect URL.");
+                    LOGIT_ERROR(reason);
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        reason);
+                    return;
+                }
+
+                redirect_path = redirect_target->path;
+                if (redirect_target->origin) {
+                    if (!is_allowed_intrade_redirect_origin(*redirect_target->origin)) {
+                        const std::string reason("Rejected login redirect origin.");
+                        LOGIT_ERROR(reason, " origin=", *redirect_target->origin);
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            reason);
+                        return;
+                    }
+
+                    // The landing page may issue the one-time token on a
+                    // different legacy-broker origin (for example, intrade.bar
+                    // -> intrade35.bar). Keep the follow-up request and the
+                    // subsequent /auth call on the origin selected by the broker.
+                    auto& client = get_http_client();
+                    client.set_host(*redirect_target->origin);
+                    client.set_origin(*redirect_target->origin);
+                    client.set_referer(*redirect_target->origin + "/");
+                }
+            }
+
+            if (!redirect_url || has_legacy_credentials) {
+                auto login_result = parse_login(response->content);
+                if (login_result) {
+                    const auto [user_id, user_hash] = *login_result;
+                    result_callback(true, user_id, user_hash, cookies, std::string());
+                    return;
+                }
+            }
+
+            if (redirect_url) {
+                const std::string login_response_cookies = merge_set_cookies(
+                    cookies,
+                    response->headers);
+                auto redirect_future = get_http_client().get(
+                    redirect_path,
+                    kurlyk::QueryParams(),
+                    {
+                        {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"},
+                        {"Upgrade-Insecure-Requests", "1"},
+                        {"Connection", "keep-alive"},
+                        {"Cookie", login_response_cookies}
+                    },
+                    get_rate_limit(RateLimitType::ACCOUNT_INFO)
+                );
+
+                auto redirect_callback = [cookies = login_response_cookies, result_callback](
+                        kurlyk::HttpResponsePtr redirect_response) {
+                    if (!validate_response(redirect_response, [&result_callback](const std::string& error_text){
+                            result_callback(false, std::string(), std::string(), std::string(), error_text);
+                        })) {
+                        return;
+                    }
+
+                    const std::string merged_cookies = merge_set_cookies(
+                        cookies,
+                        redirect_response->headers);
+                    const auto parsed_cookies = parse_cookies(merged_cookies);
+                    if (!parsed_cookies) {
+                        LOGIT_PRINT_ERROR("Failed to parse cookies after login redirect.");
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            "Failed to parse login cookies.");
+                        return;
+                    }
+
+                    const auto& [user_id, user_hash] = *parsed_cookies;
+                    result_callback(
+                        true,
+                        user_id,
+                        user_hash,
+                        merged_cookies,
+                        std::string());
+                };
+
+                add_http_request_task(
+                    std::move(redirect_future),
+                    std::move(redirect_callback));
+                return;
+            }
+
 #               ifdef OPTIONX_LOG_UNIQUE_FILE_INDEX
                 const int log_index = OPTIONX_LOG_UNIQUE_FILE_INDEX;
                 LOGIT_STREAM_ERROR_TO(log_index) << response->content;
@@ -580,11 +689,6 @@ namespace optionx::platforms::intrade_bar {
                 LOGIT_PRINT_ERROR("Failed to parse login.");
 #               endif
                 result_callback(false, std::string(), std::string(), std::string(), "Failed to parse login.");
-                return;
-            }
-
-            const auto [user_id, user_hash] = *login_result;
-            result_callback(true, user_id, user_hash, cookies, std::string());
         };
 
         // Add the task to handle the HTTP request
