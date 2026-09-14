@@ -42,7 +42,11 @@ namespace optionx::platforms::intrade_bar {
         try {
             std::string user_id, user_hash, fragment;
             // Extract "/auth/" fragment
-            if (utils::extract_between(content, "/auth/", "'", fragment) == std::string::npos || fragment.empty()) {
+            if (utils::extract_between(content, "/auth/", "'", fragment) == std::string::npos) {
+                // Some deployments quote the redirect with double quotes.
+                utils::extract_between(content, "/auth/", "\"", fragment);
+            }
+            if (fragment.empty()) {
                 LOGIT_ERROR("Failed to extract auth fragment.");
                 return std::nullopt;
             }
@@ -63,6 +67,53 @@ namespace optionx::platforms::intrade_bar {
         } catch (...) {
             return std::nullopt;
         }
+    }
+
+    /// \brief Extracts the redirect URL emitted by the current legacy login page.
+    ///
+    /// Older responses embedded `id` and `hash` directly in an `/auth/` URL.
+    /// The broker now returns an opaque one-time token from JavaScript instead,
+    /// for example `window.location.replace('https://intrade35.bar/auth/token')`.
+    /// \param content The HTML/JavaScript response body.
+    /// \return The redirect URL or path when one is present.
+    inline std::optional<std::string> parse_login_redirect_url(const std::string& content) {
+        static const std::regex redirect_regex(
+            R"(window\s*\.\s*location\s*\.\s*replace\s*\(\s*(['"])((?:https?://[^'"]+|/auth/[^'"]+))\1\s*\))",
+            std::regex::icase);
+
+        std::smatch match;
+        if (!std::regex_search(content, match, redirect_regex) || match.size() < 3) {
+            return std::nullopt;
+        }
+
+        const std::string redirect_url = match[2].str();
+        if (redirect_url.find("/auth/") == std::string::npos) {
+            return std::nullopt;
+        }
+        return redirect_url;
+    }
+
+    /// \brief Merges response `Set-Cookie` headers into an existing cookie string.
+    /// \param cookies Cookies collected before the response.
+    /// \param headers HTTP response headers that may contain `Set-Cookie` values.
+    /// \return Cookie header value containing the existing and newly received cookies.
+    inline std::string merge_set_cookies(
+            const std::string& cookies,
+            const kurlyk::Headers& headers) {
+        kurlyk::Cookies merged = kurlyk::utils::parse_cookie(cookies);
+        bool changed = false;
+
+        const auto range = headers.equal_range("set-cookie");
+        for (auto it = range.first; it != range.second; ++it) {
+            const kurlyk::Cookies response_cookies = kurlyk::utils::parse_cookie(it->second);
+            for (const auto& cookie : response_cookies) {
+                merged.erase(cookie.first);
+                merged.emplace(cookie.first, cookie.second);
+                changed = true;
+            }
+        }
+
+        return changed ? kurlyk::utils::to_cookie_string(merged) : cookies;
     }
 
     /// \brief Parses balance information and detects the currency.

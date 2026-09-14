@@ -168,6 +168,99 @@ private:
     std::atomic<unsigned short> m_bound_port{0};
 };
 
+struct LocalLoginServer {
+    ~LocalLoginServer() {
+        stop();
+    }
+
+    bool start() {
+        server.config.address = "127.0.0.1";
+        server.config.port = 0;
+
+        server.resource["^/health$"]["GET"] = [](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            response->write(SimpleWeb::StatusCode::success_ok, "ok");
+        };
+
+        server.resource["^/login$"]["POST"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++login_requests;
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                "<script>window.location.replace('" + host() +
+                    "/auth/opaque-login-token')</script>");
+        };
+
+        server.resource["^/auth/opaque-login-token$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++auth_redirect_requests;
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Location", "/profile");
+            headers.emplace("Set-Cookie", "user_id=866188; Path=/; HttpOnly");
+            headers.emplace("Set-Cookie", "user_hash=fake_user_hash; Path=/; HttpOnly");
+            response->write(SimpleWeb::StatusCode::redirection_found, headers);
+        };
+
+        server.resource["^/profile$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++profile_requests;
+            response->write(SimpleWeb::StatusCode::success_ok, "profile");
+        };
+
+        thread = std::thread([this]() {
+            server.start();
+        });
+
+        if (!wait_until_ready()) {
+            stop();
+            return false;
+        }
+        return true;
+    }
+
+    void stop() {
+        server.stop();
+        if (thread.joinable()) thread.join();
+    }
+
+    std::string host() const {
+        return "http://127.0.0.1:" + std::to_string(server.bound_port());
+    }
+
+    bool wait_until_ready() const {
+        for (int i = 0; i < 100; ++i) {
+            if (server.bound_port() == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            try {
+                kurlyk::HttpClient client(host());
+                client.set_timeout(1);
+                client.set_connect_timeout(1);
+                auto future = client.get("/health", {}, {});
+                if (future.wait_for(std::chrono::seconds(1)) == std::future_status::ready) {
+                    auto response = future.get();
+                    if (response && response->status_code == 200) return true;
+                }
+            } catch (...) {
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    BoundPortHttpServer server;
+    std::thread thread;
+    std::atomic<int> login_requests{0};
+    std::atomic<int> auth_redirect_requests{0};
+    std::atomic<int> profile_requests{0};
+};
+
 struct LocalTradeHistoryServer {
     explicit LocalTradeHistoryServer(
             long csv_status_code,
@@ -657,6 +750,107 @@ std::int64_t valid_future_aligned_expiry_time() {
 }
 
 } // namespace
+
+TEST(IntradeBarLogin, ParsesLegacyCredentialsFromAuthUrl) {
+    const auto result = parse_login(
+        "<script>window.location.replace('/auth/id=866188&hash=fake_user_hash')</script>");
+    const auto double_quoted = parse_login(
+        R"(<script>window.location.replace("/auth/id=866188&hash=fake_user_hash")</script>)");
+
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->first, "866188");
+    EXPECT_EQ(result->second, "fake_user_hash");
+    ASSERT_TRUE(double_quoted);
+    EXPECT_EQ(double_quoted->first, "866188");
+    EXPECT_EQ(double_quoted->second, "fake_user_hash");
+}
+
+TEST(IntradeBarLogin, ParsesOpaqueJavaScriptRedirectWithEitherQuoteStyle) {
+    const auto single_quoted = parse_login_redirect_url(
+        "<script>window.location.replace('https://intrade35.bar/auth/opaque-token')</script>");
+    const auto double_quoted = parse_login_redirect_url(
+        R"(<script>window . location . replace ( "https://intrade35.bar/auth/other-token" )</script>)");
+
+    ASSERT_TRUE(single_quoted);
+    EXPECT_EQ(*single_quoted, "https://intrade35.bar/auth/opaque-token");
+    ASSERT_TRUE(double_quoted);
+    EXPECT_EQ(*double_quoted, "https://intrade35.bar/auth/other-token");
+    EXPECT_FALSE(parse_login_redirect_url("<script>window.location.href='/auth/token'</script>"));
+}
+
+TEST(IntradeBarLogin, MergesLoginCookiesCaseInsensitively) {
+    kurlyk::Headers headers;
+    headers.emplace("Set-Cookie", "user_id=866188; Path=/; HttpOnly");
+    headers.emplace("set-cookie", "user_hash=fake_user_hash; Path=/; HttpOnly");
+
+    const std::string cookies = merge_set_cookies("challenge=fake", headers);
+    const auto parsed = parse_cookies(cookies);
+
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(std::get<0>(*parsed), "866188");
+    EXPECT_EQ(std::get<1>(*parsed), "fake_user_hash");
+    EXPECT_NE(cookies.find("challenge=fake"), std::string::npos);
+}
+
+TEST(IntradeBarLogin, FollowsOpaqueRedirectAndReturnsIssuedCookies) {
+    LocalLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool callback_received = false;
+    bool success = false;
+    std::string user_id;
+    std::string user_hash;
+    std::string cookies;
+    std::string reason;
+
+    request_manager.request_login(
+        "challenge_name",
+        "challenge_value",
+        "challenge=fake",
+        auth_data,
+        [&](bool login_success,
+            const std::string& login_user_id,
+            const std::string& login_user_hash,
+            const std::string& login_cookies,
+            const std::string& login_reason) {
+            callback_received = true;
+            success = login_success;
+            user_id = login_user_id;
+            user_hash = login_user_hash;
+            cookies = login_cookies;
+            reason = login_reason;
+        });
+
+    for (int i = 0; i < 500 && !callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    EXPECT_TRUE(callback_received);
+    EXPECT_TRUE(success) << reason;
+    EXPECT_EQ(user_id, "866188");
+    EXPECT_EQ(user_hash, "fake_user_hash");
+    EXPECT_TRUE(parse_cookies(cookies).has_value());
+    EXPECT_NE(cookies.find("challenge=fake"), std::string::npos);
+    EXPECT_EQ(server.login_requests.load(), 1);
+    EXPECT_EQ(server.auth_redirect_requests.load(), 1);
+    EXPECT_EQ(server.profile_requests.load(), 1);
+
+    platform.shutdown();
+}
 
 TEST(BaseHttpClientComponent, ShutdownClearsRateLimitsAndIsRepeatable) {
     optionx::utils::EventBus bus;
