@@ -169,6 +169,10 @@ private:
 };
 
 struct LocalLoginServer {
+    explicit LocalLoginServer(
+            std::string login_redirect = "/auth/opaque-login-token")
+        : login_redirect(std::move(login_redirect)) {}
+
     ~LocalLoginServer() {
         stop();
     }
@@ -189,8 +193,8 @@ struct LocalLoginServer {
             ++login_requests;
             response->write(
                 SimpleWeb::StatusCode::success_ok,
-                "<script>window.location.replace('" + host() +
-                    "/auth/opaque-login-token')</script>");
+                "<script>window.location.replace('" + login_redirect +
+                    "')</script>");
         };
 
         server.resource["^/auth/opaque-login-token$"]["GET"] = [this](
@@ -259,6 +263,7 @@ struct LocalLoginServer {
     std::atomic<int> login_requests{0};
     std::atomic<int> auth_redirect_requests{0};
     std::atomic<int> profile_requests{0};
+    std::string login_redirect;
 };
 
 struct LocalTradeHistoryServer {
@@ -778,6 +783,32 @@ TEST(IntradeBarLogin, ParsesOpaqueJavaScriptRedirectWithEitherQuoteStyle) {
     EXPECT_FALSE(parse_login_redirect_url("<script>window.location.href='/auth/token'</script>"));
 }
 
+TEST(IntradeBarLogin, ValidatesAndResolvesRedirectOrigins) {
+    EXPECT_TRUE(is_allowed_intrade_redirect_origin("https://intrade.bar"));
+    EXPECT_TRUE(is_allowed_intrade_redirect_origin("https://intrade35.bar"));
+    EXPECT_TRUE(is_allowed_intrade_redirect_origin("https://intrade1000.bar"));
+
+    EXPECT_FALSE(is_allowed_intrade_redirect_origin("http://intrade35.bar"));
+    EXPECT_FALSE(is_allowed_intrade_redirect_origin("https://evil.example"));
+    EXPECT_FALSE(is_allowed_intrade_redirect_origin("https://intrade35.bar.evil"));
+    EXPECT_FALSE(is_allowed_intrade_redirect_origin("https://127.0.0.1"));
+    EXPECT_FALSE(is_allowed_intrade_redirect_origin("https://localhost"));
+    EXPECT_FALSE(is_allowed_intrade_redirect_origin("https://intrade35.bar:443"));
+
+    const auto absolute = resolve_login_redirect_target(
+        "https://intrade35.bar/auth/id=866188&hash=fake_user_hash");
+    ASSERT_TRUE(absolute);
+    ASSERT_TRUE(absolute->origin);
+    EXPECT_EQ(*absolute->origin, "https://intrade35.bar");
+    EXPECT_EQ(absolute->path, "/auth/id=866188&hash=fake_user_hash");
+
+    const auto relative = resolve_login_redirect_target("/auth/opaque-token");
+    ASSERT_TRUE(relative);
+    EXPECT_FALSE(relative->origin);
+    EXPECT_EQ(relative->path, "/auth/opaque-token");
+    EXPECT_FALSE(resolve_login_redirect_target("https:///auth/opaque-token"));
+}
+
 TEST(IntradeBarLogin, MergesLoginCookiesCaseInsensitively) {
     kurlyk::Headers headers;
     headers.emplace("Set-Cookie", "user_id=866188; Path=/; HttpOnly");
@@ -848,6 +879,56 @@ TEST(IntradeBarLogin, FollowsOpaqueRedirectAndReturnsIssuedCookies) {
     EXPECT_EQ(server.login_requests.load(), 1);
     EXPECT_EQ(server.auth_redirect_requests.load(), 1);
     EXPECT_EQ(server.profile_requests.load(), 1);
+
+    platform.shutdown();
+}
+
+TEST(IntradeBarLogin, RejectsUntrustedOpaqueRedirectOrigin) {
+    LocalLoginServer server("https://evil.example/auth/opaque-login-token");
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool callback_received = false;
+    bool success = true;
+    std::string reason;
+    request_manager.request_login(
+        "challenge_name",
+        "challenge_value",
+        "challenge=fake",
+        auth_data,
+        [&](bool login_success,
+            const std::string&,
+            const std::string&,
+            const std::string&,
+            const std::string& login_reason) {
+            callback_received = true;
+            success = login_success;
+            reason = login_reason;
+        });
+
+    for (int i = 0; i < 500 && !callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    EXPECT_TRUE(callback_received);
+    EXPECT_FALSE(success);
+    EXPECT_EQ(reason, "Rejected login redirect origin.");
+    EXPECT_EQ(server.login_requests.load(), 1);
+    EXPECT_EQ(server.auth_redirect_requests.load(), 0);
+    EXPECT_EQ(server.profile_requests.load(), 0);
 
     platform.shutdown();
 }

@@ -577,6 +577,47 @@ namespace optionx::platforms::intrade_bar {
             const bool has_legacy_credentials = redirect_url &&
                 redirect_url->find("id=") != std::string::npos &&
                 redirect_url->find("hash=") != std::string::npos;
+
+            std::string redirect_path;
+            if (redirect_url) {
+                const auto redirect_target = resolve_login_redirect_target(*redirect_url);
+                if (!redirect_target) {
+                    const std::string reason("Malformed login redirect URL.");
+                    LOGIT_ERROR(reason);
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        reason);
+                    return;
+                }
+
+                redirect_path = redirect_target->path;
+                if (redirect_target->origin) {
+                    if (!is_allowed_intrade_redirect_origin(*redirect_target->origin)) {
+                        const std::string reason("Rejected login redirect origin.");
+                        LOGIT_ERROR(reason, " origin=", *redirect_target->origin);
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            reason);
+                        return;
+                    }
+
+                    // The landing page may issue the one-time token on a
+                    // different legacy-broker origin (for example, intrade.bar
+                    // -> intrade35.bar). Keep the follow-up request and the
+                    // subsequent /auth call on the origin selected by the broker.
+                    auto& client = get_http_client();
+                    client.set_host(*redirect_target->origin);
+                    client.set_origin(*redirect_target->origin);
+                    client.set_referer(*redirect_target->origin + "/");
+                }
+            }
+
             if (!redirect_url || has_legacy_credentials) {
                 auto login_result = parse_login(response->content);
                 if (login_result) {
@@ -587,30 +628,6 @@ namespace optionx::platforms::intrade_bar {
             }
 
             if (redirect_url) {
-                std::string redirect_path = *redirect_url;
-                std::string redirect_origin;
-                const auto scheme_end = redirect_path.find("://");
-                if (scheme_end != std::string::npos) {
-                    const auto path_start = redirect_path.find('/', scheme_end + 3);
-                    redirect_origin = path_start == std::string::npos
-                        ? redirect_path
-                        : redirect_path.substr(0, path_start);
-                    redirect_path = path_start == std::string::npos
-                        ? "/"
-                        : redirect_path.substr(path_start);
-                }
-
-                // The landing page may issue the one-time token on a
-                // different legacy-broker origin (for example, intrade.bar
-                // -> intrade35.bar). Keep the follow-up request and the
-                // subsequent /auth call on the origin selected by the broker.
-                if (!redirect_origin.empty()) {
-                    auto& client = get_http_client();
-                    client.set_host(redirect_origin);
-                    client.set_origin(redirect_origin);
-                    client.set_referer(redirect_origin + "/");
-                }
-
                 const std::string login_response_cookies = merge_set_cookies(
                     cookies,
                     response->headers);

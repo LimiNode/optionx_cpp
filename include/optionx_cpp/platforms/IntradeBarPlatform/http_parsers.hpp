@@ -93,6 +93,70 @@ namespace optionx::platforms::intrade_bar {
         return redirect_url;
     }
 
+    /// \brief Extracts the origin from an absolute login redirect URL.
+    /// \param redirect_url Absolute or relative redirect URL.
+    /// \return The `scheme://authority` origin for an absolute URL; empty for a relative path.
+    inline std::optional<std::string> parse_login_redirect_origin(
+            const std::string& redirect_url) {
+        const auto scheme_end = redirect_url.find("://");
+        if (scheme_end == std::string::npos || scheme_end == 0) {
+            return std::nullopt;
+        }
+
+        const auto authority_start = scheme_end + 3;
+        if (authority_start >= redirect_url.size()) {
+            return std::nullopt;
+        }
+
+        const auto path_start = redirect_url.find_first_of("/?#", authority_start);
+        const std::string origin = path_start == std::string::npos
+            ? redirect_url
+            : redirect_url.substr(0, path_start);
+        if (origin.size() <= authority_start) {
+            return std::nullopt;
+        }
+        return origin;
+    }
+
+    /// \brief Validates the trusted origin family used by legacy Intrade login.
+    /// \param origin The `scheme://authority` origin to validate.
+    /// \return True only for HTTPS `intrade.bar` or `intrade<N>.bar` origins.
+    inline bool is_allowed_intrade_redirect_origin(const std::string& origin) {
+        static const std::regex allowed_origin_regex(
+            R"(^https://intrade(?:[0-9]+)?\.bar$)",
+            std::regex::icase);
+        return std::regex_match(origin, allowed_origin_regex);
+    }
+
+    /// \brief Resolves a login redirect into a request path and optional origin.
+    /// \param redirect_url Absolute or relative redirect URL.
+    /// \return The path and origin, or empty when an absolute URL is malformed.
+    struct LoginRedirectTarget {
+        std::string path;
+        std::optional<std::string> origin;
+    };
+
+    inline std::optional<LoginRedirectTarget> resolve_login_redirect_target(
+            const std::string& redirect_url) {
+        LoginRedirectTarget target;
+        target.path = redirect_url;
+        target.origin = parse_login_redirect_origin(redirect_url);
+
+        if (!target.origin) {
+            if (redirect_url.find("://") != std::string::npos) {
+                return std::nullopt;
+            }
+            return target;
+        }
+
+        const auto scheme_end = redirect_url.find("://");
+        const auto path_start = redirect_url.find('/', scheme_end + 3);
+        target.path = path_start == std::string::npos
+            ? "/"
+            : redirect_url.substr(path_start);
+        return target;
+    }
+
     /// \brief Merges response `Set-Cookie` headers into an existing cookie string.
     /// \param cookies Cookies collected before the response.
     /// \param headers HTTP response headers that may contain `Set-Cookie` values.
