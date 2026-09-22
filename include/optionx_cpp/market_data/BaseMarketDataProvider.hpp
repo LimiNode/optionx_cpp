@@ -106,6 +106,17 @@ namespace optionx::market_data {
             return 0;
         }
 
+        /// \brief Returns the provider's default tick identity policy.
+        /// \details Router uses this policy when a tick request leaves
+        ///          `deduplication_mode` at PROVIDER_DEFAULT. The policy is
+        ///          used only to remove observations repeated by inclusive
+        ///          history overlap; it never collapses distinct live events
+        ///          before they are buffered or delivered.
+        /// \return Provider-specific tick identity policy.
+        virtual MarketDataTickDeduplicationMode tick_deduplication_mode() const noexcept {
+            return MarketDataTickDeduplicationMode::EXACT_OBSERVATION;
+        }
+
         /// \brief Requests a live tick stream subscription.
         /// \param request Tick subscription parameters.
         /// \param callback Callback receiving desired-subscription acceptance or failure.
