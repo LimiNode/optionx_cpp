@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 
-#include <time_shield/time_unit_conversions.hpp>
+#include <time_shield/conversions/time_unit_conversions.hpp>
 
 #include "data.hpp"
 

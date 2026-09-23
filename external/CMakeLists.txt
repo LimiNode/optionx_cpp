@@ -43,24 +43,28 @@ include(${EXTERNAL_CMAKE_DIR}/libmdbx-wrapper.cmake)
 
 if(WIN32)
 # openssl
-install_headers_to_include(openssl ${CMAKE_CURRENT_LIST_DIR}/openssl-win64-v3.4.0/include/openssl)
-install_static_libs_to_lib(${CMAKE_CURRENT_LIST_DIR}/openssl-win64-v3.4.0/lib/VC/x64/MT)
-install_runtime_dlls_to_bin(${CMAKE_CURRENT_LIST_DIR}/openssl-win64-v3.4.0/bin)
+install_headers_to_include(openssl ${CMAKE_CURRENT_LIST_DIR}/openssl-win64-v3.5.8/include/openssl)
+# The 3.5.8 snapshot ships its x64 import/static libraries in the MD tree.
+install_static_libs_to_lib(${CMAKE_CURRENT_LIST_DIR}/openssl-win64-v3.5.8/lib/VC/x64/MD)
+install_runtime_dlls_to_bin(${CMAKE_CURRENT_LIST_DIR}/openssl-win64-v3.5.8/bin)
 
 # curl
-install_headers_to_include(curl ${CMAKE_CURRENT_LIST_DIR}/curl-8.11.0_1-win64-mingw/include/curl)
+install_headers_to_include(curl ${CMAKE_CURRENT_LIST_DIR}/curl-8.22.0_1-win64-mingw/include/curl)
 
-file(GLOB CURL_STATIC_LIBS "${CMAKE_CURRENT_LIST_DIR}/curl-8.11.0_1-win64-mingw/lib/*.a")
+file(GLOB CURL_STATIC_LIBS "${CMAKE_CURRENT_LIST_DIR}/curl-8.22.0_1-win64-mingw/lib/*.a")
 # Удаляем libssl.a и libcrypto.a
 list(FILTER CURL_STATIC_LIBS EXCLUDE REGEX ".*libssl.a$")
 list(FILTER CURL_STATIC_LIBS EXCLUDE REGEX ".*libcrypto.a$")
 install_lib_files_to_lib(${CURL_STATIC_LIBS})
-# install_static_libs_to_lib(${CMAKE_CURRENT_LIST_DIR}/curl-8.11.0_1-win64-mingw/lib)
-install_runtime_dlls_to_bin(${CMAKE_CURRENT_LIST_DIR}/curl-8.11.0_1-win64-mingw/bin)
-file(COPY
-    ${CMAKE_CURRENT_LIST_DIR}/curl-8.11.0_1-win64-mingw/bin/curl-ca-bundle.crt
-    DESTINATION ${OPTIONX_DEPS_OUTPUT_DIR}/bin
-)
+# install_static_libs_to_lib(${CMAKE_CURRENT_LIST_DIR}/curl-8.22.0_1-win64-mingw/lib)
+install_runtime_dlls_to_bin(${CMAKE_CURRENT_LIST_DIR}/curl-8.22.0_1-win64-mingw/bin)
+set(CURL_CA_BUNDLE "${CMAKE_CURRENT_LIST_DIR}/curl-8.22.0_1-win64-mingw/bin/curl-ca-bundle.crt")
+if(EXISTS "${CURL_CA_BUNDLE}")
+    file(COPY
+        "${CURL_CA_BUNDLE}"
+        DESTINATION ${OPTIONX_DEPS_OUTPUT_DIR}/bin
+    )
+endif()
 else()
     # Non-Windows builds use system OpenSSL/CURL targets from the root
     # tests/examples link configuration.

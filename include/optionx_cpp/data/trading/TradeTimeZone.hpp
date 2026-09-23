@@ -7,11 +7,11 @@
 
 #include <cstdint>
 
-#include <time_shield/constants.hpp>
-#include <time_shield/date_time_conversions.hpp>
-#include <time_shield/enums.hpp>
-#include <time_shield/time_zone_conversions.hpp>
-#include <time_shield/types.hpp>
+#include <time_shield/core/constants.hpp>
+#include <time_shield/conversions/date_time_conversions.hpp>
+#include <time_shield/core/enums.hpp>
+#include <time_shield/timezone/time_zone_conversions.hpp>
+#include <time_shield/core/types.hpp>
 
 namespace optionx {
 
