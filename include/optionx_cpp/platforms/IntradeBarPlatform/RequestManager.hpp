@@ -976,7 +976,10 @@ namespace optionx::platforms::intrade_bar {
         LOGIT_TRACE0();
 
         auto& client = get_http_client();
-        client.set_head_only(true); // Use HEAD to avoid downloading body
+        // Use a regular GET here. Some proxies and broker frontends handle
+        // HEAD-like requests inconsistently, which can produce a local 499
+        // even while the authenticated transport is still healthy.
+        client.set_head_only(false);
         client.set_retry_attempts(3, time_shield::MS_PER_SEC);
         client.set_timeout(5);
         client.set_connect_timeout(5);
@@ -991,7 +994,11 @@ namespace optionx::platforms::intrade_bar {
             bool success = response->status_code == 200;
             LOGIT_PRINT_DEBUG("Current host ping check:",
                 " success:", success,
-                "; status:", response->status_code);
+                "; status:", response->status_code,
+                "; error_code:", response->error_code.value(),
+                "; error:", response->error_code.message(),
+                "; retry_attempt:", response->retry_attempt,
+                "; message:", response->error_message);
             check_callback(success);
         };
 
