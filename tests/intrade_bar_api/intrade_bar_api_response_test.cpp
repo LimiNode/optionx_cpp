@@ -191,6 +191,7 @@ struct LocalLoginServer {
                 std::shared_ptr<TradeHistoryHttpServer::Response> response,
                 std::shared_ptr<TradeHistoryHttpServer::Request>) {
             ++landing_page_requests;
+            ++host_health_get_requests;
             response->write(SimpleWeb::StatusCode::success_ok, "new landing page");
         };
 
@@ -205,6 +206,12 @@ struct LocalLoginServer {
                 "<input type=\"hidden\" name=\"g-rec-res-l\" "
                 "id=\"g-rec-res-l\" value=\"challenge-token\">\n",
                 headers);
+
+        server.resource["^/$"]["HEAD"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++host_health_head_requests;
+            response->write(SimpleWeb::StatusCode::client_error_not_found);
         };
 
         server.resource["^/login$"]["POST"] = [this](
@@ -285,6 +292,8 @@ struct LocalLoginServer {
     std::atomic<int> login_page_requests{0};
     std::atomic<int> auth_redirect_requests{0};
     std::atomic<int> profile_requests{0};
+    std::atomic<int> host_health_get_requests{0};
+    std::atomic<int> host_health_head_requests{0};
     std::string login_redirect;
 };
 
@@ -895,6 +904,43 @@ TEST(IntradeBarLogin, RequestsLegacyLoginPageInsteadOfLandingPage) {
     EXPECT_NE(cookies.find("login_page=1"), std::string::npos);
     EXPECT_EQ(server.login_page_requests.load(), 1);
     EXPECT_EQ(server.landing_page_requests.load(), 0);
+
+    platform.shutdown();
+}
+
+TEST(IntradeBarHostHealth, ChecksCurrentHostWithGet) {
+    LocalLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->auto_find_domain = false;
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool callback_received = false;
+    bool host_available = false;
+    request_manager.request_check_current_host_available(
+        [&](bool success) {
+            callback_received = true;
+            host_available = success;
+        });
+
+    for (int i = 0; i < 500 && !callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    EXPECT_TRUE(callback_received);
+    EXPECT_TRUE(host_available);
+    EXPECT_EQ(server.host_health_get_requests.load(), 1);
+    EXPECT_EQ(server.host_health_head_requests.load(), 0);
 
     platform.shutdown();
 }
