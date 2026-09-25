@@ -1,18 +1,18 @@
 [submodule "external/kurlyk"]
 	path = external/kurlyk
-	url = https://github.com/NewYaroslav/kurlyk.git
+	url = https://github.com/LimiNode/kurlyk.git
 [submodule "external/asio"]
 	path = external/asio
 	url = https://github.com/chriskohlhoff/asio.git
-[submodule "external/openssl-win64-v3.4.0"]
-	path = external/openssl-win64-v3.4.0
-	url = https://github.com/NewYaroslav/openssl-win64-v3.4.0.git
-[submodule "external/curl-8.11.0_1-win64-mingw"]
-	path = external/curl-8.11.0_1-win64-mingw
-	url = https://github.com/NewYaroslav/curl-8.11.0_1-win64-mingw.git
+[submodule "external/openssl-win64-v3.5.8"]
+	path = external/openssl-win64-v3.5.8
+	url = https://github.com/LimiNode/openssl-win64-v3.5.8.git
+[submodule "external/curl-8.22.0_1-win64-mingw"]
+	path = external/curl-8.22.0_1-win64-mingw
+	url = https://github.com/LimiNode/curl-8.22.0_1-win64-mingw.git
 [submodule "external/log-it-cpp"]
 	path = external/log-it-cpp
-	url = https://github.com/NewYaroslav/log-it-cpp.git
+	url = https://github.com/LimiNode/log-it-cpp.git
 [submodule "external/Simple-WebSocket-Server"]
 	path = external/Simple-WebSocket-Server
 	url = https://gitlab.com/eidheim/Simple-WebSocket-Server.git
@@ -21,10 +21,10 @@
 	url = https://github.com/nlohmann/json.git
 [submodule "external/time-shield-cpp"]
 	path = external/time-shield-cpp
-	url = https://github.com/NewYaroslav/time-shield-cpp.git
+	url = https://github.com/LimiNode/time-shield-cpp.git
 [submodule "external/SimpleNamedPipe"]
 	path = external/SimpleNamedPipe
-	url = https://github.com/NewYaroslav/SimpleNamedPipe.git
+	url = https://github.com/LimiNode/SimpleNamedPipe.git
 [submodule "external/AES"]
 	path = external/AES
 	url = https://github.com/SergeyBel/AES.git
@@ -33,7 +33,7 @@
 	url = https://github.com/google/googletest.git
 [submodule "external/mdbx-containers"]
 	path = external/mdbx-containers
-	url = https://github.com/NewYaroslav/mdbx-containers.git
+	url = https://github.com/LimiNode/mdbx-containers.git
 [submodule "external/libmdbx"]
 	path = external/libmdbx
 	url = https://github.com/Mithril-mine/libmdbx.git
