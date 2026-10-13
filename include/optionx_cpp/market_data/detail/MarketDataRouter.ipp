@@ -3304,19 +3304,6 @@ namespace optionx::market_data {
                     mark_tick_unverified_no_lock(entry, from_time_ms);
                     ++continuity.failure_count;
                 } else {
-                    if (delivered_history_items > 0) {
-                        std::uint64_t confirmed_from = 0;
-                        std::uint64_t confirmed_to = 0;
-                        for (const auto& tick : history_batch.items) {
-                            if (confirmed_from == 0 || tick.time_ms < confirmed_from) {
-                                confirmed_from = tick.time_ms;
-                            }
-                            confirmed_to = std::max(confirmed_to, tick.time_ms);
-                        }
-                        continuity.confirmed_from_time_ms = confirmed_from;
-                        continuity.confirmed_through_time_ms = confirmed_to;
-                        continuity.confirmed_items = delivered_history_items;
-                    }
                     record_tick_verified_range_no_lock(
                         entry,
                         from_time_ms,
@@ -3391,6 +3378,21 @@ namespace optionx::market_data {
                         deduplicate_tick_items_against_last_delivery_no_lock(
                             entry_it->second,
                             history_batch.items);
+                        delivered_history_items = history_batch.items.size();
+                        if (usable_history && delivered_history_items > 0) {
+                            auto& continuity = entry_it->second->tick_continuity_state;
+                            std::uint64_t confirmed_from = 0;
+                            std::uint64_t confirmed_to = 0;
+                            for (const auto& tick : history_batch.items) {
+                                if (confirmed_from == 0 || tick.time_ms < confirmed_from) {
+                                    confirmed_from = tick.time_ms;
+                                }
+                                confirmed_to = std::max(confirmed_to, tick.time_ms);
+                            }
+                            continuity.confirmed_from_time_ms = confirmed_from;
+                            continuity.confirmed_through_time_ms = confirmed_to;
+                            continuity.confirmed_items = delivered_history_items;
+                        }
                         if (!history_batch.items.empty()) {
                             record_tick_progress_no_lock(
                                 entry_it->second,

@@ -602,6 +602,20 @@ TEST(MarketDataTickContinuity, DeduplicatesInclusiveHistoryAcrossDeliveredBatche
     EXPECT_EQ(count_observations(3000, 3.0), 1U);
     EXPECT_EQ(count_observations(4000, 4.0), 1U);
     EXPECT_EQ(count_observations(4501, 5.0), 1U);
+
+    std::size_t last_historical_items = 0;
+    for (const auto& batch : subscriber->ticks) {
+        if (!batch.items.empty() &&
+            batch.items.front().has_flag(MarketDataFlags::HISTORICAL)) {
+            last_historical_items = batch.items.size();
+        }
+    }
+    const auto snapshot = router.continuity_snapshot(route.router_id());
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(last_historical_items, 1U);
+    EXPECT_EQ(snapshot->last_confirmed_items, last_historical_items);
+    EXPECT_EQ(snapshot->last_confirmed_from_time_ms, 4000U);
+    EXPECT_EQ(snapshot->last_confirmed_to_time_ms, 4000U);
     EXPECT_EQ(count_status(*subscriber, MarketDataContinuityStatus::LIVE), 2U);
 }
 
