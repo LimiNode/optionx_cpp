@@ -187,6 +187,26 @@ struct LocalLoginServer {
             response->write(SimpleWeb::StatusCode::success_ok, "ok");
         };
 
+        server.resource["^/$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++landing_page_requests;
+            response->write(SimpleWeb::StatusCode::success_ok, "new landing page");
+        };
+
+        server.resource["^/login$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++login_page_requests;
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Set-Cookie", "login_page=1; Path=/; HttpOnly");
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                "<input type=\"hidden\" name=\"g-rec-res-l\" "
+                "id=\"g-rec-res-l\" value=\"challenge-token\">\n",
+                headers);
+        };
+
         server.resource["^/login$"]["POST"] = [this](
                 std::shared_ptr<TradeHistoryHttpServer::Response> response,
                 std::shared_ptr<TradeHistoryHttpServer::Request>) {
@@ -261,6 +281,8 @@ struct LocalLoginServer {
     BoundPortHttpServer server;
     std::thread thread;
     std::atomic<int> login_requests{0};
+    std::atomic<int> landing_page_requests{0};
+    std::atomic<int> login_page_requests{0};
     std::atomic<int> auth_redirect_requests{0};
     std::atomic<int> profile_requests{0};
     std::string login_redirect;
@@ -821,6 +843,60 @@ TEST(IntradeBarLogin, MergesLoginCookiesCaseInsensitively) {
     EXPECT_EQ(std::get<0>(*parsed), "866188");
     EXPECT_EQ(std::get<1>(*parsed), "fake_user_hash");
     EXPECT_NE(cookies.find("challenge=fake"), std::string::npos);
+}
+
+TEST(IntradeBarLogin, RequestsLegacyLoginPageInsteadOfLandingPage) {
+    LocalLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool callback_received = false;
+    bool success = false;
+    std::string req_id;
+    std::string req_value;
+    std::string cookies;
+    std::string reason;
+    request_manager.request_main_page(
+        auth_data,
+        [&](bool page_success,
+            const std::string& page_req_id,
+            const std::string& page_req_value,
+            const std::string& page_cookies,
+            const std::string& page_reason) {
+            callback_received = true;
+            success = page_success;
+            req_id = page_req_id;
+            req_value = page_req_value;
+            cookies = page_cookies;
+            reason = page_reason;
+        });
+
+    for (int i = 0; i < 500 && !callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(callback_received) << reason;
+    EXPECT_TRUE(success) << reason;
+    EXPECT_EQ(req_id, "g-rec-res-l");
+    EXPECT_EQ(req_value, "challenge-token");
+    EXPECT_NE(cookies.find("login_page=1"), std::string::npos);
+    EXPECT_EQ(server.login_page_requests.load(), 1);
+    EXPECT_EQ(server.landing_page_requests.load(), 0);
+
+    platform.shutdown();
 }
 
 TEST(IntradeBarLogin, FollowsOpaqueRedirectAndReturnsIssuedCookies) {

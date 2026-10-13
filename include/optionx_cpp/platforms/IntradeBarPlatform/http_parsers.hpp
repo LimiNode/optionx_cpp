@@ -300,11 +300,10 @@ namespace optionx::platforms::intrade_bar {
 
         // Parse cookies
         kurlyk::Cookies set_cookie;
-        for (const auto& item : headers) {
-            if (item.first == "set-cookie") {
-                kurlyk::Cookies cookie(kurlyk::utils::parse_cookie(item.second));
-                set_cookie.insert(cookie.begin(), cookie.end());
-            }
+        const auto cookie_range = headers.equal_range("set-cookie");
+        for (auto it = cookie_range.first; it != cookie_range.second; ++it) {
+            kurlyk::Cookies cookie(kurlyk::utils::parse_cookie(it->second));
+            set_cookie.insert(cookie.begin(), cookie.end());
         }
         cookies = kurlyk::utils::to_cookie_string(set_cookie);
 
