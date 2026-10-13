@@ -393,9 +393,13 @@ broker:
   `range_complete` remains the provider's continuity authority. Router reports
   incomplete history as operation-level `FAILED` and sticky `DEGRADED`, while
   still allowing returned observations to be delivered. Reconnect recovery waits
-  for `READY`; exact overlap identity is `(time_ms, ask, bid, last, volume)`, so
-  `received_ms`/flags do not distinguish duplicates and different same-second
-  observations remain distinct.
+  for `READY`; history overlap identity is selected by
+  `TickSubscriptionRequest::continuity.deduplication_mode`. `TIMESTAMP` uses
+  only `time_ms`, `TIME_AND_PRICES` adds quote/trade prices, and
+  `EXACT_OBSERVATION` also adds volume. `received_ms`/flags never distinguish
+  duplicates. `PROVIDER_DEFAULT` uses the provider hook, which is timestamp
+  based for Intrade; choose `EXACT_OBSERVATION` when same-second observations
+  must remain distinct.
 
 `MarketDataRouter` is the subscription-scoped alternative to `MarketDataHub`:
 

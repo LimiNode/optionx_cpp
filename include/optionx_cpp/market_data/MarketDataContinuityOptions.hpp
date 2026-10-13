@@ -18,6 +18,15 @@ namespace optionx::market_data {
         PREFILL_AND_RECOVER  ///< Prefill and repair live/reconnect timestamp gaps.
     };
 
+    /// \enum MarketDataTickDeduplicationMode
+    /// \brief Selects which tick fields identify an already delivered observation.
+    enum class MarketDataTickDeduplicationMode {
+        PROVIDER_DEFAULT = 0, ///< Use the provider's identity contract.
+        TIMESTAMP,            ///< Treat one timestamp as one observation.
+        TIME_AND_PRICES,      ///< Match timestamp, ask, bid, and last price.
+        EXACT_OBSERVATION     ///< Match timestamp, prices, and volume.
+    };
+
     /// \struct MarketDataContinuityRetryPolicy
     /// \brief Configures bounded history retry attempts and exponential backoff.
     struct MarketDataContinuityRetryPolicy {
@@ -82,10 +91,23 @@ namespace optionx::market_data {
         MarketDataContinuityRetryPolicy retry;
         std::size_t max_buffered_batches = 1024;
         std::size_t max_buffered_items = 100000;
+        /// Identity policy used to remove inclusive history overlap.
+        /// Provider default keeps the policy provider-specific.
+        MarketDataTickDeduplicationMode deduplication_mode =
+            MarketDataTickDeduplicationMode::PROVIDER_DEFAULT;
 
         /// \brief Returns true when the option combination is usable.
         [[nodiscard]] bool valid() const noexcept {
             if (!retry.valid()) return false;
+            switch (deduplication_mode) {
+            case MarketDataTickDeduplicationMode::PROVIDER_DEFAULT:
+            case MarketDataTickDeduplicationMode::TIMESTAMP:
+            case MarketDataTickDeduplicationMode::TIME_AND_PRICES:
+            case MarketDataTickDeduplicationMode::EXACT_OBSERVATION:
+                break;
+            default:
+                return false;
+            }
             if (mode == MarketDataContinuityMode::LIVE_ONLY) {
                 return prefill_lookback_ms == 0;
             }

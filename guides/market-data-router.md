@@ -675,6 +675,24 @@ request.continuity.max_backfill_ms = 60'000;
 auto route = router.subscribe_ticks(provider, bot, request);
 ```
 
+History-overlap identity is configurable per route through
+`TickSubscriptionRequest::continuity.deduplication_mode`. The default
+`PROVIDER_DEFAULT` uses `BaseMarketDataProvider::tick_deduplication_mode()`;
+Intrade uses `TIMESTAMP` because its broker observations are one-second
+snapshots. A route can override that choice when it needs richer identity:
+
+```cpp
+request.continuity.deduplication_mode =
+    md::MarketDataTickDeduplicationMode::TIME_AND_PRICES;
+```
+
+`TIMESTAMP` matches only `time_ms`, `TIME_AND_PRICES` matches `time_ms` plus
+`ask`, `bid`, and `last`, and `EXACT_OBSERVATION` also matches `volume`.
+`received_ms` and flags never identify an observation. The policy is applied
+when resolving history overlap; it does not collapse distinct live events
+before they are buffered or delivered. Use `EXACT_OBSERVATION` when distinct
+same-timestamp snapshots must remain separate.
+
 `PREFILL` requests the configured lookback before releasing live ticks.
 `PREFILL_AND_RECOVER` also holds the live tail when the difference between
 successive observed timestamps exceeds `expected_interval_ms`. That value is a
@@ -693,7 +711,7 @@ and is released after the completed range is verified. Bounded chunks keep
 their size limit and overlap at the previous end point whenever that overlap
 can advance the range; if the limit is smaller than a provider grid step,
 Router advances to the next provider boundary instead of repeating the same
-request. The overlap is removed only by exact observation identity.
+request. History overlap is resolved with the selected tick identity policy.
 
 The Router sends historical ticks first, marks them `HISTORICAL`, and then
 replays held live ticks as `LIVE_SOURCE | CATCHUP`. A complete result is required
@@ -704,10 +722,11 @@ History requests are bounded by `max_backfill_ms` and are scheduled by
 `process()`, so tick continuity does not create a timer thread.
 
 On reconnect, tick continuity reports `STALE`, waits for `READY`, and requests
-the unresolved range through the latest observed time. Exact overlap is removed
-by `(time_ms, ask, bid, last, volume)` identity. `received_ms` and flags do not
-make an otherwise identical observation distinct, while different observations
-with the same second remain separate events. If the continuity buffer exceeds
+the unresolved range through the latest observed time. History overlap is
+removed according to the selected tick identity policy. The default provider
+policy for Intrade is timestamp-based; use `EXACT_OBSERVATION` to retain
+different observations with the same second. `received_ms` and flags do not
+make an otherwise identical observation distinct. If the continuity buffer exceeds
 its batch or item limit, Router releases the held live data, reports
 `FAILED`/`DEGRADED`, disables continuity for that route, and resumes ordinary
 live delivery. If transport is interrupted during the initial prefill, Router
