@@ -22,18 +22,23 @@ Used before authentication when `AuthData::auto_find_domain` is enabled, and by
 Used by `AuthManager` for `AuthMethod::EMAIL_PASSWORD`.
 
 1. Validate email/password are present.
-2. Try `ServiceSessionDB` for saved `user_id/user_hash` cookies.
+2. Try `ServiceSessionDB` for saved `user_id/user_hash` cookies or a modern
+   `PHPSESSID` session.
 3. If saved cookies work:
    `request_profile` -> optional settings switches -> `request_balance`.
-4. If no valid session exists:
-   `request_main_page` -> `request_login` -> `request_auth`.
-5. Store returned credentials in `ServiceSessionDB`.
-6. Continue with:
+4. If no valid session exists, request the main page. The current Nuxt SPA
+   shell is recognized without expecting the retired hidden HTML input.
+5. For the current SPA, `request_login` posts JSON `email/password` to
+   `/route/ts_login_user`, follows the returned opaque `/auth/t=...` redirect,
+   and merges the resulting `user_id/user_hash` cookies. Legacy deployments
+   continue through `request_login` -> `request_auth`.
+6. Store the returned session cookies in `ServiceSessionDB`.
+7. Continue with:
    `request_profile` -> optional `request_switch_account_type` ->
    optional `request_switch_currency` -> `request_balance`.
-7. On successful balance fetch, mark the account connected and publish account
+8. On successful balance fetch, mark the account connected and publish account
    updates.
-8. `ActiveTradesSyncManager` reacts to the connected account update and calls
+9. `ActiveTradesSyncManager` reacts to the connected account update and calls
    `request_active_trades_snapshot` to synchronize broker-side active trades
    with the trade queue counter.
 

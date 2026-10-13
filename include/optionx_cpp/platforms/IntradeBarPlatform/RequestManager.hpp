@@ -77,6 +77,17 @@ namespace optionx::platforms::intrade_bar {
             m_cookies = "user_id=" + user_id + "; user_hash=" + user_hash;
         }
 
+        /// \brief Stores a session cookie returned by the current trading SPA login.
+        /// \param user_id Optional numeric broker user ID from the login JSON.
+        /// \param cookies Merged session cookies from the login response.
+        void set_auth_session(
+                const std::string& user_id,
+                const std::string& cookies) {
+            m_user_id = user_id;
+            m_user_hash.clear();
+            m_cookies = cookies;
+        }
+
         /// \brief Cancels all ongoing HTTP requests.
         void cancel_requests() {
             get_http_client().cancel_requests();
@@ -309,6 +320,7 @@ namespace optionx::platforms::intrade_bar {
         std::string       m_user_id;     ///< User ID for authentication.
         std::string       m_user_hash;   ///< User authentication hash.
         std::string       m_cookies;     ///< Session cookies.
+        std::string       m_api_host;   ///< Legacy API host to restore after SPA login.
         int m_domain_index_min = 0;      ///< Minimum domain index to scan (0 = intrade.bar).
         int m_domain_index_max = 0;      ///< Maximum domain index to scan (e.g., intrade1000.bar).
         bool m_domain_include_primary = true; ///< Whether to include https://intrade.bar in domain discovery.
@@ -344,6 +356,7 @@ namespace optionx::platforms::intrade_bar {
                 LOGIT_TRACE0();
                 const std::string referer(msg->host + "/");
                 auto& client = get_http_client();
+                m_api_host = msg->host;
                 if (!msg->auto_find_domain) {
                     client.set_host(msg->host);
                     client.set_origin(msg->host);
@@ -463,7 +476,20 @@ namespace optionx::platforms::intrade_bar {
                 return;
             }
 
-            // Parse the response content
+            // The current broker serves a Nuxt shell instead of the retired
+            // hidden-input login form. Treat the shell as a successful
+            // challenge step and let request_login call the trading backend.
+            if (is_modern_intrade_landing_page(response->content)) {
+                result_callback(
+                    true,
+                    std::string(),
+                    std::string(),
+                    merge_set_cookies(std::string(), response->headers),
+                    std::string());
+                return;
+            }
+
+            // Parse the legacy response content.
             auto parsed_data = parse_main_page_response(response->content, response->headers);
             if (!parsed_data) {
 #               ifdef OPTIONX_LOG_UNIQUE_FILE_INDEX
@@ -539,6 +565,199 @@ namespace optionx::platforms::intrade_bar {
                 const std::string& cookies,
                 const std::string& reason)> result_callback) {
         LOGIT_DEBUG(req_id, req_value, utils::redact_secret_value(cookies));
+
+        // The broker's current public host is a Nuxt shell. Its login endpoint
+        // returns an opaque /auth/t=... redirect; the existing legacy
+        // user_id/user_hash and /auth flow remains valid after following it.
+        if (req_id.empty() && req_value.empty()) {
+            const std::string legacy_host =
+                m_api_host.empty() ? auth_data->host : m_api_host;
+            auto& client = get_http_client();
+            client.set_host(legacy_host);
+            client.set_origin(legacy_host);
+            client.set_referer(legacy_host + "/");
+            const nlohmann::json login_payload = {
+                {"email", auth_data->email},
+                {"password", auth_data->password}
+            };
+            auto future = client.post(
+                "/route/ts_login_user",
+                kurlyk::QueryParams(),
+                {
+                    {"Accept", "application/json, text/plain, */*"},
+                    {"Content-Type", "application/json"},
+                    {"Origin", legacy_host},
+                    {"Referer", legacy_host + "/"},
+                    {"Cookie", cookies}
+                },
+                login_payload.dump(),
+                get_rate_limit(RateLimitType::ACCOUNT_INFO)
+            );
+
+            auto callback = [this, legacy_host, cookies, result_callback](
+                    kurlyk::HttpResponsePtr response) {
+                const auto restore_legacy_host = [this, legacy_host]() {
+                    if (!legacy_host.empty()) {
+                        auto& client = get_http_client();
+                        client.set_host(legacy_host);
+                        client.set_origin(legacy_host);
+                        client.set_referer(legacy_host + "/");
+                        m_api_host = legacy_host;
+                    }
+                };
+
+                if (!validate_response(response, [
+                        &restore_legacy_host,
+                        &result_callback](const std::string& error_text) {
+                        restore_legacy_host();
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            error_text);
+                    })) {
+                    return;
+                }
+
+                const auto parsed = parse_modern_login_response(response->content);
+                if (!parsed) {
+                    restore_legacy_host();
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        "Failed to parse modern login response.");
+                    return;
+                }
+
+                const std::string merged_cookies = merge_set_cookies(
+                    cookies,
+                    response->headers);
+                if (!parsed->success) {
+                    restore_legacy_host();
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        parsed->error.empty()
+                            ? "Broker rejected modern login."
+                            : parsed->error);
+                    return;
+                }
+
+                if (parsed->redirect_url.empty()) {
+                    restore_legacy_host();
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        "Modern login returned no redirect.");
+                    return;
+                }
+
+                const auto redirect_target = resolve_login_redirect_target(
+                    parsed->redirect_url);
+                if (!redirect_target) {
+                    restore_legacy_host();
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        "Malformed login redirect URL.");
+                    return;
+                }
+
+                auto& client = get_http_client();
+                if (redirect_target->origin) {
+                    if (!is_allowed_intrade_redirect_origin(*redirect_target->origin)) {
+                        restore_legacy_host();
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            "Rejected login redirect origin.");
+                        return;
+                    }
+                    client.set_host(*redirect_target->origin);
+                    client.set_origin(*redirect_target->origin);
+                    client.set_referer(*redirect_target->origin + "/");
+                }
+
+                auto redirect_future = client.get(
+                    redirect_target->path,
+                    kurlyk::QueryParams(),
+                    {
+                        {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                        {"Upgrade-Insecure-Requests", "1"},
+                        {"Cookie", merged_cookies}
+                    },
+                    get_rate_limit(RateLimitType::ACCOUNT_INFO)
+                );
+
+                auto redirect_callback = [this, legacy_host, merged_cookies, result_callback](
+                        kurlyk::HttpResponsePtr redirect_response) {
+                    const auto restore_legacy_host = [this, legacy_host]() {
+                        if (!legacy_host.empty()) {
+                            auto& client = get_http_client();
+                            client.set_host(legacy_host);
+                            client.set_origin(legacy_host);
+                            client.set_referer(legacy_host + "/");
+                            m_api_host = legacy_host;
+                        }
+                    };
+
+                    if (!validate_response(redirect_response, [
+                            &restore_legacy_host,
+                            &result_callback](const std::string& error_text) {
+                            restore_legacy_host();
+                            result_callback(
+                                false,
+                                std::string(),
+                                std::string(),
+                                std::string(),
+                                error_text);
+                        })) {
+                        return;
+                    }
+
+                    const std::string final_cookies = merge_set_cookies(
+                        merged_cookies,
+                        redirect_response->headers);
+                    const auto parsed_cookies = parse_cookies(final_cookies);
+                    restore_legacy_host();
+                    if (!parsed_cookies) {
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            "Failed to parse login cookies.");
+                        return;
+                    }
+
+                    const auto& [user_id, user_hash] = *parsed_cookies;
+                    result_callback(
+                        true,
+                        user_id,
+                        user_hash,
+                        final_cookies,
+                        std::string());
+                };
+
+                add_http_request_task(
+                    std::move(redirect_future),
+                    std::move(redirect_callback));
+            };
+
+            add_http_request_task(std::move(future), std::move(callback));
+            return;
+        }
 
         // Prepare query parameters
         kurlyk::QueryParams query = {
@@ -905,6 +1124,7 @@ namespace optionx::platforms::intrade_bar {
                 selected_host = make_host(selected_index);
                 get_http_client().set_host(selected_host);
                 get_http_client().set_origin(selected_host);
+                m_api_host = selected_host;
             }
 
             restore_client_defaults();

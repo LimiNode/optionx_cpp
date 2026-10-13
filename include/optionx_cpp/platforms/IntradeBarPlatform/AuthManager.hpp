@@ -101,6 +101,13 @@ namespace optionx::platforms::intrade_bar {
                 const std::string& user_id,
                 const std::string& user_hash);
 
+        /// \brief Stores a modern trading-SPA session after email/password login.
+        /// \param user_id Optional broker user ID returned by the login JSON.
+        /// \param cookies Session cookies returned by the trading backend.
+        void set_auth_session(
+                const std::string& user_id,
+                const std::string& cookies);
+
         /// \brief Stores the numeric broker user id in shared account info.
         /// \param user_id Broker user id string from cookies/token auth.
         void set_account_user_id(const std::string& user_id);
@@ -371,6 +378,19 @@ namespace optionx::platforms::intrade_bar {
         storage::ServiceSessionDB::get_instance().set_session_value(to_str(PlatformType::INTRADE_BAR), m_auth_data->email, cookies);
         m_request_manager.set_auth_credentials(user_id, user_hash);
         set_account_user_id(user_id);
+    }
+
+    inline void AuthManager::set_auth_session(
+            const std::string& user_id,
+            const std::string& cookies) {
+        storage::ServiceSessionDB::get_instance().set_session_value(
+            to_str(PlatformType::INTRADE_BAR),
+            m_auth_data->email,
+            cookies);
+        m_request_manager.set_auth_session(user_id, cookies);
+        if (!user_id.empty()) {
+            set_account_user_id(user_id);
+        }
     }
 
     inline void AuthManager::set_account_user_id(const std::string& user_id) {
@@ -701,6 +721,25 @@ namespace optionx::platforms::intrade_bar {
                     return;
                 }
 
+                    finalize_authentication(generation, std::move(callback));
+                });
+        } else if (has_cookie(cookies, "PHPSESSID")) {
+            // Modern trading login sessions contain PHPSESSID rather than the
+            // retired user_id/user_hash cookie pair.
+            LOGIT_INFO("Intrade Bar auth: saved trading session found, validating it.");
+            m_request_manager.set_auth_session(std::string(), cookies);
+            start_authentication(
+                    generation,
+                    [this, callback, generation](const ConnectionResult& result) {
+                if (!is_auth_generation_current(generation, "cached-trading-session-profile")) {
+                    return;
+                }
+                if (!result.success) {
+                    LOGIT_PRINT_ERROR("Trading session authentication failed: ", result.reason);
+                    execute_authentication_flow(generation, std::move(callback));
+                    return;
+                }
+
                 finalize_authentication(generation, std::move(callback));
             });
         } else {
@@ -819,10 +858,15 @@ namespace optionx::platforms::intrade_bar {
                 return;
             }
 
-            // Store authentication details
+            // Store either the legacy user_id/user_hash pair or the current
+            // trading-SPA session cookie, depending on the login response.
             LOGIT_INFO("Intrade Bar auth: fresh credentials accepted, storing session.");
-            LOGIT_PRINT_TRACE("Authentication successful. User ID: ", user_id);
-            set_auth_credentials(user_id, user_hash);
+            if (user_hash.empty()) {
+                set_auth_session(user_id, cookies);
+            } else {
+                LOGIT_PRINT_TRACE("Authentication successful. User ID: ", user_id);
+                set_auth_credentials(user_id, user_hash);
+            }
             result_callback(true, std::string());
         };
 
@@ -839,6 +883,11 @@ namespace optionx::platforms::intrade_bar {
             if (!success) {
                 LOGIT_WARN("Intrade Bar auth: login step failed.");
                 handle_auth_response(false, std::string(), std::string(), std::string(), reason);
+                return;
+            }
+
+            if (user_hash.empty()) {
+                handle_auth_response(true, user_id, user_hash, cookies, std::string());
                 return;
             }
 

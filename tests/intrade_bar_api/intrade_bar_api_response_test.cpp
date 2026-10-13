@@ -298,6 +298,113 @@ struct LocalLoginServer {
     std::string login_redirect;
 };
 
+struct ModernLoginServer {
+    ~ModernLoginServer() {
+        stop();
+    }
+
+    bool start() {
+        server.config.address = "127.0.0.1";
+        server.config.port = 0;
+
+        server.resource["^/health$"]["GET"] = [](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            response->write(SimpleWeb::StatusCode::success_ok, "ok");
+        };
+
+        server.resource["^/$"]["GET"] = [](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Set-Cookie", "landing=1; Path=/");
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                "<title>Digital options, without the circus.</title><script>window.__NUXT__={}</script>",
+                headers);
+        };
+
+        server.resource["^/route/ts_login_user$"]["POST"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request> request) {
+            ++login_requests;
+            request_body = request->content.string();
+            const auto content_type = request->header.find("Content-Type");
+            if (content_type != request->header.end()) {
+                request_content_type = content_type->second;
+            }
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Content-Type", "application/json");
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                R"({"success":true,"message":"/auth/modern-login","type":"intrade-redirect"})",
+                headers);
+        };
+
+        server.resource["^/auth/modern-login$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++auth_redirect_requests;
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Set-Cookie", "user_id=866188; Path=/; HttpOnly");
+            headers.emplace("Set-Cookie", "user_hash=fake_user_hash; Path=/; HttpOnly");
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                "profile",
+                headers);
+        };
+
+        thread = std::thread([this]() {
+            server.start();
+        });
+
+        if (!wait_until_ready()) {
+            stop();
+            return false;
+        }
+        return true;
+    }
+
+    void stop() {
+        server.stop();
+        if (thread.joinable()) thread.join();
+    }
+
+    std::string host() const {
+        return "http://127.0.0.1:" + std::to_string(server.bound_port());
+    }
+
+    bool wait_until_ready() const {
+        for (int i = 0; i < 100; ++i) {
+            if (server.bound_port() == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            try {
+                kurlyk::HttpClient client(host());
+                client.set_timeout(1);
+                client.set_connect_timeout(1);
+                auto future = client.get("/health", {}, {});
+                if (future.wait_for(std::chrono::seconds(1)) == std::future_status::ready) {
+                    auto response = future.get();
+                    if (response && response->status_code == 200) return true;
+                }
+            } catch (...) {
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    BoundPortHttpServer server;
+    std::thread thread;
+    std::atomic<int> login_requests{0};
+    std::atomic<int> auth_redirect_requests{0};
+    std::string request_body;
+    std::string request_content_type;
+};
+
 struct LocalTradeHistoryServer {
     explicit LocalTradeHistoryServer(
             long csv_status_code,
@@ -802,6 +909,113 @@ TEST(IntradeBarLogin, ParsesLegacyCredentialsFromAuthUrl) {
     EXPECT_EQ(double_quoted->second, "fake_user_hash");
 }
 
+TEST(IntradeBarLogin, ParsesModernTradingLoginResponse) {
+    EXPECT_TRUE(is_modern_intrade_landing_page(
+        "<title>Digital options, without the circus.</title>"));
+    EXPECT_TRUE(is_modern_intrade_landing_page("<script>window.__NUXT__={}</script>"));
+    EXPECT_FALSE(is_modern_intrade_landing_page("<form action=\"/login\"></form>"));
+
+    const auto success = parse_modern_login_response(
+        R"({"success":true,"message":"/auth/t=opaque","type":"intrade-redirect"})");
+    ASSERT_TRUE(success);
+    EXPECT_TRUE(success->success);
+    EXPECT_EQ(success->redirect_url, "/auth/t=opaque");
+    EXPECT_EQ(success->response_type, "intrade-redirect");
+
+    const auto failure = parse_modern_login_response(
+        R"({"success":false,"message":"Invalid credentials"})");
+    ASSERT_TRUE(failure);
+    EXPECT_FALSE(failure->success);
+    EXPECT_EQ(failure->error, "Invalid credentials");
+}
+
+TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
+    ModernLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool main_callback_received = false;
+    bool main_success = false;
+    std::string main_reason;
+    request_manager.request_main_page(
+        auth_data,
+        [&](bool success,
+            const std::string& req_id,
+            const std::string& req_value,
+            const std::string&,
+            const std::string& reason) {
+            main_callback_received = true;
+            main_success = success;
+            main_reason = reason;
+            EXPECT_TRUE(req_id.empty());
+            EXPECT_TRUE(req_value.empty());
+        });
+
+    for (int i = 0; i < 500 && !main_callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(main_callback_received);
+    ASSERT_TRUE(main_success) << main_reason;
+
+    bool callback_received = false;
+    bool success = false;
+    std::string user_id;
+    std::string user_hash;
+    std::string cookies;
+    std::string reason;
+    request_manager.request_login(
+        "",
+        "",
+        "landing=1",
+        auth_data,
+        [&](bool login_success,
+            const std::string& login_user_id,
+            const std::string& login_user_hash,
+            const std::string& login_cookies,
+            const std::string& login_reason) {
+            callback_received = true;
+            success = login_success;
+            user_id = login_user_id;
+            user_hash = login_user_hash;
+            cookies = login_cookies;
+            reason = login_reason;
+        });
+
+    for (int i = 0; i < 500 && !callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(callback_received);
+    EXPECT_TRUE(success) << reason;
+    EXPECT_EQ(user_id, "866188");
+    EXPECT_EQ(user_hash, "fake_user_hash");
+    EXPECT_TRUE(has_cookie(cookies, "user_id"));
+    EXPECT_TRUE(has_cookie(cookies, "user_hash"));
+    EXPECT_TRUE(has_cookie(cookies, "landing"));
+    EXPECT_NE(server.request_content_type.find("application/json"), std::string::npos);
+    const auto request_json = nlohmann::json::parse(server.request_body);
+    EXPECT_EQ(request_json.at("email"), "user@example.test");
+    EXPECT_EQ(request_json.at("password"), "fake_password");
+    EXPECT_EQ(server.login_requests.load(), 1);
+    EXPECT_EQ(server.auth_redirect_requests.load(), 1);
+
+    platform.shutdown();
+}
+
 TEST(IntradeBarLogin, ParsesOpaqueJavaScriptRedirectWithEitherQuoteStyle) {
     const auto single_quoted = parse_login_redirect_url(
         "<script>window.location.replace('https://intrade35.bar/auth/opaque-token')</script>");
@@ -1146,6 +1360,25 @@ TEST(IntradeBarApiResponses, ApiResultMarksMissingHttpStatusExplicitly) {
     EXPECT_FALSE(failure);
     EXPECT_EQ(failure.status_code, ProfileInfoResult::NO_RESPONSE_STATUS);
     EXPECT_FALSE(failure.has_http_status());
+}
+
+TEST(IntradeBarApiResponses, ParsesModernProfileSegments) {
+    const auto [currency, account] = parse_profile_response(R"(
+        <div class="u-seg" role="group" aria-label="Account">
+            <button type="button" class="u-seg__btn" data-ui2-action="demo"
+                    data-value="0" aria-pressed="false">Real</button>
+            <button type="button" class="u-seg__btn" data-ui2-action="demo"
+                    data-value="1" aria-pressed="true">Demo</button>
+        </div>
+        <div class="u-seg" role="group" aria-label="Currency">
+            <button type="button" class="u-seg__btn" data-ui2-action="currency"
+                    data-value="USD" aria-pressed="true">USD</button>
+            <button type="button" class="u-seg__btn" data-ui2-action="currency"
+                    data-value="RUB" aria-pressed="false">RUB</button>
+        </div>)");
+
+    EXPECT_EQ(currency, CurrencyType::USD);
+    EXPECT_EQ(account, AccountType::DEMO);
 }
 
 TEST(IntradeBarApiResponses, IntradeBarPlatformExposesEndpointTradingAndMarketDataRoles) {

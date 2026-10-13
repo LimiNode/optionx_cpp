@@ -84,6 +84,13 @@ supported public entry point or an internal leaf:
 
 ## Critical Defaults
 
+- For live Intrade Bar authorization smoke tests, use the ignored local config
+  file `tests/intrade_bar_api/intrade_bar_api.local.env` for credentials and
+  proxy settings. The file is not auto-discovered: select it explicitly with
+  `OPTIONX_INTRADE_BAR_CONFIG_FILE`; explicitly supplied environment variables
+  override values from the file. The canonical launch instructions are in
+  `tests/intrade_bar_api/CLI.md`. Never print or commit passwords, proxy
+  credentials, cookies, session IDs, or auth tokens.
 - Перед правками проверь `git status --short` и не перетирай чужие изменения.
 - Не коммить напрямую в `main`; создай отдельную ветку и PR, если пользователь
   явно не попросил прямой commit в `main`.

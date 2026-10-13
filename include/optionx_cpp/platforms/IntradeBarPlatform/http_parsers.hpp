@@ -25,6 +25,80 @@
 
 namespace optionx::platforms::intrade_bar {
 
+    /// \brief Describes the JSON response returned by the current SPA login.
+    struct ModernLoginResponse {
+        bool success = false;
+        std::string user_id;
+        std::string redirect_url;
+        std::string response_type;
+        std::string error;
+    };
+
+    /// \brief Detects the current Nuxt landing page served by Intrade Bar.
+    /// \param content Raw response body.
+    /// \return True when the body is the SPA shell rather than the retired HTML form.
+    inline bool is_modern_intrade_landing_page(const std::string& content) {
+        return content.find("Digital options, without the circus") != std::string::npos ||
+               content.find("__NUXT__") != std::string::npos;
+    }
+
+    /// \brief Parses the current SPA login JSON response without logging its body.
+    /// \param content Raw JSON response body.
+    /// \return Parsed response, or std::nullopt for a non-JSON response.
+    inline std::optional<ModernLoginResponse> parse_modern_login_response(
+            const std::string& content) {
+        try {
+            const auto payload = nlohmann::json::parse(content);
+            ModernLoginResponse result;
+            result.success = payload.value("success", false);
+
+            if (payload.contains("type") && payload.at("type").is_string()) {
+                result.response_type = payload.at("type").get<std::string>();
+            }
+
+            for (const char* key : {"userID", "userId", "user_id"}) {
+                if (!payload.contains(key) || payload.at(key).is_null()) continue;
+                if (payload.at(key).is_string()) {
+                    result.user_id = payload.at(key).get<std::string>();
+                } else if (payload.at(key).is_number_integer()) {
+                    result.user_id = std::to_string(payload.at(key).get<std::int64_t>());
+                }
+                if (!result.user_id.empty()) break;
+            }
+
+            if (payload.contains("message") && payload.at("message").is_string()) {
+                const auto message = payload.at("message").get<std::string>();
+                if (result.success) {
+                    result.redirect_url = message;
+                } else {
+                    result.error = message;
+                }
+            }
+            return result;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    /// \brief Checks whether a named cookie is present in a Cookie header value.
+    /// \param cookies Cookie header value.
+    /// \param name Cookie name to find.
+    /// \return True when the cookie exists, including an empty cookie value.
+    inline bool has_cookie(const std::string& cookies, const std::string& name) {
+        std::istringstream cookie_stream(cookies);
+        std::string cookie;
+        while (std::getline(cookie_stream, cookie, ';')) {
+            const auto pos = cookie.find('=');
+            if (pos == std::string::npos) continue;
+            std::string key = cookie.substr(0, pos);
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            if (key == name) return true;
+        }
+        return false;
+    }
+
+
     inline std::uint32_t duration_sec_from_ms_delta(std::int64_t delta_ms) noexcept {
         if (delta_ms <= 0) return 0;
         const auto seconds = time_shield::ms_to_sec(delta_ms);
@@ -266,6 +340,39 @@ namespace optionx::platforms::intrade_bar {
             } else if (temp.find(str_usd) != std::string::npos &&
                        temp.find("checked=\"checked\"") != std::string::npos) {
                 currency = CurrencyType::USD;
+            }
+        }
+
+        // The current authenticated profile page uses button segments instead
+        // of the retired radio divs. Read only the selected account/currency
+        // controls and keep the legacy parser above for older deployments.
+        static const std::regex button_regex(
+            R"(<button\b([^>]*)>([\s\S]*?)</button>)",
+            std::regex::icase);
+        for (std::sregex_iterator it(content.begin(), content.end(), button_regex),
+             end;
+             it != end;
+             ++it) {
+            const std::string attributes = (*it)[1].str();
+            const std::string label = (*it)[2].str();
+            if (attributes.find("aria-pressed=\"true\"") == std::string::npos) {
+                continue;
+            }
+
+            if (attributes.find("data-ui2-action=\"demo\"") != std::string::npos) {
+                if (attributes.find("data-value=\"1\"") != std::string::npos ||
+                    label.find("Demo") != std::string::npos) {
+                    account = AccountType::DEMO;
+                } else if (attributes.find("data-value=\"0\"") != std::string::npos ||
+                           label.find("Real") != std::string::npos) {
+                    account = AccountType::REAL;
+                }
+            } else if (attributes.find("data-ui2-action=\"currency\"") != std::string::npos) {
+                if (attributes.find("data-value=\"USD\"") != std::string::npos) {
+                    currency = CurrencyType::USD;
+                } else if (attributes.find("data-value=\"RUB\"") != std::string::npos) {
+                    currency = CurrencyType::RUB;
+                }
             }
         }
 
