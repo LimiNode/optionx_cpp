@@ -315,7 +315,14 @@ namespace optionx::components {
             int64_t timestamp) {
         auto& result = transaction->result;
         auto& request = transaction->request;
-        LOGIT_0FATAL();
+        // A delayed broker result is recoverable during normal operation. Do
+        // not classify it as fatal: fatal logging makes the console runner
+        // show an intrusive error prompt for a trade-level timeout.
+        LOGIT_ERROR(
+            "Trade closing failed. option_id=",
+            result ? result->option_id : 0,
+            ", error=",
+            result ? result->error_desc : std::string());
         decrement_open_trades(request, result);
         m_trade_state_manager.finalize_transaction_with_error(
             transaction,

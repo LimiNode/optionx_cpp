@@ -381,9 +381,11 @@ namespace optionx::platforms::intrade_bar {
 
         LOGIT_INFO("Intrade Bar trade: checking result. option_id=", result->option_id);
         LOGIT_0TRACE();
-        const int64_t delay_ms = 500;
+        // Give the broker a short settlement window before the first check.
+        // Retries are rate-limited to about one request every two seconds.
+        const int64_t delay_ms = 1500;
         m_task_manager.add_delayed_task(
-                "event(TradeStatusEvent)-500ms",
+                "event(TradeStatusEvent)-1500ms",
                 delay_ms, 
                 [this, request, result](
                     std::shared_ptr<utils::Task> task) {
@@ -404,6 +406,9 @@ namespace optionx::platforms::intrade_bar {
                 result->error_desc = to_str(TradeErrorCode::CLIENT_FORCED_CLOSE);
                 return;
             }
+            // Fifteen attempts at the two-second result rate limit provide
+            // roughly thirty seconds for delayed broker settlement. The
+            // queue-level response timeout is intentionally longer than this.
             const int retry_attempts = 15;
             m_request_manager.request_trade_check(
                     result->option_id,

@@ -28,6 +28,9 @@ namespace optionx::platforms::intrade_bar {
     /// \brief Conservative throttle for Binance kline history requests.
     inline constexpr uint32_t BTC_BAR_HISTORY_REQUESTS_PER_SECOND = 1;
 
+    /// \brief Minimum interval between trade-result polling requests.
+    inline constexpr uint32_t TRADE_RESULT_REQUEST_INTERVAL_MS = 2000;
+
     /// \class HttpClientComponent
     /// \brief Handles HTTP requests and manages rate limits for the Intrade Bar platform.
     class HttpClientComponent final : public components::BaseHttpClientComponent {
@@ -40,7 +43,10 @@ namespace optionx::platforms::intrade_bar {
                 : components::BaseHttpClientComponent(platform.event_bus()) {
             set_rate_limit_rpm(RateLimitType::GENERAL, 60);
             set_rate_limit_rps(RateLimitType::TRADE_EXECUTION, 1);
-            set_rate_limit_rps(RateLimitType::TRADE_RESULT, 1);
+            set_rate_limit(
+                RateLimitType::TRADE_RESULT,
+                1,
+                TRADE_RESULT_REQUEST_INTERVAL_MS);
             set_rate_limit_rps(RateLimitType::BALANCE, 1);
             set_rate_limit_rpm(RateLimitType::ACCOUNT_INFO, 6);
             set_rate_limit_rpm(RateLimitType::ACCOUNT_SETTINGS, 12);
