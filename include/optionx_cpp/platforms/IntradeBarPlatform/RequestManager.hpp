@@ -438,9 +438,12 @@ namespace optionx::platforms::intrade_bar {
             return;
         }
 
-        // Prepare the HTTP GET request
+        // The broker moved the legacy login form off the landing page. The
+        // root path now serves the Nuxt marketing app and has no challenge.
+        // Keep the legacy form endpoint explicit so the existing challenge /
+        // cookie authentication flow remains usable.
         auto future = get_http_client().get(
-            "/",
+            "/login",
             kurlyk::QueryParams(),
             {
                 {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"},
