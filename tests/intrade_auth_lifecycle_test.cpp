@@ -143,6 +143,31 @@ TEST(IntradeBarAuthLifecycle, TerminalFailureIsNotCancelledAgainOnDisconnect) {
     EXPECT_EQ(disconnect.reason, "Already disconnected.");
 }
 
+TEST(IntradeBarAuthLifecycle, InvalidAuthDataReportsValidationFailure) {
+    optionx::platforms::IntradeBarPlatform platform;
+    auto auth_data = std::make_unique<optionx::platforms::intrade_bar::AuthData>();
+    auth_data->set_email_password("user@example.test", "password");
+    auth_data->host.clear();
+    auth_data->auto_find_domain = false;
+
+    bool callback_called = false;
+    bool success = true;
+    std::string message;
+    auth_data->add_callback([&](bool result, const std::string& reason) {
+        callback_called = true;
+        success = result;
+        message = reason;
+    });
+
+    ASSERT_TRUE(platform.configure_auth(std::move(auth_data)));
+    platform.event_bus().drain();
+
+    EXPECT_TRUE(callback_called);
+    EXPECT_FALSE(success);
+    EXPECT_EQ(message, "Host is empty and auto_find_domain is disabled");
+    platform.shutdown();
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

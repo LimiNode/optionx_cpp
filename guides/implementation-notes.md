@@ -186,11 +186,11 @@ can still detect a later mismatch and restart auth.
 
 ## WebSocket
 
-Опорный файл: `platforms/TradeUpPlatform/WebSocketManager.hpp`.
+Опорный исторический файл: `platforms/TradeUpPlatform/WebSocketManager.hpp`.
 
-Текущий WebSocket код platform-specific и не включен в публичную композицию
-`TradeUpPlatform`. Перед расширением проверь, должен ли manager стать частью
-facade lifecycle или остаться probe/internal component.
+Этот WebSocket код сохранён только как исторический probe/internal component и
+не входит в поддерживаемую композицию. Не расширяй его и не планируй для него
+новый facade lifecycle, пока поддержка интеграции явно не будет возобновлена.
 
 Правила:
 
@@ -317,5 +317,6 @@ not identify those parameters. Exact pre-trade payout checks remain queries to
 
 - В некоторых headers есть mojibake в комментариях и старые закомментированные
   include blocks. Не копируй это в новые файлы.
-- `TradeUpPlatform` выглядит частичной реализацией: не используй ее как полный
-  образец trade execution.
+- `TradeUpPlatform` сохранён как legacy/retired reference integration; не
+  используй его как рабочий пример, полный образец trade execution или основу
+  для generic cleanup.

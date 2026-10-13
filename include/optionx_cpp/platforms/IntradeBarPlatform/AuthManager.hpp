@@ -395,7 +395,7 @@ namespace optionx::platforms::intrade_bar {
             } else {
                 m_temp_auth_data.reset();
             }
-            auth_data->dispatch_callbacks(true, message);
+            auth_data->dispatch_callbacks(success, message);
         }
     }
 

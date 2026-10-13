@@ -43,5 +43,6 @@ series. Keep it short and remove items once they are handled.
 - Continue generation-safe lifecycle hardening for legacy bridge transports
   when their behavior is changed; do not mix that work into market-data API
   PRs.
-- `TradeUpPlatform` sources remain examples for a retired broker. Do not
-  refactor them as part of generic cleanup PRs.
+- `TradeUpPlatform` is a legacy/retired unsupported integration retained for
+  historical reference. Do not repair, extend, or refactor it unless support
+  is explicitly reactivated.

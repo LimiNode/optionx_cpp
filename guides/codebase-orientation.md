@@ -12,7 +12,7 @@
 | `include/optionx_cpp/components` | Base lifecycle components и общие managers trade execution | При добавлении общего поведения для платформ |
 | `include/optionx_cpp/platforms/common` | Platform facade/base helpers | Только для общих правил всех платформ |
 | `include/optionx_cpp/platforms/IntradeBarPlatform` | Реализация Intrade Bar managers/http/parsers | При изменении Intrade Bar API flow |
-| `include/optionx_cpp/platforms/TradeUpPlatform` | Реализация TradeUp managers/http/ws | При изменении TradeUp flow |
+| `include/optionx_cpp/platforms/TradeUpPlatform` | Исторические TradeUp managers/http/ws | Legacy/retired reference integration; не использовать и не расширять без явного возобновления поддержки |
 | `include/optionx_cpp/utils` | Общие утилиты: pub-sub, tasks, crypto, strings, time, HTTP | При добавлении reusable инфраструктуры |
 | `include/optionx_cpp/storages` | Session storage на mdbx + AES | Только для session persistence/security изменений |
 | `include/optionx_cpp/bridges` | Base bridge контракт | При интеграции внешних систем |
@@ -40,7 +40,7 @@ aggregate header. Если код нужен только внутреннему
 | `utils` | `optionx::utils`, crypto частично `optionx::crypto` | Reusable infrastructure, не зависит от платформ |
 | `components` | `optionx::components` | Может зависеть от `data`/`utils`, не должен знать детали конкретной платформы |
 | `platforms/common` | `optionx::platforms` | Собирает components и platform lifecycle |
-| platform implementations | `optionx::platforms::intrade_bar`, `optionx::platforms::tradeup` | Может зависеть от components/data/utils/storage |
+| platform implementations | `optionx::platforms::intrade_bar`; `optionx::platforms::tradeup` is historical only | Может зависеть от components/data/utils/storage |
 | `storage` | `optionx::storage` | Может использовать utils/crypto и mdbx-containers |
 | `bridges` | `optionx::bridges` | Контракт для внешних adapters, работает через DTO/callbacks |
 
@@ -58,7 +58,7 @@ aggregate header. Если код нужен только внутреннему
 |---|---|
 | User-facing platform API | `platforms/common/BaseTradingPlatform.hpp` |
 | Intrade Bar composition | `platforms/IntradeBarPlatform.hpp` |
-| TradeUp composition | `platforms/TradeUpPlatform.hpp` |
+| TradeUp historical composition | `platforms/TradeUpPlatform.hpp` |
 | Base component lifecycle | `components/BaseComponent.hpp` |
 | HTTP async queue | `components/BaseHttpClientComponent.hpp` |
 | Trade request queue/state | `components/BaseTradeExecutionComponent.hpp`, `components/BaseTradeExecutionComponent/*` |

@@ -89,12 +89,14 @@ node lifecycles. See [English](lifecycle-stack.md) or
 | Класс | Статус | Что умеет |
 |---|---|---|
 | `platforms::IntradeBarPlatform` | Основная реализация | Auth, balance, price/BTC price, request manager, trade execution, trade manager |
-| `platforms::TradeUpPlatform` | Минимальная реализация | Auth, balance, HTTP client; `place_trade()` сейчас возвращает `false` |
+| `platforms::TradeUpPlatform` | Legacy/retired reference integration | Код сохранён для исторической справки; не является используемой или поддерживаемой интеграцией |
 | `platforms::BaseTradingPlatform` | Facade/base | Callbacks, auth/connect/disconnect events, account info provider, run/process/shutdown |
 
 `platforms.hpp` сейчас подключает `IntradeBarPlatform`, а `TradeUpPlatform`
-закомментирован. Это важный compatibility signal: не считай TradeUp публичной
-include-точкой верхнего уровня без проверки задачи.
+закомментирован. Исходники `TradeUpPlatform` сохранены как legacy/retired
+reference integration и не являются используемым или поддерживаемым broker
+path. Не развивай их и не считай публичной include-точкой без явного
+возобновления поддержки.
 
 ## Data Model
 
