@@ -16,6 +16,7 @@ namespace optionx::platforms::intrade_bar {
     public:
         using trade_result_check_callback_t = BaseTradingPlatform::trade_result_check_callback_t;
         using trade_history_callback_t = BaseTradingPlatform::trade_history_callback_t;
+        using lifecycle_token_t = events::trade_lifecycle_token_t;
 
         /// \brief Constructs the trade manager.
         /// \param platform Reference to the trading platform.
@@ -94,7 +95,17 @@ namespace optionx::platforms::intrade_bar {
                 double profit,
                 double balance,
                 std::shared_ptr<TradeRequest> request,
-                std::shared_ptr<TradeResult> result);
+                std::shared_ptr<TradeResult> result,
+                const lifecycle_token_t& lifecycle_token);
+
+        /// \brief Returns whether a transaction may still be updated asynchronously.
+        /// \param lifecycle_token Token propagated from the transaction queue.
+        /// \return True for active tokens and legacy events without a token.
+        static bool async_operations_active(
+                const lifecycle_token_t& lifecycle_token) noexcept {
+            return !lifecycle_token ||
+                lifecycle_token->load(std::memory_order_acquire);
+        }
 
         /// \brief Retrieves account information as an `AccountInfoData` instance.
         /// \return A shared pointer to `AccountInfoData` containing account details.
@@ -374,20 +385,25 @@ namespace optionx::platforms::intrade_bar {
     inline void TradeManager::handle_event(const events::TradeStatusEvent& event) {
         auto request = event.request;
         auto result  = event.result;
+        auto lifecycle_token = event.lifecycle_token;
         if (!request || !result) {
             LOGIT_ERROR("TradeStatusEvent received with null request or result.");
             return;
         }
+        if (!async_operations_active(lifecycle_token)) return;
 
         LOGIT_INFO("Intrade Bar trade: checking result. option_id=", result->option_id);
         LOGIT_0TRACE();
-        const int64_t delay_ms = 500;
+        // Give the broker a short settlement window before the first check.
+        // Retries are rate-limited to about one request every two seconds.
+        const int64_t delay_ms = 1500;
         m_task_manager.add_delayed_task(
-                "event(TradeStatusEvent)-500ms",
+                "event(TradeStatusEvent)-1500ms",
                 delay_ms, 
-                [this, request, result](
+                [this, request, result, lifecycle_token](
                     std::shared_ptr<utils::Task> task) {
             LOGIT_0TRACE();
+            if (!async_operations_active(lifecycle_token)) return;
             if (task->is_shutdown()) {
                 LOGIT_INFO("Task was shut down unexpectedly for option ID: ", result->option_id);
                 auto account_info = get_account_info();
@@ -404,15 +420,23 @@ namespace optionx::platforms::intrade_bar {
                 result->error_desc = to_str(TradeErrorCode::CLIENT_FORCED_CLOSE);
                 return;
             }
+            // Fifteen retries after the initial request (up to sixteen total
+            // requests) normally span about thirty seconds. Because the
+            // broker-wide limit is shared by up to five closing trades, one
+            // trade may receive a slot roughly every ten seconds. The queue
+            // response timeout therefore allows polling to approach about 160
+            // seconds under five concurrent trades, plus margin for delayed
+            // broker responses and scheduler latency.
             const int retry_attempts = 15;
             m_request_manager.request_trade_check(
                     result->option_id,
                     retry_attempts,
-                    [this, request, result](
+                    [this, request, result, lifecycle_token](
                     bool success,
                     long status_code,
                     double price,
                     double profit) {
+                if (!async_operations_active(lifecycle_token)) return;
                 if (!success) {
                     LOGIT_ERROR("Failed to retrieve trade result for option ID: ", result->option_id);
                     auto account_info = get_account_info();
@@ -441,18 +465,21 @@ namespace optionx::platforms::intrade_bar {
                     return;
                 }
                 LOGIT_0TRACE();
+                if (!async_operations_active(lifecycle_token)) return;
                 m_request_manager.request_balance(
-                        [this, request, result, price, profit](
+                        [this, request, result, lifecycle_token, price, profit](
                         bool success,
                         double balance,
                         CurrencyType currency) {
+                    if (!async_operations_active(lifecycle_token)) return;
                     process_trade_status(
                         success,
                         price,
                         profit,
                         balance,
                         request,
-                        result);
+                        result,
+                        lifecycle_token);
                 });
             });
         });
@@ -471,8 +498,9 @@ namespace optionx::platforms::intrade_bar {
             double profit,
             double balance,
             std::shared_ptr<TradeRequest> request,
-            std::shared_ptr<TradeResult> result) {
-        if (!request ||!result) return;
+            std::shared_ptr<TradeResult> result,
+            const lifecycle_token_t& lifecycle_token) {
+        if (!request || !result || !async_operations_active(lifecycle_token)) return;
         auto account_info = get_account_info();
         set_zero_spread_for_symbol(result->spread, request->symbol);
         result->set_balance(success ? balance : account_info->balance);

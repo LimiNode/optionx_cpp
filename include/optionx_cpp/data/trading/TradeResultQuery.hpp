@@ -14,7 +14,7 @@ namespace optionx {
         std::uint32_t trade_id = 0;   ///< Local persistent trade ID, used for tracing/result propagation.
         std::int64_t option_id = 0;   ///< Numeric broker-side trade ID.
         std::string option_hash;      ///< String/hash broker-side trade ID.
-        int retry_attempts = 15;      ///< Broker result retry attempts for temporarily empty/error responses.
+        int retry_attempts = 15;      ///< Broker result retry attempts for temporarily empty/error responses (rate-limited by the platform).
 
         /// \brief Checks whether a local persistent trade ID is available.
         /// \return True when trade_id is non-zero.

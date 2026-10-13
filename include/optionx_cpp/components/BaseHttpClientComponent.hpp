@@ -121,6 +121,25 @@ namespace optionx::components {
             replace_rate_limit(id, std::move(handle));
         }
 
+        /// \brief Creates a rate limit with an explicit period.
+        /// \param rate_limit_id The logical rate-limit type.
+        /// \param requests_per_period Maximum requests accepted in the period.
+        /// \param period_ms Period length in milliseconds.
+        /// \param sequential Whether a request holds the limit until completion.
+        template<class T>
+        void set_rate_limit(
+                T rate_limit_id,
+                uint32_t requests_per_period,
+                uint32_t period_ms,
+                bool sequential = false) {
+            const auto id = static_cast<uint32_t>(rate_limit_id);
+            auto handle = kurlyk::create_rate_limit(
+                requests_per_period,
+                period_ms,
+                sequential);
+            replace_rate_limit(id, std::move(handle));
+        }
+
     private:
 
         void replace_rate_limit(uint32_t id, kurlyk::HttpRateLimitHandlePtr handle) {

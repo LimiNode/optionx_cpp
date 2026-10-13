@@ -38,7 +38,7 @@ namespace optionx::platforms::intrade_bar {
         int64_t max_trades              = 5;                        ///< Maximum number of trades
         int64_t max_limit_trades        = 2;                        ///< Maximum number of trades during restricted periods
         int64_t order_queue_timeout     = 10;                       ///< Timeout for pending orders in the queue
-        int64_t responce_timeout        = 10;                       ///< Timeout for server response related to opening or closing a trade
+        int64_t responce_timeout        = 180;                      ///< Trade result timeout in seconds; covers broker-wide polling with up to five concurrent trades
         int64_t order_interval_ms       = 1000;                     ///< Minimum time interval required between consecutive orders
 
         // Trading time for BTCUSDT

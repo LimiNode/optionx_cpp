@@ -2,10 +2,15 @@
 #ifndef OPTIONX_HEADER_DATA_EVENTS_TRADE_TRANSACTION_EVENT_HPP_INCLUDED
 #define OPTIONX_HEADER_DATA_EVENTS_TRADE_TRANSACTION_EVENT_HPP_INCLUDED
 
+#include <atomic>
+#include <memory>
+
 /// \file TradeTransactionEvent.hpp
 /// \brief Defines the TradeTransactionEvent class used for handling trade transaction events.
 
 namespace optionx::events {
+
+    using trade_lifecycle_token_t = std::shared_ptr<std::atomic_bool>;
 
     /// \class TradeTransactionEvent
     /// \brief Represents an event containing information about a trade transaction.
@@ -47,6 +52,30 @@ namespace optionx::events {
         const char* name() const override {
             return "TradeTransactionEvent";
         }
+
+        /// \brief Returns the token shared by asynchronous operations for this transaction.
+        /// \return Shared lifecycle token, active until the transaction is finalized.
+        const trade_lifecycle_token_t& async_lifecycle_token() const noexcept {
+            return m_async_lifecycle_token;
+        }
+
+        /// \brief Reports whether asynchronous work may still update this transaction.
+        /// \return False after queue finalization invalidates the transaction.
+        bool async_operations_active() const noexcept {
+            return m_async_lifecycle_token &&
+                m_async_lifecycle_token->load(std::memory_order_acquire);
+        }
+
+        /// \brief Invalidates asynchronous work associated with this transaction.
+        void cancel_async_operations() noexcept {
+            if (m_async_lifecycle_token) {
+                m_async_lifecycle_token->store(false, std::memory_order_release);
+            }
+        }
+
+    private:
+        trade_lifecycle_token_t m_async_lifecycle_token =
+            std::make_shared<std::atomic_bool>(true);
     };
 
 } // namespace optionx::events
