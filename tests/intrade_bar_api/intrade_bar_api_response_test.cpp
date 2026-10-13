@@ -206,6 +206,7 @@ struct LocalLoginServer {
                 "<input type=\"hidden\" name=\"g-rec-res-l\" "
                 "id=\"g-rec-res-l\" value=\"challenge-token\">\n",
                 headers);
+        };
 
         server.resource["^/$"]["HEAD"] = [this](
                 std::shared_ptr<TradeHistoryHttpServer::Response> response,
