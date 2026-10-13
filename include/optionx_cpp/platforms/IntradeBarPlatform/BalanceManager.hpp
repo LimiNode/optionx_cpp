@@ -5,7 +5,29 @@
 /// \file BalanceManager.hpp
 /// \brief Defines the BalanceManager class responsible for handling balance updates and account-related events.
 
+#include <limits>
+
 namespace optionx::platforms::intrade_bar {
+
+    namespace detail {
+
+        inline constexpr std::uint32_t kHostCheckFailureThreshold = 2;
+
+        inline bool update_host_check_failure_streak(
+                bool success,
+                std::uint32_t& consecutive_failures) noexcept {
+            if (success) {
+                consecutive_failures = 0;
+                return false;
+            }
+
+            if (consecutive_failures < std::numeric_limits<std::uint32_t>::max()) {
+                ++consecutive_failures;
+            }
+            return consecutive_failures >= kHostCheckFailureThreshold;
+        }
+
+    } // namespace detail
 
     /// \class BalanceManager
     /// \brief Manages balance updates and account-related events.
@@ -60,6 +82,7 @@ namespace optionx::platforms::intrade_bar {
         int64_t m_disconnected_domain_retry_period_ms = time_shield::MS_PER_15_SEC; ///< Disconnected host/domain recovery period.
         bool m_has_balance_update = false;    ///< Flag indicating if a balance update is in progress.
         bool m_check_host_in_progress = false;
+        std::uint32_t m_consecutive_host_check_failures = 0; ///< Consecutive failed host checks while connected.
         std::uint64_t m_balance_request_generation = 0; ///< Monotonic balance request generation.
         std::uint64_t m_active_balance_request_generation = 0; ///< Currently active balance request generation.
         std::uint64_t m_host_request_generation = 0; ///< Monotonic host/domain request generation.
@@ -353,6 +376,7 @@ namespace optionx::platforms::intrade_bar {
     inline void BalanceManager::handle_event(const events::AuthDataEvent& event) {
         if (auto auth_data = std::dynamic_pointer_cast<AuthData>(event.auth_data)) {
             invalidate_async_requests("auth-data");
+            m_consecutive_host_check_failures = 0;
             if (auth_data->balance_check_period_ms > 0) {
                 m_balance_check_period_ms = auth_data->balance_check_period_ms;
                 LOGIT_INFO(
@@ -414,6 +438,7 @@ namespace optionx::platforms::intrade_bar {
 
         m_task_manager.shutdown();
         invalidate_async_requests("connected");
+        m_consecutive_host_check_failures = 0;
         
         LOGIT_INFO(
             "Intrade Bar balance: starting connected balance polling. period_ms=",
@@ -444,15 +469,36 @@ namespace optionx::platforms::intrade_bar {
                 if (!finish_host_request(generation, "connected-host-check")) {
                     return;
                 }
-                if (!success) {
-                    auto account_info = get_account_info();
-                    if (account_info->connect) {
-                        account_info->connect = false;
-                        using Status = events::AccountInfoUpdateEvent::Status;
-                        const std::string error_text("Ping to current host failed.");
-                        LOGIT_ERROR(error_text);
-                        notify(events::AccountInfoUpdateEvent(account_info, Status::DISCONNECTED, error_text));
+                const auto previous_failures = m_consecutive_host_check_failures;
+                const bool should_disconnect =
+                    detail::update_host_check_failure_streak(
+                        success,
+                        m_consecutive_host_check_failures);
+                if (success) {
+                    if (previous_failures != 0) {
+                        LOGIT_INFO(
+                            "Intrade Bar balance: current host check recovered after failures=",
+                            previous_failures);
                     }
+                    return;
+                }
+
+                LOGIT_WARN(
+                    "Intrade Bar balance: current host check failed. consecutive_failures=",
+                    m_consecutive_host_check_failures,
+                    "; disconnect_threshold=",
+                    detail::kHostCheckFailureThreshold);
+                if (!should_disconnect) {
+                    return;
+                }
+
+                auto account_info = get_account_info();
+                if (account_info->connect) {
+                    account_info->connect = false;
+                    using Status = events::AccountInfoUpdateEvent::Status;
+                    const std::string error_text("Ping to current host failed.");
+                    LOGIT_ERROR(error_text);
+                    notify(events::AccountInfoUpdateEvent(account_info, Status::DISCONNECTED, error_text));
                 }
             });
         });
@@ -464,6 +510,7 @@ namespace optionx::platforms::intrade_bar {
 
         m_task_manager.shutdown();
         invalidate_async_requests("disconnected");
+        m_consecutive_host_check_failures = 0;
         LOGIT_INFO(
             "Intrade Bar balance: starting disconnected host recovery. period_ms=",
             m_disconnected_domain_retry_period_ms);
