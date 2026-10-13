@@ -110,7 +110,7 @@ same non-reserved guard naming rule.
 - `optionx::components` - base components/managers.
 - `optionx::platforms` - platform facades.
 - `optionx::platforms::intrade_bar` - Intrade Bar internals.
-- `optionx::platforms::tradeup` - TradeUp internals.
+- `optionx::platforms::tradeup` - historical TradeUp internals only; not a supported provider.
 - `optionx::storage` - storage services.
 - `optionx::bridges` - bridge contracts.
 

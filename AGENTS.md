@@ -87,6 +87,9 @@ supported public entry point or an internal leaf:
 - Перед правками проверь `git status --short` и не перетирай чужие изменения.
 - Не коммить напрямую в `main`; создай отдельную ветку и PR, если пользователь
   явно не попросил прямой commit в `main`.
+- `TradeUpPlatform` — legacy/retired unsupported integration, сохранённая для
+  исторической справки. Она не входит в поддерживаемую platform surface; не
+  исправляй и не расширяй её, пока поддержка явно не будет возобновлена.
 - Для поиска по репозиторию используй `rg` / `rg --files`.
 - Держи библиотеку header-only, если задача явно не требует нового `.cpp`.
 - Для публичных data/module/platform domains используй ближайший aggregate

@@ -370,7 +370,7 @@ Market data:
 
 Используй эту платформу как основной working example для новой реализации.
 
-### `platforms::TradeUpPlatform`
+### `platforms::TradeUpPlatform` (historical only)
 
 Файл: `include/optionx_cpp/platforms/TradeUpPlatform.hpp`.
 
@@ -380,14 +380,21 @@ Market data:
 - `tradeup::AuthManager`
 - `tradeup::BalanceManager`
 
-Ограничения:
+Статус:
+
+`TradeUpPlatform` — legacy/retired unsupported integration. Исходники сохранены
+для исторической справки и не используются в рабочих broker workflows; не
+считай их поддерживаемой интеграцией и не расширяй в рамках обычных задач.
+
+Исторические ограничения:
 
 - `place_trade()` сейчас явно возвращает `false`.
 - `platforms.hpp` не подключает `TradeUpPlatform.hpp` по умолчанию.
 - WebSocket manager существует в папке платформы, но не включен в facade
   composition в текущем header.
 
-Считай TradeUp частичной реализацией, пока задача явно не требует завершить ее.
+Эта платформа не является незавершённой текущей feature: её развитие возможно
+только после явного возобновления поддержки и пересмотра API-контракта.
 
 ## Base Components
 

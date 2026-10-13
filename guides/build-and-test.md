@@ -87,7 +87,8 @@ Target naming:
 - `trade_record_storage_test`, `trade_record_db_test`,
   `trade_record_stats_test` - storage/statistics behavior.
 - `trade_manager_test` - trade execution lifecycle.
-- `tradeup_ws_invalid_token_probe` - TradeUp WebSocket probe.
+- `tradeup_ws_invalid_token_probe` - исторический TradeUp WebSocket probe;
+  это reference-only target, а не поддерживаемый workflow.
 
 Линкуемые libs для tests в `CMakeLists.txt`: `ws2_32`, `wsock32`, `crypt32`,
 `ssl`, `crypto`, `curl`, `mdbx`, `shell32`, `ole32`, `ntdll`, `bcrypt`, `AES`, `gtest`.
