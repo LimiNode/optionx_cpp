@@ -421,9 +421,11 @@ namespace optionx::platforms::intrade_bar {
                 return;
             }
             // Fifteen retries after the initial request (up to sixteen total
-            // requests) at the two-second result rate limit provide roughly
-            // thirty seconds for delayed broker settlement. The queue-level
-            // response timeout is intentionally longer than this.
+            // requests) normally span about thirty seconds. Because the
+            // broker-wide limit is shared by up to five closing trades, one
+            // trade may receive a slot roughly every ten seconds. The queue
+            // response timeout therefore allows about 150 seconds of polling
+            // plus margin for delayed broker settlement.
             const int retry_attempts = 15;
             m_request_manager.request_trade_check(
                     result->option_id,

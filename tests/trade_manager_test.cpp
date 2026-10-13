@@ -1405,7 +1405,7 @@ TEST(AccountInfoDataTest, DefaultResponseTimeoutCoversTradeResultPolling) {
 
     EXPECT_EQ(
         account_info.get_info<int64_t>(AccountInfoType::RESPONSE_TIMEOUT),
-        45);
+        180);
 }
 
 TEST_F(TradeManagerTestFixture, TradeIdProviderInitializesEmptyRequestId) {
