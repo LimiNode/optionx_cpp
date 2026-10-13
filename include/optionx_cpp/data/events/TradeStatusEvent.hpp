@@ -13,14 +13,19 @@ namespace optionx::events {
     public:
         std::shared_ptr<TradeRequest> request;  ///< Shared pointer to the trade request details.
         std::shared_ptr<TradeResult>  result;    ///< Shared pointer to the trade result details.
+        trade_lifecycle_token_t lifecycle_token; ///< Token fencing late asynchronous callbacks.
 
         /// \brief Constructor initializing the trade request and result.
         /// \param trade_request Shared pointer to the trade request.
         /// \param trade_result Shared pointer to the trade result.
+        /// \param token Optional transaction lifecycle token used to fence late callbacks.
         explicit TradeStatusEvent(
             std::shared_ptr<TradeRequest> trade_request,
-            std::shared_ptr<TradeResult>  trade_result)
-            : request(std::move(trade_request)), result(std::move(trade_result)) {}
+            std::shared_ptr<TradeResult>  trade_result,
+            trade_lifecycle_token_t token = nullptr)
+            : request(std::move(trade_request)),
+              result(std::move(trade_result)),
+              lifecycle_token(std::move(token)) {}
 
         /// \brief Default virtual destructor.
         virtual ~TradeStatusEvent() = default;

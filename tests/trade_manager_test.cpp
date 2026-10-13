@@ -425,6 +425,23 @@ namespace optionx::components {
         std::vector<std::shared_ptr<TradeResult>> results;
     };
 
+    class TradeTransactionCapture : public utils::EventMediator {
+    public:
+        explicit TradeTransactionCapture(utils::EventBus& bus)
+            : utils::EventMediator(bus) {
+            subscribe<events::TradeTransactionEvent>();
+        }
+
+        void on_event(const utils::Event* const event) override {
+            if (const auto* transaction =
+                    dynamic_cast<const events::TradeTransactionEvent*>(event)) {
+                lifecycle_token = transaction->async_lifecycle_token();
+            }
+        }
+
+        std::shared_ptr<std::atomic_bool> lifecycle_token;
+    };
+
     /// \brief Outputs the details of a TradeRequest.
     /// \param request The TradeRequest instance to output.
     void print_trade_request(const TradeRequest& request) {
@@ -1339,6 +1356,56 @@ TEST_F(TradeManagerTestFixture, TradeTransactionEventPreservesRequestTradeId) {
     ASSERT_NE(event.result, nullptr);
     EXPECT_EQ(event.request->trade_id, 555u);
     EXPECT_EQ(event.result->trade_id, 555u);
+}
+
+TEST_F(TradeManagerTestFixture, TradeLifecycleTokenStartsActiveAndCanBeCancelled) {
+    auto request = std::make_unique<TradeRequest>();
+    events::TradeTransactionEvent transaction(request, PlatformType::SIMULATOR);
+
+    ASSERT_NE(transaction.async_lifecycle_token(), nullptr);
+    EXPECT_TRUE(transaction.async_operations_active());
+
+    events::TradeStatusEvent status(
+        transaction.request,
+        transaction.result,
+        transaction.async_lifecycle_token());
+    EXPECT_EQ(status.lifecycle_token, transaction.async_lifecycle_token());
+
+    transaction.cancel_async_operations();
+    EXPECT_FALSE(transaction.async_operations_active());
+    EXPECT_FALSE(status.lifecycle_token->load(std::memory_order_acquire));
+}
+
+TEST_F(TradeManagerTestFixture, QueueFinalizationCancelsTradeLifecycleToken) {
+    utils::EventBus bus;
+    auto account_info = std::make_shared<AccountInfoData>();
+    account_info->balance = 1000.0;
+    account_info->currency = CurrencyType::USD;
+    account_info->account_type = AccountType::DEMO;
+    account_info->connect = true;
+    account_info->order_interval_ms = 0;
+
+    TradeManagerTest trade_manager(bus, account_info);
+    TradeTransactionCapture capture(bus);
+
+    ASSERT_TRUE(trade_manager.place_trade(make_valid_sprint_trade_request()));
+    trade_manager.process();
+    bus.process();
+
+    ASSERT_NE(capture.lifecycle_token, nullptr);
+    ASSERT_TRUE(capture.lifecycle_token->load(std::memory_order_acquire));
+
+    trade_manager.shutdown();
+
+    EXPECT_FALSE(capture.lifecycle_token->load(std::memory_order_acquire));
+}
+
+TEST(AccountInfoDataTest, DefaultResponseTimeoutCoversTradeResultPolling) {
+    optionx::platforms::intrade_bar::AccountInfoData account_info;
+
+    EXPECT_EQ(
+        account_info.get_info<int64_t>(AccountInfoType::RESPONSE_TIMEOUT),
+        45);
 }
 
 TEST_F(TradeManagerTestFixture, TradeIdProviderInitializesEmptyRequestId) {

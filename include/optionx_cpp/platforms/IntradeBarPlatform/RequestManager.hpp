@@ -266,7 +266,7 @@ namespace optionx::platforms::intrade_bar {
             std::function<void(TradeHistoryApiResult)> callback);
         /// \brief Requests the trade check result.
         /// \param deal_id The deal ID to check.
-        /// \param retry_attempts Number of retries if the response is empty.
+        /// \param retry_attempts Number of retries after the initial request if the response is empty.
         /// \param callback_check Callback function to receive trade status.
         void request_trade_check(
             int64_t deal_id,

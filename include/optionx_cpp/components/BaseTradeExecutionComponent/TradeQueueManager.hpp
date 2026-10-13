@@ -285,6 +285,7 @@ namespace optionx::components {
     inline void TradeQueueManager::handle_canceled_transactions(std::list<transaction_t>& calceled_transactions) {
         const int64_t timestamp = OPTIONX_TIMESTAMP_MS;
         for (const auto &transaction : calceled_transactions) {
+            transaction->cancel_async_operations();
             m_trade_state_manager.finalize_transaction_with_error(
                 transaction,
                 TradeErrorCode::LONG_QUEUE_WAIT,
@@ -313,6 +314,7 @@ namespace optionx::components {
     inline void TradeQueueManager::handle_closing_error(
             const transaction_t& transaction,
             int64_t timestamp) {
+        transaction->cancel_async_operations();
         auto& result = transaction->result;
         auto& request = transaction->request;
         // A delayed broker result is recoverable during normal operation. Do
@@ -439,7 +441,10 @@ namespace optionx::components {
                 LOGIT_0TRACE();
                 result->trade_state = result->live_state = TradeState::WAITING_CLOSE;
                 dispatch_trade_event(transaction);
-                events::TradeStatusEvent trade_status_event(request, result);
+                events::TradeStatusEvent trade_status_event(
+                    request,
+                    result,
+                    transaction->async_lifecycle_token());
                 notify(trade_status_event);
             }
 
@@ -457,6 +462,7 @@ namespace optionx::components {
             // Process transactions in terminal states
             if (m_trade_state_manager.is_terminal_state(result->trade_state)) {
                 LOGIT_0TRACE();
+                transaction->cancel_async_operations();
                 decrement_open_trades(request, result);
                 dispatch_trade_event(transaction);
                 it = m_open_transactions.erase(it);
@@ -478,11 +484,13 @@ namespace optionx::components {
 
         int64_t timestamp = OPTIONX_TIMESTAMP_MS;
         for (auto& transaction : pending_transactions) {
+            transaction->cancel_async_operations();
             m_trade_state_manager.finalize_transaction_with_error(transaction, TradeErrorCode::CLIENT_FORCED_CLOSE, TradeState::OPEN_ERROR, timestamp);
             dispatch_trade_event(transaction);
         }
 
         for (auto& transaction : m_open_transactions) {
+            transaction->cancel_async_operations();
             m_trade_state_manager.finalize_transaction_with_error(transaction, TradeErrorCode::CLIENT_FORCED_CLOSE, TradeState::CHECK_ERROR, timestamp);
             decrement_open_trades(transaction->request, transaction->result);
             dispatch_trade_event(transaction);
