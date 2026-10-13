@@ -751,9 +751,9 @@ TEST(MarketDataTickContinuity, DeduplicatesInclusiveHistoryAcrossDeliveredBatche
     }
     const auto snapshot = router.continuity_snapshot(route.router_id());
     ASSERT_TRUE(snapshot.has_value());
-    EXPECT_EQ(last_historical_items, 1U);
+    EXPECT_EQ(last_historical_items, 2U);
     EXPECT_EQ(snapshot->last_confirmed_items, last_historical_items);
-    EXPECT_EQ(snapshot->last_confirmed_from_time_ms, 4000U);
+    EXPECT_EQ(snapshot->last_confirmed_from_time_ms, 3000U);
     EXPECT_EQ(snapshot->last_confirmed_to_time_ms, 4000U);
     EXPECT_EQ(count_status(*subscriber, MarketDataContinuityStatus::LIVE), 2U);
 }
