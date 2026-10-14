@@ -313,14 +313,34 @@ struct ModernLoginServer {
             response->write(SimpleWeb::StatusCode::success_ok, "ok");
         };
 
-        server.resource["^/$"]["GET"] = [](
+        server.resource["^/$"]["GET"] = [this](
                 std::shared_ptr<TradeHistoryHttpServer::Response> response,
                 std::shared_ptr<TradeHistoryHttpServer::Request>) {
             SimpleWeb::CaseInsensitiveMultimap headers;
             headers.emplace("Set-Cookie", "landing=1; Path=/");
+            if (!terminal_state_page.load()) {
+                response->write(
+                    SimpleWeb::StatusCode::success_ok,
+                    "<title>Digital options, without the circus.</title><script>window.__NUXT__={}</script>",
+                    headers);
+                return;
+            }
             response->write(
                 SimpleWeb::StatusCode::success_ok,
-                "<title>Digital options, without the circus.</title><script>window.__NUXT__={}</script>",
+                R"HTML(<script id="u-config" type="application/json">{"api":"/ui2/api.php","csrf":"fake-csrf"}</script>)HTML",
+                headers);
+        };
+
+        server.resource["^/ui2/api\\.php$"]["POST"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request> request) {
+            ++terminal_state_requests;
+            terminal_state_body = request->content.string();
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Content-Type", "application/json");
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                R"JSON({"ok":true,"open":[{"id":224130651,"asset":"EURUSD","open":1.23456,"opened":1781850574,"closes":1781850874,"state":"open","type":"classic"}],"settled":[]})JSON",
                 headers);
         };
 
@@ -406,9 +426,12 @@ struct ModernLoginServer {
     std::thread thread;
     std::atomic<int> login_requests{0};
     std::atomic<int> auth_redirect_requests{0};
+    std::atomic<int> terminal_state_requests{0};
+    std::atomic<bool> terminal_state_page{false};
     std::atomic<bool> session_only{false};
     std::string request_body;
     std::string request_content_type;
+    std::string terminal_state_body;
 };
 
 struct LocalTradeHistoryServer {
@@ -1074,6 +1097,50 @@ TEST(IntradeBarLogin, ParsesOpaqueJavaScriptRedirectWithEitherQuoteStyle) {
     ASSERT_TRUE(double_quoted);
     EXPECT_EQ(*double_quoted, "https://intrade35.bar/auth/other-token");
     EXPECT_FALSE(parse_login_redirect_url("<script>window.location.href='/auth/token'</script>"));
+}
+
+TEST(IntradeBarActiveTrades, UsesCurrentTerminalStateApi) {
+    ModernLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->auto_find_domain = false;
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    request_manager.set_auth_session("866188", "PHPSESSID=fake_session");
+    http_client.get_http_client().set_retry_attempts(0, 0);
+    server.terminal_state_page.store(true);
+
+    bool callback_received = false;
+    bool success = false;
+    std::vector<ActiveTradeInfo> trades;
+    request_manager.request_active_trades_snapshot(
+        [&](bool snapshot_success, std::vector<ActiveTradeInfo> snapshot_trades) {
+            callback_received = true;
+            success = snapshot_success;
+            trades = std::move(snapshot_trades);
+        });
+
+    for (int i = 0; i < 500 && !callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(callback_received);
+    ASSERT_TRUE(success);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades[0].id, 224130651);
+    EXPECT_EQ(trades[0].symbol, "EURUSD");
+    EXPECT_EQ(server.terminal_state_requests.load(), 1);
+    EXPECT_NE(server.terminal_state_body.find("action=terminal.state"), std::string::npos);
+    EXPECT_NE(server.terminal_state_body.find("csrf=fake-csrf"), std::string::npos);
+
+    platform.shutdown();
 }
 
 TEST(IntradeBarLogin, ValidatesAndResolvesRedirectOrigins) {
@@ -4092,6 +4159,52 @@ TEST(IntradeBarApiResponses, ParsesActiveTradeRowsWithFlexibleTrAttributes) {
     EXPECT_EQ(trades[1].symbol, "BTCUSDT");
     EXPECT_DOUBLE_EQ(trades[1].open_price, 62831.25);
     EXPECT_EQ(trades[1].status, 2);
+}
+
+TEST(IntradeBarApiResponses, ParsesCurrentTerminalConfig) {
+    const auto config = parse_intrade_terminal_config(
+        R"HTML(<script type="application/json" id="u-config">{"api":"/ui2/api.php","csrf":"test-csrf"}</script>)HTML");
+
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->api_path, "/ui2/api.php");
+    EXPECT_EQ(config->csrf, "test-csrf");
+}
+
+TEST(IntradeBarApiResponses, ParsesCurrentTerminalActiveTradesState) {
+    const auto trades = parse_active_trades_terminal_state(R"JSON(
+        {
+            "ok": true,
+            "balance": 5656.34,
+            "open": [
+                {
+                    "id": 224130651,
+                    "asset": "EURUSD",
+                    "open": 1.23456,
+                    "opened": 1781850574,
+                    "closes": 1781850874,
+                    "state": "open",
+                    "type": "classic"
+                }
+            ],
+            "settled": []
+        }
+    )JSON");
+
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades[0].id, 224130651);
+    EXPECT_EQ(trades[0].symbol, "EURUSD");
+    EXPECT_DOUBLE_EQ(trades[0].open_price, 1.23456);
+    EXPECT_EQ(trades[0].open_time_ms, time_shield::sec_to_ms(1781850574));
+    EXPECT_EQ(trades[0].close_time_ms, time_shield::sec_to_ms(1781850874));
+    EXPECT_EQ(trades[0].status, 1);
+    EXPECT_EQ(trades[0].contract, 0);
+}
+
+TEST(IntradeBarApiResponses, RejectsCurrentTerminalStateWithoutAuthoritativeOpenArray) {
+    EXPECT_THROW(
+        static_cast<void>(parse_active_trades_terminal_state(
+            R"JSON({"ok":true,"open":null})JSON")),
+        std::runtime_error);
 }
 
 TEST(IntradeBarApiResponses, RejectsActiveTradesPageWithoutActiveBlock) {

@@ -13,11 +13,14 @@
 #include <unordered_map>
 #include <sstream>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <regex>
 #include <stdexcept>
 #include <utility>
+
+#include <nlohmann/json.hpp>
 
 #include <optionx_cpp/utils/response_parse_utils.hpp>
 #include "ApiResponses.hpp"
@@ -33,6 +36,63 @@ namespace optionx::platforms::intrade_bar {
         std::string response_type;
         std::string error;
     };
+
+    /// \brief API endpoint and CSRF token exposed by the current trading terminal.
+    struct IntradeTerminalConfig {
+        std::string api_path;
+        std::string csrf;
+    };
+
+    /// \brief Parses the current terminal's embedded API configuration.
+    /// \param content Raw authenticated terminal HTML.
+    /// \return Configuration when the `u-config` script is present; empty when
+    ///          the page belongs to the legacy terminal.
+    /// \throws std::runtime_error When the current terminal configuration is
+    ///         present but malformed or incomplete.
+    inline std::optional<IntradeTerminalConfig> parse_intrade_terminal_config(
+            const std::string& content) {
+        std::size_t search_pos = 0;
+        while ((search_pos = content.find("<script", search_pos)) != std::string::npos) {
+            const auto tag_end = content.find('>', search_pos);
+            if (tag_end == std::string::npos) break;
+
+            const auto opening_tag = content.substr(search_pos, tag_end - search_pos + 1);
+            if (utils::extract_html_attr(opening_tag, "id") != std::optional<std::string>("u-config")) {
+                search_pos = tag_end + 1;
+                continue;
+            }
+
+            const auto content_start = tag_end + 1;
+            const auto content_end = content.find("</script>", content_start);
+            if (content_end == std::string::npos) {
+                throw std::runtime_error("Intrade terminal config script is incomplete.");
+            }
+
+            try {
+                const auto payload = nlohmann::json::parse(
+                    utils::trim_copy(content.substr(content_start, content_end - content_start)));
+                if (!payload.is_object()) {
+                    throw std::runtime_error("Intrade terminal config is not an object.");
+                }
+
+                IntradeTerminalConfig config;
+                config.api_path = payload.value("api", std::string());
+                config.csrf = payload.value("csrf", std::string());
+                if (config.api_path.empty() || config.csrf.empty()) {
+                    throw std::runtime_error("Intrade terminal config is missing API or CSRF data.");
+                }
+                if (config.api_path.front() != '/' ||
+                    config.api_path.find("://") != std::string::npos) {
+                    throw std::runtime_error("Intrade terminal API path is invalid.");
+                }
+                return config;
+            } catch (const nlohmann::json::exception& ex) {
+                throw std::runtime_error(
+                    std::string("Failed to parse Intrade terminal config: ") + ex.what());
+            }
+        }
+        return std::nullopt;
+    }
 
     /// \brief Detects the current Nuxt landing page served by Intrade Bar.
     /// \param content Raw response body.
@@ -1171,6 +1231,151 @@ namespace optionx::platforms::intrade_bar {
             trades.push_back(std::move(trade));
         }
 
+        return trades;
+    }
+
+    namespace detail {
+
+        inline std::optional<std::int64_t> terminal_state_int64(
+                const nlohmann::json& row,
+                std::initializer_list<const char*> names) {
+            for (const auto* name : names) {
+                if (!row.contains(name) || row.at(name).is_null()) continue;
+                const auto& value = row.at(name);
+                try {
+                    if (value.is_number_integer()) return value.get<std::int64_t>();
+                    if (value.is_number_unsigned()) {
+                        const auto unsigned_value = value.get<std::uint64_t>();
+                        if (unsigned_value <= static_cast<std::uint64_t>(
+                                (std::numeric_limits<std::int64_t>::max)())) {
+                            return static_cast<std::int64_t>(unsigned_value);
+                        }
+                    }
+                    if (value.is_string()) {
+                        return utils::parse_i64_strict(value.get<std::string>());
+                    }
+                } catch (...) {
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
+        }
+
+        inline std::optional<double> terminal_state_double(
+                const nlohmann::json& row,
+                std::initializer_list<const char*> names) {
+            for (const auto* name : names) {
+                if (!row.contains(name) || row.at(name).is_null()) continue;
+                const auto& value = row.at(name);
+                try {
+                    if (value.is_number()) return value.get<double>();
+                    if (value.is_string()) {
+                        return utils::parse_double_strict(value.get<std::string>());
+                    }
+                } catch (...) {
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
+        }
+
+        inline std::optional<std::string> terminal_state_string(
+                const nlohmann::json& row,
+                std::initializer_list<const char*> names) {
+            for (const auto* name : names) {
+                if (!row.contains(name) || row.at(name).is_null()) continue;
+                const auto& value = row.at(name);
+                if (value.is_string()) return value.get<std::string>();
+                if (value.is_number_integer()) {
+                    return std::to_string(value.get<std::int64_t>());
+                }
+            }
+            return std::nullopt;
+        }
+
+        inline std::int64_t terminal_state_time_ms(
+                const std::optional<std::int64_t>& value) {
+            if (!value || *value <= 0) return 0;
+            if (*value < 100000000000LL) return time_shield::sec_to_ms(*value);
+            return *value;
+        }
+
+        inline int terminal_state_status(const nlohmann::json& row) {
+            if (const auto value = terminal_state_int64(row, {"state", "status"})) {
+                if (*value < static_cast<std::int64_t>((std::numeric_limits<int>::min)()) ||
+                    *value > static_cast<std::int64_t>((std::numeric_limits<int>::max)())) {
+                    throw std::runtime_error("Intrade terminal active trade state is out of range.");
+                }
+                return static_cast<int>(*value);
+            }
+            const auto value = terminal_state_string(row, {"state", "status"});
+            if (!value) return 0;
+            if (*value == "open" || *value == "active") return 1;
+            if (*value == "closed" || *value == "settled") return 0;
+            throw std::runtime_error("Unknown Intrade terminal active trade state.");
+        }
+
+        inline int terminal_state_contract(const nlohmann::json& row) {
+            if (const auto value = terminal_state_int64(row, {"type", "contract"})) {
+                if (*value < static_cast<std::int64_t>((std::numeric_limits<int>::min)()) ||
+                    *value > static_cast<std::int64_t>((std::numeric_limits<int>::max)())) {
+                    throw std::runtime_error("Intrade terminal active trade type is out of range.");
+                }
+                return static_cast<int>(*value);
+            }
+            const auto value = terminal_state_string(row, {"type", "contract"});
+            if (!value) return 0;
+            if (*value == "sprint") return 1;
+            if (*value == "classic") return 0;
+            throw std::runtime_error("Unknown Intrade terminal active trade type.");
+        }
+
+    } // namespace detail
+
+    /// \brief Parses the JSON active-trade array returned by `terminal.state`.
+    /// \param content Raw JSON response body.
+    /// \return Active trades reported by the broker.
+    /// \throws std::runtime_error When the response is not an authoritative
+    ///         terminal state or a row lacks its identity.
+    inline std::vector<ActiveTradeInfo> parse_active_trades_terminal_state(
+            const std::string& content) {
+        const auto payload = nlohmann::json::parse(content);
+        if (!payload.is_object() || !payload.value("ok", false)) {
+            throw std::runtime_error("Intrade terminal state was not accepted by the broker.");
+        }
+        if (!payload.contains("open") || !payload.at("open").is_array()) {
+            throw std::runtime_error("Intrade terminal state does not contain an open array.");
+        }
+
+        std::vector<ActiveTradeInfo> trades;
+        const auto& open = payload.at("open");
+        trades.reserve(open.size());
+        for (const auto& row : open) {
+            if (!row.is_object()) {
+                throw std::runtime_error("Malformed Intrade terminal active trade row.");
+            }
+
+            const auto id = detail::terminal_state_int64(row, {"id", "option_id"});
+            const auto symbol = detail::terminal_state_string(row, {"name", "asset", "symbol"});
+            if (!id || *id <= 0 || !symbol || symbol->empty()) {
+                throw std::runtime_error(
+                    "Intrade terminal active trade row lacks id or symbol.");
+            }
+
+            ActiveTradeInfo trade;
+            trade.id = *id;
+            trade.symbol = *symbol;
+            if (const auto value = detail::terminal_state_double(row, {"open", "open_price"})) {
+                trade.open_price = *value;
+            }
+            trade.open_time_ms = detail::terminal_state_time_ms(
+                detail::terminal_state_int64(row, {"opened", "open_time", "time"}));
+            trade.close_time_ms = detail::terminal_state_time_ms(
+                detail::terminal_state_int64(row, {"closes", "close_time", "expiry"}));
+            trade.status = detail::terminal_state_status(row);
+            trade.contract = detail::terminal_state_contract(row);
+            trades.push_back(std::move(trade));
+        }
         return trades;
     }
 

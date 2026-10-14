@@ -87,7 +87,9 @@ Started by `ActiveTradesSyncManager` after a connected account update, and also
 when `RestartAuthEvent` indicates suspicious account state.
 
 1. Call `request_active_trades_snapshot`, which fetches the authenticated main
-   page and parses rows from the `trade_active` block.
+   page. Current Intrade terminal pages expose an embedded `u-config` and the
+   authoritative `terminal.state` JSON API; deployments without that SPA
+   contract use the legacy `trade_active` HTML block as a fallback.
 2. Before each request, publish an unavailable snapshot state. Trade admission
    remains blocked until a broker snapshot is accepted.
 3. Publish `OpenTradesSnapshotEvent` with the broker active-trade count and

@@ -592,6 +592,8 @@ namespace optionx::platforms::intrade_bar {
                 std::vector<ActiveTradeInfo> trades)> callback) {
         LOGIT_TRACE0();
 
+        const auto cookies = m_cookies;
+
         auto future = get_http_client().get(
             "/",
             kurlyk::QueryParams(),
@@ -599,19 +601,58 @@ namespace optionx::platforms::intrade_bar {
                 {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0"},
                 {"Content-Type", "application/x-www-form-urlencoded"},
                 {"Upgrade-Insecure-Requests", "1"},
-                {"Cookie", m_cookies}
+                {"Cookie", cookies}
             },
             get_rate_limit(RateLimitType::ACCOUNT_INFO)
         );
 
-        auto response_callback = [callback](kurlyk::HttpResponsePtr response) {
+        auto response_callback = [this, callback = std::move(callback), cookies](
+                kurlyk::HttpResponsePtr response) mutable {
             if (!validate_response(response)) {
                 callback(false, {});
                 return;
             }
 
             try {
-                callback(true, parse_active_trades_snapshot(response->content));
+                const auto terminal_config = parse_intrade_terminal_config(response->content);
+                if (!terminal_config) {
+                    callback(true, parse_active_trades_snapshot(response->content));
+                    return;
+                }
+
+                const kurlyk::QueryParams query = {
+                    {"action", "terminal.state"},
+                    {"csrf", terminal_config->csrf},
+                    {"ids", ""}
+                };
+                auto api_future = get_http_client().post(
+                    terminal_config->api_path,
+                    kurlyk::QueryParams(),
+                    {
+                        {"Accept", "application/json"},
+                        {"Content-Type", "application/x-www-form-urlencoded"},
+                        {"X-Requested-With", "XMLHttpRequest"},
+                        {"Cookie", merge_set_cookies(cookies, response->headers)}
+                    },
+                    kurlyk::utils::to_query_string(query),
+                    get_rate_limit(RateLimitType::ACCOUNT_INFO)
+                );
+
+                auto api_response_callback = [callback = std::move(callback)](
+                        kurlyk::HttpResponsePtr api_response) mutable {
+                    if (!validate_response(api_response)) {
+                        callback(false, {});
+                        return;
+                    }
+
+                    try {
+                        callback(true, parse_active_trades_terminal_state(api_response->content));
+                    } catch (const std::exception& ex) {
+                        LOGIT_ERROR("Failed to parse Intrade terminal active trades state: ", ex.what());
+                        callback(false, {});
+                    }
+                };
+                add_http_request_task(std::move(api_future), std::move(api_response_callback));
             } catch (const std::exception& ex) {
                 LOGIT_ERROR("Failed to parse active trades snapshot: ", ex.what());
                 callback(false, {});
