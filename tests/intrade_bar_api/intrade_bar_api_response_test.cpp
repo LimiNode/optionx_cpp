@@ -337,7 +337,7 @@ struct ModernLoginServer {
             headers.emplace("Content-Type", "application/json");
             response->write(
                 SimpleWeb::StatusCode::success_ok,
-                R"({"success":true,"message":"/auth/modern-login","type":"intrade-redirect"})",
+                R"({"success":true,"userID":"866188","message":"/auth/modern-login","type":"intrade-redirect"})",
                 headers);
         };
 
@@ -346,8 +346,13 @@ struct ModernLoginServer {
                 std::shared_ptr<TradeHistoryHttpServer::Request>) {
             ++auth_redirect_requests;
             SimpleWeb::CaseInsensitiveMultimap headers;
-            headers.emplace("Set-Cookie", "user_id=866188; Path=/; HttpOnly");
-            headers.emplace("Set-Cookie", "user_hash=fake_user_hash; Path=/; HttpOnly");
+            if (session_only.load()) {
+                headers.emplace("Set-Cookie", "PHPSESSID=fake_session; Path=/; HttpOnly");
+                headers.emplace("Set-Cookie", "ui=demo; Path=/");
+            } else {
+                headers.emplace("Set-Cookie", "user_id=866188; Path=/; HttpOnly");
+                headers.emplace("Set-Cookie", "user_hash=fake_user_hash; Path=/; HttpOnly");
+            }
             response->write(
                 SimpleWeb::StatusCode::success_ok,
                 "profile",
@@ -401,6 +406,7 @@ struct ModernLoginServer {
     std::thread thread;
     std::atomic<int> login_requests{0};
     std::atomic<int> auth_redirect_requests{0};
+    std::atomic<bool> session_only{false};
     std::string request_body;
     std::string request_content_type;
 };
@@ -916,9 +922,10 @@ TEST(IntradeBarLogin, ParsesModernTradingLoginResponse) {
     EXPECT_FALSE(is_modern_intrade_landing_page("<form action=\"/login\"></form>"));
 
     const auto success = parse_modern_login_response(
-        R"({"success":true,"message":"/auth/t=opaque","type":"intrade-redirect"})");
+        R"({"success":true,"userID":"866188","message":"/auth/t=opaque","type":"intrade-redirect"})");
     ASSERT_TRUE(success);
     EXPECT_TRUE(success->success);
+    EXPECT_EQ(success->user_id, "866188");
     EXPECT_EQ(success->redirect_url, "/auth/t=opaque");
     EXPECT_EQ(success->response_type, "intrade-redirect");
 
@@ -1012,6 +1019,46 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     EXPECT_EQ(request_json.at("password"), "fake_password");
     EXPECT_EQ(server.login_requests.load(), 1);
     EXPECT_EQ(server.auth_redirect_requests.load(), 1);
+
+    server.session_only.store(true);
+    callback_received = false;
+    success = false;
+    user_id.clear();
+    user_hash.clear();
+    cookies.clear();
+    reason.clear();
+    request_manager.request_login(
+        "",
+        "",
+        "landing=1",
+        auth_data,
+        [&](bool login_success,
+            const std::string& login_user_id,
+            const std::string& login_user_hash,
+            const std::string& login_cookies,
+            const std::string& login_reason) {
+            callback_received = true;
+            success = login_success;
+            user_id = login_user_id;
+            user_hash = login_user_hash;
+            cookies = login_cookies;
+            reason = login_reason;
+        });
+
+    for (int i = 0; i < 500 && !callback_received; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(callback_received);
+    EXPECT_TRUE(success) << reason;
+    EXPECT_EQ(user_id, "866188");
+    EXPECT_TRUE(user_hash.empty());
+    EXPECT_TRUE(has_cookie(cookies, "PHPSESSID"));
+    EXPECT_TRUE(has_cookie(cookies, "ui"));
+    EXPECT_TRUE(has_cookie(cookies, "landing"));
+    EXPECT_EQ(server.login_requests.load(), 2);
+    EXPECT_EQ(server.auth_redirect_requests.load(), 2);
 
     platform.shutdown();
 }

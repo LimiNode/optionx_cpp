@@ -27,6 +27,7 @@
 #include "events/TradeStatusEvent.hpp"
 #include "events/OpenTradesEvent.hpp"
 #include "events/OpenTradesSnapshotEvent.hpp"
+#include "events/OpenTradesSnapshotAvailabilityEvent.hpp"
 #include "events/OpenTradesSnapshotRefreshRequestEvent.hpp"
 
 #endif // OPTIONX_HEADER_DATA_EVENTS_HPP_INCLUDED

@@ -26,12 +26,15 @@ Used by `AuthManager` for `AuthMethod::EMAIL_PASSWORD`.
    `PHPSESSID` session.
 3. If saved cookies work:
    `request_profile` -> optional settings switches -> `request_balance`.
-4. If no valid session exists, request the main page. The current Nuxt SPA
-   shell is recognized without expecting the retired hidden HTML input.
+4. If no valid session exists, request `/login` for the legacy challenge. If
+   that endpoint is unavailable or does not contain the retired hidden-input
+   form, probe the root page and recognize the current Nuxt SPA shell.
 5. For the current SPA, `request_login` posts JSON `email/password` to
    `/route/ts_login_user`, follows the returned opaque `/auth/t=...` redirect,
-   and merges the resulting `user_id/user_hash` cookies. Legacy deployments
-   continue through `request_login` -> `request_auth`.
+   and stores the complete returned cookie jar. Legacy `user_id/user_hash`
+   cookies remain supported; modern sessions may contain only `PHPSESSID`,
+   with the JSON `userID` retained as the account identity hint. Legacy
+   deployments continue through `request_login` -> `request_auth`.
 6. Store the returned session cookies in `ServiceSessionDB`.
 7. Continue with:
    `request_profile` -> optional `request_switch_account_type` ->
@@ -85,21 +88,26 @@ when `RestartAuthEvent` indicates suspicious account state.
 
 1. Call `request_active_trades_snapshot`, which fetches the authenticated main
    page and parses rows from the `trade_active` block.
-2. Publish `OpenTradesSnapshotEvent` with the broker active-trade count and
-   known close timestamps.
-3. Stale callbacks are ignored if the active request generation or account
+2. Before each request, publish an unavailable snapshot state. Trade admission
+   remains blocked until a broker snapshot is accepted.
+3. Publish `OpenTradesSnapshotEvent` with the broker active-trade count and
+   known close timestamps only after a successful authoritative parse.
+4. Stale callbacks are ignored if the active request generation or account
    identity (`user_id`, account type, currency) changed while the HTTP request
    was in flight.
-4. `TradeQueueManager` accepts the snapshot only while its local pending/open
-   queues are empty.
-5. Snapshot trades are counted separately from locally opened trades. The
+5. `TradeQueueManager` accepts the snapshot while no local trade has been sent
+   or opened. Pending requests may remain queued behind the admission fence and
+   are released only after that snapshot is accepted.
+6. Snapshot trades are counted separately from locally opened trades. The
    public `OpenTradesEvent` reports the combined count.
-6. For each known close timestamp, `TradeQueueManager` decreases the snapshot
+7. For each known close timestamp, `TradeQueueManager` decreases the snapshot
    part after `AuthData::active_trades_close_buffer_ms`.
-7. If the snapshot has active trades without known close timestamps, or the
+8. If the snapshot has active trades without known close timestamps, or the
    local queue is busy when the snapshot arrives, `TradeQueueManager` publishes
    `OpenTradesSnapshotRefreshRequestEvent`.
-8. `ActiveTradesSyncManager` schedules the next broker snapshot after
+9. A failed or rejected snapshot leaves admission fail-closed and schedules a
+   retry; it never represents an unknown broker state as zero open trades.
+10. `ActiveTradesSyncManager` schedules the next broker snapshot after
    `AuthData::active_trades_sync_period_ms`.
 
 `TradeQueueManager` applies snapshots on the platform event loop. Its pending

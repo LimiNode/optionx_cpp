@@ -97,9 +97,11 @@ namespace optionx::platforms::intrade_bar {
         /// \brief Stores authentication credentials after a successful login.
         /// \param user_id The user ID obtained after login.
         /// \param user_hash The user authentication hash.
+        /// \param cookies Optional complete cookie jar returned by the broker.
         void set_auth_credentials(
                 const std::string& user_id,
-                const std::string& user_hash);
+                const std::string& user_hash,
+                const std::string& cookies = {});
 
         /// \brief Stores a modern trading-SPA session after email/password login.
         /// \param user_id Optional broker user ID returned by the login JSON.
@@ -373,10 +375,16 @@ namespace optionx::platforms::intrade_bar {
 
     inline void AuthManager::set_auth_credentials(
             const std::string& user_id,
-            const std::string& user_hash) {
-        std::string cookies = "user_id=" + user_id + "; user_hash=" + user_hash;
-        storage::ServiceSessionDB::get_instance().set_session_value(to_str(PlatformType::INTRADE_BAR), m_auth_data->email, cookies);
-        m_request_manager.set_auth_credentials(user_id, user_hash);
+            const std::string& user_hash,
+            const std::string& cookies) {
+        const std::string session_cookies = cookies.empty()
+            ? "user_id=" + user_id + "; user_hash=" + user_hash
+            : cookies;
+        storage::ServiceSessionDB::get_instance().set_session_value(
+            to_str(PlatformType::INTRADE_BAR),
+            m_auth_data->email,
+            session_cookies);
+        m_request_manager.set_auth_credentials(user_id, user_hash, session_cookies);
         set_account_user_id(user_id);
     }
 
@@ -705,7 +713,7 @@ namespace optionx::platforms::intrade_bar {
         if (parsed_data) {
             const auto& [user_id, user_hash] = *parsed_data;
             LOGIT_PRINT_TRACE("Cookies parsed successfully for user_id: ", user_id);
-            m_request_manager.set_auth_credentials(user_id, user_hash);
+            m_request_manager.set_auth_credentials(user_id, user_hash, cookies);
             set_account_user_id(user_id);
 
             // Start authentication flow
@@ -727,7 +735,9 @@ namespace optionx::platforms::intrade_bar {
             // Modern trading login sessions contain PHPSESSID rather than the
             // retired user_id/user_hash cookie pair.
             LOGIT_INFO("Intrade Bar auth: saved trading session found, validating it.");
-            m_request_manager.set_auth_session(std::string(), cookies);
+            const auto user_id = parse_cookie_value(cookies, "user_id").value_or(std::string());
+            m_request_manager.set_auth_session(user_id, cookies);
+            set_account_user_id(user_id);
             start_authentication(
                     generation,
                     [this, callback, generation](const ConnectionResult& result) {
@@ -865,7 +875,7 @@ namespace optionx::platforms::intrade_bar {
                 set_auth_session(user_id, cookies);
             } else {
                 LOGIT_PRINT_TRACE("Authentication successful. User ID: ", user_id);
-                set_auth_credentials(user_id, user_hash);
+                set_auth_credentials(user_id, user_hash, cookies);
             }
             result_callback(true, std::string());
         };

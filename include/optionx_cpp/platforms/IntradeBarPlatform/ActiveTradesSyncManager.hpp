@@ -164,6 +164,7 @@ namespace optionx::platforms::intrade_bar {
 
         m_sync_in_progress = true;
         m_refresh_scheduled = false;
+        notify(events::OpenTradesSnapshotAvailabilityEvent(false, reason));
         const std::uint64_t generation = ++m_sync_generation;
         m_active_sync_generation = generation;
         const AccountContext account_context = capture_account_context(account_info);
@@ -249,6 +250,9 @@ namespace optionx::platforms::intrade_bar {
         m_task_manager.shutdown();
         m_refresh_scheduled = false;
         reset_sync_state();
+        notify(events::OpenTradesSnapshotAvailabilityEvent(
+            false,
+            reason ? reason : "account-context-invalidated"));
         LOGIT_DEBUG(
             "Intrade Bar active trades sync: account context invalidated. reason=",
             reason,

@@ -69,12 +69,16 @@ namespace optionx::platforms::intrade_bar {
         /// \brief Sets authentication credentials for HTTP requests.
         /// \param user_id The user ID.
         /// \param user_hash The authentication hash.
+        /// \param cookies Optional complete cookie jar from the authentication flow.
         void set_auth_credentials(
                 const std::string& user_id,
-                const std::string& user_hash) {
+                const std::string& user_hash,
+                const std::string& cookies = {}) {
             m_user_id = user_id;
             m_user_hash = user_hash;
-            m_cookies = "user_id=" + user_id + "; user_hash=" + user_hash;
+            m_cookies = cookies.empty()
+                ? "user_id=" + user_id + "; user_hash=" + user_hash
+                : cookies;
         }
 
         /// \brief Stores a session cookie returned by the current trading SPA login.
@@ -340,6 +344,18 @@ namespace optionx::platforms::intrade_bar {
             return m_client.get_rate_limit<T>(rate_limit_id);
         }
 
+        /// \brief Requests and parses the legacy login endpoint.
+        /// \param auth_data Shared pointer to authentication data.
+        /// \param result_callback Callback receiving the legacy challenge.
+        void request_legacy_login_page(
+            std::shared_ptr<AuthData> auth_data,
+            std::function<void(
+                bool success,
+                const std::string& req_id,
+                const std::string& req_value,
+                const std::string& cookies,
+                const std::string& reason)> result_callback);
+
         /// \brief Adds a new HTTP request task to the list.
         /// \param future The future object representing the pending HTTP response.
         /// \param callback The callback function to handle the response.
@@ -451,10 +467,73 @@ namespace optionx::platforms::intrade_bar {
             return;
         }
 
-        // The broker moved the legacy login form off the landing page. The
-        // root path now serves the Nuxt marketing app and has no challenge.
-        // Keep the legacy form endpoint explicit so the existing challenge /
-        // cookie authentication flow remains usable.
+        // Prefer the explicit legacy endpoint. This preserves the compatibility
+        // path from #171 and avoids probing the public landing page when the
+        // broker still exposes the old challenge form. If that endpoint is no
+        // longer available, fall back to the current SPA landing page.
+        request_legacy_login_page(
+            auth_data,
+            [this, result_callback](
+                    bool success,
+                    const std::string& req_id,
+                    const std::string& req_value,
+                    const std::string& cookies,
+                    const std::string& reason) {
+                if (success) {
+                    result_callback(true, req_id, req_value, cookies, reason);
+                    return;
+                }
+
+                auto future = get_http_client().get(
+                    "/",
+                    kurlyk::QueryParams(),
+                    {
+                        {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"},
+                        {"Content-Type", "application/x-www-form-urlencoded"},
+                        {"Upgrade-Insecure-Requests", "1"}
+                    },
+                    get_rate_limit(RateLimitType::ACCOUNT_INFO)
+                );
+
+                auto callback = [result_callback](kurlyk::HttpResponsePtr response) {
+                    if (!validate_response(response, [&result_callback](const std::string& error_text) {
+                            result_callback(false, std::string(), std::string(), std::string(), error_text);
+                        })) {
+                        return;
+                    }
+
+                    if (!is_modern_intrade_landing_page(response->content)) {
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            "Neither legacy /login nor modern landing page was recognized.");
+                        return;
+                    }
+
+                    result_callback(
+                        true,
+                        std::string(),
+                        std::string(),
+                        merge_set_cookies(std::string(), response->headers),
+                        std::string());
+                };
+
+                add_http_request_task(std::move(future), std::move(callback));
+            });
+    }
+
+    inline void RequestManager::request_legacy_login_page(
+            std::shared_ptr<AuthData> auth_data,
+            std::function<void(
+                bool success,
+                const std::string& req_id,
+                const std::string& req_value,
+                const std::string& cookies,
+                const std::string& reason)> result_callback) {
+        static_cast<void>(auth_data);
+
         auto future = get_http_client().get(
             "/login",
             kurlyk::QueryParams(),
@@ -466,55 +545,44 @@ namespace optionx::platforms::intrade_bar {
             get_rate_limit(RateLimitType::ACCOUNT_INFO)
         );
 
-        // Handle the HTTP response
-        auto callback = [this, auth_data, result_callback](
-                kurlyk::HttpResponsePtr response) {
-            // Validate the response
-            if (!validate_response(response, [&result_callback](const std::string& error_text){
+        auto callback = [result_callback = std::move(result_callback)](
+                kurlyk::HttpResponsePtr response) mutable {
+            if (!validate_response(response, [&result_callback](const std::string& error_text) {
                     result_callback(false, std::string(), std::string(), std::string(), error_text);
                 })) {
                 return;
             }
 
-            // The current broker serves a Nuxt shell instead of the retired
-            // hidden-input login form. Treat the shell as a successful
-            // challenge step and let request_login call the trading backend.
-            if (is_modern_intrade_landing_page(response->content)) {
-                result_callback(
-                    true,
-                    std::string(),
-                    std::string(),
-                    merge_set_cookies(std::string(), response->headers),
-                    std::string());
-                return;
-            }
-
-            // Parse the legacy response content.
-            auto parsed_data = parse_main_page_response(response->content, response->headers);
+            const auto parsed_data = parse_main_page_response(
+                response->content,
+                response->headers);
             if (!parsed_data) {
 #               ifdef OPTIONX_LOG_UNIQUE_FILE_INDEX
                 const int log_index = OPTIONX_LOG_UNIQUE_FILE_INDEX;
                 LOGIT_STREAM_ERROR_TO(log_index) << response->content;
                 LOGIT_PRINT_ERROR(
-                    "Failed to process server response; content log was written to file: ",
+                    "Failed to process legacy login response; content log was written to file: ",
                     LOGIT_GET_LAST_FILE_NAME(log_index)
                 );
 #               else
                 LOGIT_ERROR(
-                     "Failed to process server response.",
+                    "Failed to process legacy login response.",
                     (response ? response->status_code : -1)
                 );
 #               endif
-                result_callback(false, std::string(), std::string(), std::string(), "Failed to process server response.");
+                result_callback(
+                    false,
+                    std::string(),
+                    std::string(),
+                    std::string(),
+                    "Failed to process legacy login response.");
                 return;
             }
-            // Extract parsed data
-            const auto& [req_id, req_value, cookies] = *parsed_data;
 
-            result_callback(true, req_id, req_value, cookies, "");
+            const auto& [req_id, req_value, cookies] = *parsed_data;
+            result_callback(true, req_id, req_value, cookies, std::string());
         };
 
-        // Add the HTTP request task for asynchronous processing
         add_http_request_task(std::move(future), std::move(callback));
     }
 
@@ -700,7 +768,9 @@ namespace optionx::platforms::intrade_bar {
                     get_rate_limit(RateLimitType::ACCOUNT_INFO)
                 );
 
-                auto redirect_callback = [this, legacy_host, merged_cookies, result_callback](
+                const std::string modern_user_id = parsed->user_id;
+                auto redirect_callback = [this, legacy_host, merged_cookies,
+                                          modern_user_id, result_callback](
                         kurlyk::HttpResponsePtr redirect_response) {
                     const auto restore_legacy_host = [this, legacy_host]() {
                         if (!legacy_host.empty()) {
@@ -729,9 +799,14 @@ namespace optionx::platforms::intrade_bar {
                     const std::string final_cookies = merge_set_cookies(
                         merged_cookies,
                         redirect_response->headers);
-                    const auto parsed_cookies = parse_cookies(final_cookies);
                     restore_legacy_host();
-                    if (!parsed_cookies) {
+
+                    std::string user_id = modern_user_id;
+                    std::string user_hash;
+                    if (const auto parsed_cookies = parse_cookies(final_cookies)) {
+                        user_id = std::get<0>(*parsed_cookies);
+                        user_hash = std::get<1>(*parsed_cookies);
+                    } else if (!has_cookie(final_cookies, "PHPSESSID")) {
                         result_callback(
                             false,
                             std::string(),
@@ -741,7 +816,6 @@ namespace optionx::platforms::intrade_bar {
                         return;
                     }
 
-                    const auto& [user_id, user_hash] = *parsed_cookies;
                     result_callback(
                         true,
                         user_id,

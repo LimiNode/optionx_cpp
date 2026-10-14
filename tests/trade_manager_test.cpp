@@ -296,8 +296,14 @@ namespace optionx::components {
     /// \brief Test implementation of BaseTradeExecutionComponent for unit testing.
     class TradeManagerTest : public BaseTradeExecutionComponent {
     public:
-        TradeManagerTest(utils::EventBus& bus, std::shared_ptr<BaseAccountInfoData> account_info)
-            : BaseTradeExecutionComponent(bus, std::move(account_info)) {
+        TradeManagerTest(
+                utils::EventBus& bus,
+                std::shared_ptr<BaseAccountInfoData> account_info,
+                bool require_open_trades_snapshot = false)
+            : BaseTradeExecutionComponent(
+                  bus,
+                  std::move(account_info),
+                  require_open_trades_snapshot) {
             subscribe<events::AuthDataEvent>();
         }
 
@@ -645,6 +651,32 @@ TEST_F(TradeManagerTestFixture, OrderIntervalDelaysQueuedTrades) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
     EXPECT_TRUE(wait_for_open_trades_count(trade_manager, bus, capture, 2, 1000));
+
+    trade_manager.shutdown();
+}
+
+TEST_F(TradeManagerTestFixture, TradeAdmissionWaitsForAuthoritativeBrokerSnapshot) {
+    utils::EventBus bus;
+    auto account_info = std::make_shared<AccountInfoData>();
+    account_info->user_id = 12345;
+    account_info->balance = 1000.0;
+    account_info->currency = CurrencyType::USD;
+    account_info->account_type = AccountType::DEMO;
+    account_info->connect = true;
+    account_info->order_interval_ms = 0;
+
+    TradeManagerTest trade_manager(bus, account_info, true);
+    TradeRequestCapture request_capture(bus);
+
+    ASSERT_TRUE(trade_manager.place_trade(make_valid_sprint_trade_request()));
+    trade_manager.process();
+    bus.process();
+    EXPECT_TRUE(request_capture.results.empty());
+
+    bus.notify(events::OpenTradesSnapshotEvent(0, {}, 0));
+    trade_manager.process();
+    bus.process();
+    EXPECT_EQ(request_capture.results.size(), 1u);
 
     trade_manager.shutdown();
 }

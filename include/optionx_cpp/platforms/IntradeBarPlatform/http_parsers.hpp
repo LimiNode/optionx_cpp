@@ -1202,12 +1202,11 @@ namespace optionx::platforms::intrade_bar {
             content);
     }
 
-    /// \brief Extracts user_id and user_hash from a cookies string.
-    /// \param cookies The input string containing cookies.
-    /// \param user_id [out] The extracted user_id.
-    /// \param user_hash [out] The extracted user_hash.
-    /// \return True if both user_id and user_hash are found, otherwise false.
-    inline bool parse_cookies(const std::string& cookies, std::string& user_id, std::string& user_hash) {
+    /// \brief Parses a Cookie header into cookie name/value pairs.
+    /// \param cookies The input Cookie header value.
+    /// \return Parsed cookie values without attributes from Set-Cookie headers.
+    inline std::unordered_map<std::string, std::string> parse_cookie_values(
+            const std::string& cookies) {
         std::unordered_map<std::string, std::string> cookie_map;
         std::istringstream cookie_stream(cookies);
         std::string cookie;
@@ -1229,7 +1228,32 @@ namespace optionx::platforms::intrade_bar {
             }
         }
 
-        // Extract user_id and user_hash
+        return cookie_map;
+    }
+
+    /// \brief Returns one cookie value when present.
+    /// \param cookies The input Cookie header value.
+    /// \param name Cookie name to find.
+    /// \return Cookie value, or std::nullopt when absent.
+    inline std::optional<std::string> parse_cookie_value(
+            const std::string& cookies,
+            const std::string& name) {
+        const auto cookie_map = parse_cookie_values(cookies);
+        const auto it = cookie_map.find(name);
+        if (it == cookie_map.end()) return std::nullopt;
+        return it->second;
+    }
+
+    /// \brief Extracts user_id and user_hash from a cookies string.
+    /// \param cookies The input string containing cookies.
+    /// \param user_id [out] The extracted user_id.
+    /// \param user_hash [out] The extracted user_hash.
+    /// \return True if both user_id and user_hash are found, otherwise false.
+    inline bool parse_cookies(
+            const std::string& cookies,
+            std::string& user_id,
+            std::string& user_hash) {
+        const auto cookie_map = parse_cookie_values(cookies);
         auto id_it = cookie_map.find("user_id");
         auto hash_it = cookie_map.find("user_hash");
 
@@ -1243,28 +1267,7 @@ namespace optionx::platforms::intrade_bar {
     }
 
     inline std::optional<std::tuple<std::string, std::string>> parse_cookies(const std::string& cookies) {
-        std::unordered_map<std::string, std::string> cookie_map;
-        std::istringstream cookie_stream(cookies);
-        std::string cookie;
-
-        // Parse the cookies string
-        while (std::getline(cookie_stream, cookie, ';')) {
-            size_t pos = cookie.find('=');
-            if (pos != std::string::npos) {
-                std::string key = cookie.substr(0, pos);
-                std::string value = cookie.substr(pos + 1);
-
-                // Trim leading and trailing whitespace
-                key.erase(0, key.find_first_not_of(" \t"));
-                key.erase(key.find_last_not_of(" \t") + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
-                value.erase(value.find_last_not_of(" \t") + 1);
-
-                cookie_map[key] = value;
-            }
-        }
-
-        // Extract user_id and user_hash
+        const auto cookie_map = parse_cookie_values(cookies);
         auto id_it = cookie_map.find("user_id");
         auto hash_it = cookie_map.find("user_hash");
 

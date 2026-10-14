@@ -92,7 +92,8 @@ namespace optionx::platforms::intrade_bar {
                 std::shared_ptr<BaseAccountInfoData> account_info)
                 : components::BaseTradeExecutionComponent(
                     platform.event_bus(),
-                    std::move(account_info)) {
+                    std::move(account_info),
+                    true) {
             platform.register_component(this);
         }
 
