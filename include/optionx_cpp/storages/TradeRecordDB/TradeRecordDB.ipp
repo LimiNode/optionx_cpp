@@ -480,7 +480,6 @@ namespace optionx::storage {
     }
 
     inline std::uint32_t TradeRecordDB::reserve_trade_id_no_lock(MDBX_txn* txn) {
-        constexpr auto max_id = std::numeric_limits<std::uint32_t>::max();
         auto meta = m_meta->get_or(TradeRecordDBMeta{}, txn);
         auto candidate = meta.next_trade_uid;
         if (candidate == 0) candidate = 1;
