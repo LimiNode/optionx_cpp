@@ -21,6 +21,7 @@ namespace optionx::components {
     /// - `PriceUpdateEvent` - Updates trade states based on market prices.
     /// - `DisconnectRequestEvent` - Handles connection loss and forces trade finalization.
     /// - `OpenTradesSnapshotEvent` - Synchronizes broker-side active trades when the local queue is idle.
+    /// - `OpenTradesSnapshotAvailabilityEvent` - Gates connected-account trade admission until broker state is authoritative.
     ///
     /// ### Emitted Events:
     /// - `TradeTransactionEvent` - Notifies about trade request updates.
@@ -36,12 +37,19 @@ namespace optionx::components {
         /// \brief Constructs a `BaseTradeExecutionComponent` instance.
         /// \param bus Reference to the `EventBus` for subscribing to and emitting events.
         /// \param account_info Shared pointer to the `BaseAccountInfoData` interface for retrieving account-related information.
+        /// \param require_open_trades_snapshot Start with trade admission blocked
+        ///        until an authoritative broker snapshot is accepted.
         explicit BaseTradeExecutionComponent(
                 utils::EventBus& bus,
-                std::shared_ptr<BaseAccountInfoData> account_info)
+                std::shared_ptr<BaseAccountInfoData> account_info,
+                bool require_open_trades_snapshot = false)
             : BaseComponent(bus), m_account_info(std::move(account_info)),
               m_trade_state_manager(m_account_info),
-              m_trade_queue(bus, m_account_info, m_trade_state_manager) {
+              m_trade_queue(
+                  bus,
+                  m_account_info,
+                  m_trade_state_manager,
+                  require_open_trades_snapshot) {
         }
 
         /// \brief Default virtual destructor.

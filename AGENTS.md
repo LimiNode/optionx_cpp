@@ -84,6 +84,13 @@ supported public entry point or an internal leaf:
 
 ## Critical Defaults
 
+- For live Intrade Bar authorization smoke tests, use the ignored local config
+  file `tests/intrade_bar_api/intrade_bar_api.local.env` for credentials and
+  proxy settings. The file is not auto-discovered: select it explicitly with
+  `OPTIONX_INTRADE_BAR_CONFIG_FILE`; explicitly supplied environment variables
+  override values from the file. The canonical launch instructions are in
+  `tests/intrade_bar_api/CLI.md`. Never print or commit passwords, proxy
+  credentials, cookies, session IDs, or auth tokens.
 - Перед правками проверь `git status --short` и не перетирай чужие изменения.
 - Не коммить напрямую в `main`; создай отдельную ветку и PR, если пользователь
   явно не попросил прямой commit в `main`.
@@ -114,6 +121,17 @@ supported public entry point or an internal leaf:
   manager или provider.
 - В async/HTTP/WebSocket коде сохраняй lifecycle: `run()` -> periodic
   `process()` -> `shutdown()`/drain/cancel.
+- В recursive async/HTTP callbacks проверяй ownership graph. `lambda` или
+  `std::function` не должна через `std::shared_ptr` владеть объектом, который
+  содержит эту же callback-функцию: это создаёт постоянный reference cycle.
+  Для self-reference храни `std::weak_ptr`, а strong ownership удерживай
+  только на время конкретной in-flight операции. Проверь освобождение на
+  success, failure, cancel и timeout и добавь regression/lifetime test.
+- `raw this` в delayed/in-flight callback допустим только при явно доказанном
+  owner lifecycle: shutdown должен cancel/drain/join такие callbacks до
+  уничтожения owner либо callback должен иметь stable lifetime guard. Наличие
+  другого `std::shared_ptr` в callback само по себе не продлевает lifetime
+  объекта, на который указывает `raw this`.
 - Для публичных headers сохраняй Doxygen `///` с `\file`, `\class`, `\brief`.
 - Для code changes запускай самые узкие релевантные tests/examples; для
   documentation-only изменений достаточно Markdown/link smoke-check.

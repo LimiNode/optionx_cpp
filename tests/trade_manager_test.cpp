@@ -296,8 +296,14 @@ namespace optionx::components {
     /// \brief Test implementation of BaseTradeExecutionComponent for unit testing.
     class TradeManagerTest : public BaseTradeExecutionComponent {
     public:
-        TradeManagerTest(utils::EventBus& bus, std::shared_ptr<BaseAccountInfoData> account_info)
-            : BaseTradeExecutionComponent(bus, std::move(account_info)) {
+        TradeManagerTest(
+                utils::EventBus& bus,
+                std::shared_ptr<BaseAccountInfoData> account_info,
+                bool require_open_trades_snapshot = false)
+            : BaseTradeExecutionComponent(
+                  bus,
+                  std::move(account_info),
+                  require_open_trades_snapshot) {
             subscribe<events::AuthDataEvent>();
         }
 
@@ -645,6 +651,100 @@ TEST_F(TradeManagerTestFixture, OrderIntervalDelaysQueuedTrades) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
     EXPECT_TRUE(wait_for_open_trades_count(trade_manager, bus, capture, 2, 1000));
+
+    trade_manager.shutdown();
+}
+
+TEST_F(TradeManagerTestFixture, TradeAdmissionWaitsForAuthoritativeBrokerSnapshot) {
+    utils::EventBus bus;
+    auto account_info = std::make_shared<AccountInfoData>();
+    account_info->user_id = 12345;
+    account_info->balance = 1000.0;
+    account_info->currency = CurrencyType::USD;
+    account_info->account_type = AccountType::DEMO;
+    account_info->connect = true;
+    account_info->order_interval_ms = 0;
+
+    TradeManagerTest trade_manager(bus, account_info, true);
+    TradeRequestCapture request_capture(bus);
+
+    ASSERT_TRUE(trade_manager.place_trade(make_valid_sprint_trade_request()));
+    trade_manager.process();
+    bus.process();
+    EXPECT_TRUE(request_capture.results.empty());
+
+    bus.notify(events::OpenTradesSnapshotEvent(0, {}, 0));
+    trade_manager.process();
+    bus.process();
+    EXPECT_EQ(request_capture.results.size(), 1u);
+
+    trade_manager.shutdown();
+}
+
+TEST_F(TradeManagerTestFixture, DefaultTradeAdmissionSurvivesDisconnectWithoutSnapshot) {
+    utils::EventBus bus;
+    auto account_info = std::make_shared<AccountInfoData>();
+    account_info->user_id = 12345;
+    account_info->balance = 1000.0;
+    account_info->currency = CurrencyType::USD;
+    account_info->account_type = AccountType::DEMO;
+    account_info->connect = true;
+    account_info->order_interval_ms = 0;
+
+    TradeManagerTest trade_manager(bus, account_info);
+    TradeRequestCapture request_capture(bus);
+
+    ASSERT_TRUE(trade_manager.place_trade(make_valid_sprint_trade_request()));
+    trade_manager.process();
+    bus.process();
+    ASSERT_EQ(request_capture.results.size(), 1u);
+
+    events::DisconnectRequestEvent disconnect([](const ConnectionResult&) {});
+    bus.notify(disconnect);
+
+    ASSERT_TRUE(trade_manager.place_trade(make_valid_sprint_trade_request()));
+    trade_manager.process();
+    bus.process();
+    EXPECT_EQ(request_capture.results.size(), 2u);
+
+    trade_manager.shutdown();
+}
+
+TEST_F(TradeManagerTestFixture, UnavailableSnapshotDoesNotPublishAuthoritativeZero) {
+    utils::EventBus bus;
+    auto account_info = std::make_shared<AccountInfoData>();
+    account_info->user_id = 12345;
+    account_info->balance = 1000.0;
+    account_info->currency = CurrencyType::USD;
+    account_info->account_type = AccountType::DEMO;
+    account_info->connect = true;
+
+    TradeManagerTest trade_manager(bus, account_info, true);
+    OpenTradesCapture open_trades_capture(bus, account_info);
+    TradeRequestCapture request_capture(bus);
+
+    bus.notify(events::OpenTradesSnapshotEvent(
+        3,
+        {
+            OPTIONX_TIMESTAMP_MS + time_shield::MS_PER_MIN,
+            OPTIONX_TIMESTAMP_MS + time_shield::MS_PER_MIN * 2,
+            OPTIONX_TIMESTAMP_MS + time_shield::MS_PER_MIN * 3
+        },
+        0));
+    ASSERT_EQ(open_trades_capture.last_count(), 3);
+    ASSERT_EQ(account_info->open_trades, 3);
+
+    bus.notify(events::OpenTradesSnapshotAvailabilityEvent(
+        false,
+        "snapshot-failed"));
+
+    EXPECT_EQ(open_trades_capture.last_count(), 3);
+    EXPECT_EQ(account_info->open_trades, 3);
+
+    ASSERT_TRUE(trade_manager.place_trade(make_valid_sprint_trade_request()));
+    trade_manager.process();
+    bus.process();
+    EXPECT_TRUE(request_capture.results.empty());
 
     trade_manager.shutdown();
 }

@@ -39,15 +39,21 @@ namespace optionx::components {
         /// \param bus Event bus for event-based communication.
         /// \param account_info Account information provider.
         /// \param trade_state_manager Manages trade state transitions.
+        /// \param require_open_trades_snapshot Start with trade admission blocked
+        ///        until an authoritative broker snapshot is accepted.
         explicit TradeQueueManager(
                 utils::EventBus& bus,
                 AccountInfoProvider& account_info,
-                TradeStateManager& trade_state_manager)
+                TradeStateManager& trade_state_manager,
+                bool require_open_trades_snapshot = false)
             : EventMediator(bus), m_account_info(account_info),
-              m_trade_state_manager(trade_state_manager) {
+              m_trade_state_manager(trade_state_manager),
+              m_require_open_trades_snapshot(require_open_trades_snapshot),
+              m_open_trades_snapshot_ready(!require_open_trades_snapshot) {
             subscribe<events::PriceUpdateEvent>();
             subscribe<events::DisconnectRequestEvent>();
             subscribe<events::OpenTradesSnapshotEvent>();
+            subscribe<events::OpenTradesSnapshotAvailabilityEvent>();
         }
 
         /// \brief Virtual destructor.
@@ -63,6 +69,9 @@ namespace optionx::components {
                 handle_event(*msg);
             } else
             if (const auto* msg = dynamic_cast<const events::OpenTradesSnapshotEvent*>(event)) {
+                handle_event(*msg);
+            } else
+            if (const auto* msg = dynamic_cast<const events::OpenTradesSnapshotAvailabilityEvent*>(event)) {
                 handle_event(*msg);
             }
         };
@@ -165,6 +174,8 @@ namespace optionx::components {
         int64_t                  m_local_open_trades = 0; ///< Number of locally tracked open trades.
         int64_t                  m_snapshot_open_trades = 0; ///< Number of active trades loaded from a broker snapshot.
         int64_t                  m_snapshot_unknown_close_trades = 0; ///< Snapshot trades without a known close time.
+        bool                     m_require_open_trades_snapshot = false; ///< True when connected admission requires an authoritative snapshot.
+        bool                     m_open_trades_snapshot_ready = true; ///< True only after an authoritative snapshot is accepted.
         bool                     m_snapshot_refresh_requested = false; ///< True after emitting a refresh request for current snapshot state.
         std::vector<int64_t>     m_snapshot_close_due_times_ms; ///< Close timestamps with the configured safety buffer.
         bool                     m_has_trade_storm_balance = false; ///< True when a local trade burst baseline is active.
@@ -224,6 +235,10 @@ namespace optionx::components {
         /// \brief Handles a broker-side active-trades snapshot.
         /// \param event Snapshot event to apply when the local queue is idle.
         void handle_event(const events::OpenTradesSnapshotEvent& event);
+
+        /// \brief Handles broker snapshot availability changes.
+        /// \param event Availability state emitted by the platform snapshot manager.
+        void handle_event(const events::OpenTradesSnapshotAvailabilityEvent& event);
     };
 
     template<typename PreprocessFunction>
@@ -263,6 +278,15 @@ namespace optionx::components {
     }
 
     inline TradeQueueManager::transaction_t TradeQueueManager::pop_next_transaction() {
+        // Preserve the normal disconnected-account error path. The snapshot
+        // fence applies only while a connected account lacks authoritative
+        // broker open-trade state.
+        if (m_require_open_trades_snapshot &&
+            !m_open_trades_snapshot_ready &&
+            m_account_info.get_info<bool>(AccountInfoType::CONNECTION_STATUS)) {
+            return nullptr;
+        }
+
         const int64_t order_interval_ms = std::max<int64_t>(
             0,
             m_account_info.get_info<int64_t>(AccountInfoType::ORDER_INTERVAL_MS));
@@ -683,13 +707,18 @@ namespace optionx::components {
     }
 
     inline void TradeQueueManager::handle_event(const events::DisconnectRequestEvent& event) {
+        if (m_require_open_trades_snapshot) {
+            m_open_trades_snapshot_ready = false;
+        }
         finalize_all_trades();
     }
 
     inline void TradeQueueManager::handle_event(const events::OpenTradesSnapshotEvent& event) {
         std::unique_lock<std::mutex> lock(m_pending_mutex);
         m_snapshot_refresh_requested = false;
-        if (!m_pending_transactions.empty() ||
+        const bool pending_blocks_snapshot =
+            m_open_trades_snapshot_ready && !m_pending_transactions.empty();
+        if (pending_blocks_snapshot ||
             !m_open_transactions.empty() ||
             m_local_open_trades > 0) {
             LOGIT_DEBUG(
@@ -702,6 +731,7 @@ namespace optionx::components {
             return;
         }
 
+        m_open_trades_snapshot_ready = true;
         m_snapshot_open_trades = std::max<int64_t>(0, event.open_trades);
         m_snapshot_unknown_close_trades = 0;
         m_snapshot_close_due_times_ms.clear();
@@ -739,6 +769,19 @@ namespace optionx::components {
         if (m_snapshot_unknown_close_trades > 0) {
             request_snapshot_refresh("unknown-close-times");
         }
+    }
+
+    inline void TradeQueueManager::handle_event(
+            const events::OpenTradesSnapshotAvailabilityEvent& event) {
+        if (!m_require_open_trades_snapshot) return;
+
+        m_open_trades_snapshot_ready = event.ready;
+        if (event.ready) return;
+
+        // Availability=false means that the current snapshot is unknown, not
+        // that the broker confirmed zero active trades. Keep the authoritative
+        // public count unchanged until a replacement snapshot is accepted.
+        clear_snapshot_open_trades();
     }
 
 } // namespace optionx::components

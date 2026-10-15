@@ -13,17 +13,151 @@
 #include <unordered_map>
 #include <sstream>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <regex>
 #include <stdexcept>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #include <optionx_cpp/utils/response_parse_utils.hpp>
 #include "ApiResponses.hpp"
 #include "http_utils.hpp"
 
 namespace optionx::platforms::intrade_bar {
+
+    /// \brief Describes the JSON response returned by the current SPA login.
+    struct ModernLoginResponse {
+        bool success = false;
+        std::string user_id;
+        std::string redirect_url;
+        std::string response_type;
+        std::string error;
+    };
+
+    /// \brief API endpoint and CSRF token exposed by the current trading terminal.
+    struct IntradeTerminalConfig {
+        std::string api_path;
+        std::string csrf;
+    };
+
+    /// \brief Parses the current terminal's embedded API configuration.
+    /// \param content Raw authenticated terminal HTML.
+    /// \return Configuration when the `u-config` script is present; empty when
+    ///          the page belongs to the legacy terminal.
+    /// \throws std::runtime_error When the current terminal configuration is
+    ///         present but malformed or incomplete.
+    inline std::optional<IntradeTerminalConfig> parse_intrade_terminal_config(
+            const std::string& content) {
+        std::size_t search_pos = 0;
+        while ((search_pos = content.find("<script", search_pos)) != std::string::npos) {
+            const auto tag_end = content.find('>', search_pos);
+            if (tag_end == std::string::npos) break;
+
+            const auto opening_tag = content.substr(search_pos, tag_end - search_pos + 1);
+            if (utils::extract_html_attr(opening_tag, "id") != std::optional<std::string>("u-config")) {
+                search_pos = tag_end + 1;
+                continue;
+            }
+
+            const auto content_start = tag_end + 1;
+            const auto content_end = content.find("</script>", content_start);
+            if (content_end == std::string::npos) {
+                throw std::runtime_error("Intrade terminal config script is incomplete.");
+            }
+
+            try {
+                const auto payload = nlohmann::json::parse(
+                    utils::trim_copy(content.substr(content_start, content_end - content_start)));
+                if (!payload.is_object()) {
+                    throw std::runtime_error("Intrade terminal config is not an object.");
+                }
+
+                IntradeTerminalConfig config;
+                config.api_path = payload.value("api", std::string());
+                config.csrf = payload.value("csrf", std::string());
+                if (config.api_path.empty() || config.csrf.empty()) {
+                    throw std::runtime_error("Intrade terminal config is missing API or CSRF data.");
+                }
+                if (config.api_path.front() != '/' ||
+                    config.api_path.find("://") != std::string::npos) {
+                    throw std::runtime_error("Intrade terminal API path is invalid.");
+                }
+                return config;
+            } catch (const nlohmann::json::exception& ex) {
+                throw std::runtime_error(
+                    std::string("Failed to parse Intrade terminal config: ") + ex.what());
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// \brief Detects the current Nuxt landing page served by Intrade Bar.
+    /// \param content Raw response body.
+    /// \return True when the body is the SPA shell rather than the retired HTML form.
+    inline bool is_modern_intrade_landing_page(const std::string& content) {
+        return content.find("Digital options, without the circus") != std::string::npos ||
+               content.find("__NUXT__") != std::string::npos;
+    }
+
+    /// \brief Parses the current SPA login JSON response without logging its body.
+    /// \param content Raw JSON response body.
+    /// \return Parsed response, or std::nullopt for a non-JSON response.
+    inline std::optional<ModernLoginResponse> parse_modern_login_response(
+            const std::string& content) {
+        try {
+            const auto payload = nlohmann::json::parse(content);
+            ModernLoginResponse result;
+            result.success = payload.value("success", false);
+
+            if (payload.contains("type") && payload.at("type").is_string()) {
+                result.response_type = payload.at("type").get<std::string>();
+            }
+
+            for (const char* key : {"userID", "userId", "user_id"}) {
+                if (!payload.contains(key) || payload.at(key).is_null()) continue;
+                if (payload.at(key).is_string()) {
+                    result.user_id = payload.at(key).get<std::string>();
+                } else if (payload.at(key).is_number_integer()) {
+                    result.user_id = std::to_string(payload.at(key).get<std::int64_t>());
+                }
+                if (!result.user_id.empty()) break;
+            }
+
+            if (payload.contains("message") && payload.at("message").is_string()) {
+                const auto message = payload.at("message").get<std::string>();
+                if (result.success) {
+                    result.redirect_url = message;
+                } else {
+                    result.error = message;
+                }
+            }
+            return result;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    /// \brief Checks whether a named cookie is present in a Cookie header value.
+    /// \param cookies Cookie header value.
+    /// \param name Cookie name to find.
+    /// \return True when the cookie exists, including an empty cookie value.
+    inline bool has_cookie(const std::string& cookies, const std::string& name) {
+        std::istringstream cookie_stream(cookies);
+        std::string cookie;
+        while (std::getline(cookie_stream, cookie, ';')) {
+            const auto pos = cookie.find('=');
+            if (pos == std::string::npos) continue;
+            std::string key = cookie.substr(0, pos);
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            if (key == name) return true;
+        }
+        return false;
+    }
+
 
     inline std::uint32_t duration_sec_from_ms_delta(std::int64_t delta_ms) noexcept {
         if (delta_ms <= 0) return 0;
@@ -128,6 +262,57 @@ namespace optionx::platforms::intrade_bar {
         return std::regex_match(origin, allowed_origin_regex);
     }
 
+    /// \brief Identifies the platform behind an Intrade login origin.
+    enum class IntradeLoginOrigin {
+        LEGACY,
+        MODERN_UNSUPPORTED,
+        UNKNOWN
+    };
+
+    /// \brief Recognizes the current SPA host separately from legacy hosts.
+    /// \param origin The `scheme://authority` origin to inspect.
+    /// \return True only for the current `trading.intrade.bar` SPA origin.
+    inline bool is_modern_intrade_origin(const std::string& origin) {
+        static const std::regex modern_origin_regex(
+            R"(^https://trading\.intrade\.bar$)",
+            std::regex::icase);
+        return std::regex_match(origin, modern_origin_regex);
+    }
+
+    /// \brief Classifies a broker-selected login destination.
+    /// \param origin The `scheme://authority` origin to classify.
+    /// \return Legacy for the supported terminal family, modern for the known
+    ///         unsupported SPA, and unknown for every other origin.
+    inline IntradeLoginOrigin classify_intrade_login_origin(
+            const std::string& origin) {
+        if (is_allowed_intrade_redirect_origin(origin)) {
+            return IntradeLoginOrigin::LEGACY;
+        }
+        if (is_modern_intrade_origin(origin)) {
+            return IntradeLoginOrigin::MODERN_UNSUPPORTED;
+        }
+        return IntradeLoginOrigin::UNKNOWN;
+    }
+
+    /// \brief Detects a successfully established session on the unsupported SPA.
+    /// \param origin Final origin reached by the login redirect chain.
+    /// \param cookies Cookies accumulated during login.
+    /// \return True when the modern platform issued its session cookie.
+    inline bool is_authenticated_modern_intrade_session(
+            const std::string& origin,
+            const std::string& cookies) {
+        return classify_intrade_login_origin(origin) ==
+                IntradeLoginOrigin::MODERN_UNSUPPORTED &&
+            has_cookie(cookies, "PHPSESSID");
+    }
+
+    /// \brief Explains why a modern Intrade account cannot be used here.
+    inline const char* unsupported_modern_intrade_account_reason() noexcept {
+        return
+            "Unsupported Intrade account: accounts created on "
+            "trading.intrade.bar are not supported by this API.";
+    }
+
     /// \brief Resolves a login redirect into a request path and optional origin.
     /// \param redirect_url Absolute or relative redirect URL.
     /// \return The path and origin, or empty when an absolute URL is malformed.
@@ -178,6 +363,99 @@ namespace optionx::platforms::intrade_bar {
         }
 
         return changed ? kurlyk::utils::to_cookie_string(merged) : cookies;
+    }
+
+    /// \brief Describes the next action for one login redirect response.
+    enum class LoginRedirectResponseAction {
+        FOLLOW,
+        COMPLETE_LEGACY,
+        UNSUPPORTED_MODERN,
+        FAILURE
+    };
+
+    /// \brief Result of validating one response in the login redirect chain.
+    struct LoginRedirectResponseAnalysis {
+        LoginRedirectResponseAction action = LoginRedirectResponseAction::FAILURE;
+        std::string next_origin;
+        std::optional<LoginRedirectTarget> next_target;
+        std::string cookies;
+        std::string reason;
+    };
+
+    /// \brief Analyzes one manually-followed login redirect response.
+    /// \param response HTTP response from the current redirect target.
+    /// \param origin Origin used for the current request.
+    /// \param request_cookies Cookies sent with the current request.
+    /// \return Next redirect, supported completion, unsupported modern
+    ///         completion, or a descriptive failure.
+    inline LoginRedirectResponseAnalysis analyze_login_redirect_response(
+            const kurlyk::HttpResponsePtr& response,
+            const std::string& origin,
+            const std::string& request_cookies) {
+        LoginRedirectResponseAnalysis result;
+        if (!response) {
+            result.reason = "No response received from the server.";
+            return result;
+        }
+
+        if (response->status_code >= 300 &&
+            response->status_code < 400 &&
+            !response->error_code) {
+            const auto location = response->headers.find("location");
+            if (location == response->headers.end() || location->second.empty()) {
+                result.reason = "Login redirect response had no Location header.";
+                return result;
+            }
+
+            const auto next_target = resolve_login_redirect_target(location->second);
+            if (!next_target) {
+                result.reason = "Malformed login redirect URL.";
+                return result;
+            }
+
+            result.next_origin = origin;
+            if (next_target->origin) {
+                result.next_origin = *next_target->origin;
+                if (classify_intrade_login_origin(result.next_origin) ==
+                        IntradeLoginOrigin::UNKNOWN) {
+                    result.reason = "Rejected login redirect origin.";
+                    return result;
+                }
+            }
+
+            result.action = LoginRedirectResponseAction::FOLLOW;
+            result.next_target = next_target;
+            result.cookies = merge_set_cookies(
+                request_cookies,
+                response->headers);
+            return result;
+        }
+
+        if (response->error_code || response->status_code != 200) {
+            result.reason = ::optionx::utils::describe_response_error(
+                response,
+                "Invalid HTTP response.");
+            return result;
+        }
+        if (!::optionx::utils::validate_ddos_protection(response)) {
+            result.reason = "DDoS protection detected.";
+            return result;
+        }
+
+        result.cookies = merge_set_cookies(request_cookies, response->headers);
+        if (is_authenticated_modern_intrade_session(origin, result.cookies)) {
+            result.action = LoginRedirectResponseAction::UNSUPPORTED_MODERN;
+            result.reason = unsupported_modern_intrade_account_reason();
+            return result;
+        }
+        if (classify_intrade_login_origin(origin) ==
+                IntradeLoginOrigin::MODERN_UNSUPPORTED) {
+            result.reason = "Failed to parse login cookies.";
+            return result;
+        }
+
+        result.action = LoginRedirectResponseAction::COMPLETE_LEGACY;
+        return result;
     }
 
     /// \brief Parses balance information and detects the currency.
@@ -266,6 +544,39 @@ namespace optionx::platforms::intrade_bar {
             } else if (temp.find(str_usd) != std::string::npos &&
                        temp.find("checked=\"checked\"") != std::string::npos) {
                 currency = CurrencyType::USD;
+            }
+        }
+
+        // The current authenticated profile page uses button segments instead
+        // of the retired radio divs. Read only the selected account/currency
+        // controls and keep the legacy parser above for older deployments.
+        static const std::regex button_regex(
+            R"(<button\b([^>]*)>([\s\S]*?)</button>)",
+            std::regex::icase);
+        for (std::sregex_iterator it(content.begin(), content.end(), button_regex),
+             end;
+             it != end;
+             ++it) {
+            const std::string attributes = (*it)[1].str();
+            const std::string label = (*it)[2].str();
+            if (attributes.find("aria-pressed=\"true\"") == std::string::npos) {
+                continue;
+            }
+
+            if (attributes.find("data-ui2-action=\"demo\"") != std::string::npos) {
+                if (attributes.find("data-value=\"1\"") != std::string::npos ||
+                    label.find("Demo") != std::string::npos) {
+                    account = AccountType::DEMO;
+                } else if (attributes.find("data-value=\"0\"") != std::string::npos ||
+                           label.find("Real") != std::string::npos) {
+                    account = AccountType::REAL;
+                }
+            } else if (attributes.find("data-ui2-action=\"currency\"") != std::string::npos) {
+                if (attributes.find("data-value=\"USD\"") != std::string::npos) {
+                    currency = CurrencyType::USD;
+                } else if (attributes.find("data-value=\"RUB\"") != std::string::npos) {
+                    currency = CurrencyType::RUB;
+                }
             }
         }
 
@@ -1067,6 +1378,151 @@ namespace optionx::platforms::intrade_bar {
         return trades;
     }
 
+    namespace detail {
+
+        inline std::optional<std::int64_t> terminal_state_int64(
+                const nlohmann::json& row,
+                std::initializer_list<const char*> names) {
+            for (const auto* name : names) {
+                if (!row.contains(name) || row.at(name).is_null()) continue;
+                const auto& value = row.at(name);
+                try {
+                    if (value.is_number_integer()) return value.get<std::int64_t>();
+                    if (value.is_number_unsigned()) {
+                        const auto unsigned_value = value.get<std::uint64_t>();
+                        if (unsigned_value <= static_cast<std::uint64_t>(
+                                (std::numeric_limits<std::int64_t>::max)())) {
+                            return static_cast<std::int64_t>(unsigned_value);
+                        }
+                    }
+                    if (value.is_string()) {
+                        return utils::parse_i64_strict(value.get<std::string>());
+                    }
+                } catch (...) {
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
+        }
+
+        inline std::optional<double> terminal_state_double(
+                const nlohmann::json& row,
+                std::initializer_list<const char*> names) {
+            for (const auto* name : names) {
+                if (!row.contains(name) || row.at(name).is_null()) continue;
+                const auto& value = row.at(name);
+                try {
+                    if (value.is_number()) return value.get<double>();
+                    if (value.is_string()) {
+                        return utils::parse_double_strict(value.get<std::string>());
+                    }
+                } catch (...) {
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
+        }
+
+        inline std::optional<std::string> terminal_state_string(
+                const nlohmann::json& row,
+                std::initializer_list<const char*> names) {
+            for (const auto* name : names) {
+                if (!row.contains(name) || row.at(name).is_null()) continue;
+                const auto& value = row.at(name);
+                if (value.is_string()) return value.get<std::string>();
+                if (value.is_number_integer()) {
+                    return std::to_string(value.get<std::int64_t>());
+                }
+            }
+            return std::nullopt;
+        }
+
+        inline std::int64_t terminal_state_time_ms(
+                const std::optional<std::int64_t>& value) {
+            if (!value || *value <= 0) return 0;
+            if (*value < 100000000000LL) return time_shield::sec_to_ms(*value);
+            return *value;
+        }
+
+        inline int terminal_state_status(const nlohmann::json& row) {
+            if (const auto value = terminal_state_int64(row, {"state", "status"})) {
+                if (*value < static_cast<std::int64_t>((std::numeric_limits<int>::min)()) ||
+                    *value > static_cast<std::int64_t>((std::numeric_limits<int>::max)())) {
+                    throw std::runtime_error("Intrade terminal active trade state is out of range.");
+                }
+                return static_cast<int>(*value);
+            }
+            const auto value = terminal_state_string(row, {"state", "status"});
+            if (!value) return 0;
+            if (*value == "open" || *value == "active") return 1;
+            if (*value == "closed" || *value == "settled") return 0;
+            throw std::runtime_error("Unknown Intrade terminal active trade state.");
+        }
+
+        inline int terminal_state_contract(const nlohmann::json& row) {
+            if (const auto value = terminal_state_int64(row, {"type", "contract"})) {
+                if (*value < static_cast<std::int64_t>((std::numeric_limits<int>::min)()) ||
+                    *value > static_cast<std::int64_t>((std::numeric_limits<int>::max)())) {
+                    throw std::runtime_error("Intrade terminal active trade type is out of range.");
+                }
+                return static_cast<int>(*value);
+            }
+            const auto value = terminal_state_string(row, {"type", "contract"});
+            if (!value) return 0;
+            if (*value == "sprint") return 1;
+            if (*value == "classic") return 0;
+            throw std::runtime_error("Unknown Intrade terminal active trade type.");
+        }
+
+    } // namespace detail
+
+    /// \brief Parses the JSON active-trade array returned by `terminal.state`.
+    /// \param content Raw JSON response body.
+    /// \return Active trades reported by the broker.
+    /// \throws std::runtime_error When the response is not an authoritative
+    ///         terminal state or a row lacks its identity.
+    inline std::vector<ActiveTradeInfo> parse_active_trades_terminal_state(
+            const std::string& content) {
+        const auto payload = nlohmann::json::parse(content);
+        if (!payload.is_object() || !payload.value("ok", false)) {
+            throw std::runtime_error("Intrade terminal state was not accepted by the broker.");
+        }
+        if (!payload.contains("open") || !payload.at("open").is_array()) {
+            throw std::runtime_error("Intrade terminal state does not contain an open array.");
+        }
+
+        std::vector<ActiveTradeInfo> trades;
+        const auto& open = payload.at("open");
+        trades.reserve(open.size());
+        for (const auto& row : open) {
+            if (!row.is_object()) {
+                throw std::runtime_error("Malformed Intrade terminal active trade row.");
+            }
+
+            const auto id = detail::terminal_state_int64(row, {"id", "option_id"});
+            const auto symbol = detail::terminal_state_string(row, {"name", "asset", "symbol"});
+            if (!id || *id <= 0 || !symbol || symbol->empty()) {
+                throw std::runtime_error(
+                    "Intrade terminal active trade row lacks id or symbol.");
+            }
+
+            ActiveTradeInfo trade;
+            trade.id = *id;
+            trade.symbol = *symbol;
+            if (const auto value = detail::terminal_state_double(row, {"open", "open_price"})) {
+                trade.open_price = *value;
+            }
+            trade.open_time_ms = detail::terminal_state_time_ms(
+                detail::terminal_state_int64(row, {"opened", "open_time", "time"}));
+            trade.close_time_ms = detail::terminal_state_time_ms(
+                detail::terminal_state_int64(row, {"closes", "close_time", "expiry"}));
+            trade.status = detail::terminal_state_status(row);
+            trade.contract = detail::terminal_state_contract(row);
+            trades.push_back(std::move(trade));
+        }
+        return trades;
+    }
+
     /// \brief Parses account settings switch response from the broker.
     /// \param content Raw HTTP response body.
     /// \param status_code HTTP status code.
@@ -1095,12 +1551,11 @@ namespace optionx::platforms::intrade_bar {
             content);
     }
 
-    /// \brief Extracts user_id and user_hash from a cookies string.
-    /// \param cookies The input string containing cookies.
-    /// \param user_id [out] The extracted user_id.
-    /// \param user_hash [out] The extracted user_hash.
-    /// \return True if both user_id and user_hash are found, otherwise false.
-    inline bool parse_cookies(const std::string& cookies, std::string& user_id, std::string& user_hash) {
+    /// \brief Parses a Cookie header into cookie name/value pairs.
+    /// \param cookies The input Cookie header value.
+    /// \return Parsed cookie values without attributes from Set-Cookie headers.
+    inline std::unordered_map<std::string, std::string> parse_cookie_values(
+            const std::string& cookies) {
         std::unordered_map<std::string, std::string> cookie_map;
         std::istringstream cookie_stream(cookies);
         std::string cookie;
@@ -1122,7 +1577,32 @@ namespace optionx::platforms::intrade_bar {
             }
         }
 
-        // Extract user_id and user_hash
+        return cookie_map;
+    }
+
+    /// \brief Returns one cookie value when present.
+    /// \param cookies The input Cookie header value.
+    /// \param name Cookie name to find.
+    /// \return Cookie value, or std::nullopt when absent.
+    inline std::optional<std::string> parse_cookie_value(
+            const std::string& cookies,
+            const std::string& name) {
+        const auto cookie_map = parse_cookie_values(cookies);
+        const auto it = cookie_map.find(name);
+        if (it == cookie_map.end()) return std::nullopt;
+        return it->second;
+    }
+
+    /// \brief Extracts user_id and user_hash from a cookies string.
+    /// \param cookies The input string containing cookies.
+    /// \param user_id [out] The extracted user_id.
+    /// \param user_hash [out] The extracted user_hash.
+    /// \return True if both user_id and user_hash are found, otherwise false.
+    inline bool parse_cookies(
+            const std::string& cookies,
+            std::string& user_id,
+            std::string& user_hash) {
+        const auto cookie_map = parse_cookie_values(cookies);
         auto id_it = cookie_map.find("user_id");
         auto hash_it = cookie_map.find("user_hash");
 
@@ -1136,28 +1616,7 @@ namespace optionx::platforms::intrade_bar {
     }
 
     inline std::optional<std::tuple<std::string, std::string>> parse_cookies(const std::string& cookies) {
-        std::unordered_map<std::string, std::string> cookie_map;
-        std::istringstream cookie_stream(cookies);
-        std::string cookie;
-
-        // Parse the cookies string
-        while (std::getline(cookie_stream, cookie, ';')) {
-            size_t pos = cookie.find('=');
-            if (pos != std::string::npos) {
-                std::string key = cookie.substr(0, pos);
-                std::string value = cookie.substr(pos + 1);
-
-                // Trim leading and trailing whitespace
-                key.erase(0, key.find_first_not_of(" \t"));
-                key.erase(key.find_last_not_of(" \t") + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
-                value.erase(value.find_last_not_of(" \t") + 1);
-
-                cookie_map[key] = value;
-            }
-        }
-
-        // Extract user_id and user_hash
+        const auto cookie_map = parse_cookie_values(cookies);
         auto id_it = cookie_map.find("user_id");
         auto hash_it = cookie_map.find("user_hash");
 

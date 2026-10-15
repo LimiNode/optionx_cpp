@@ -200,6 +200,52 @@ The finalizer should be static or otherwise independent of the bridge object.
 Callbacks needed by finalization should be copied from `RuntimeState` under
 lock, and callback guards should use the stable runtime identity.
 
+## Recursive Async Callback Ownership
+
+Recursive asynchronous handlers need an explicit ownership graph. Do not let a
+`std::function` or lambda own, through `std::shared_ptr`, the object that
+contains that same callback. The resulting cycle is permanent:
+
+```text
+shared_ptr handler
+  -> std::function
+    -> stored lambda
+      -> same shared_ptr handler
+```
+
+The cycle leaks the handler and everything captured by it. It is separate from
+the lifetime of a raw `this` pointer: a leaked cycle does not keep the pointed-to
+object alive, and an in-flight callback can still use a raw `this` after that
+object has been destroyed unless shutdown fencing proves otherwise.
+
+Use weak ownership in the stored recursive handler and acquire strong ownership
+only for the active asynchronous operation:
+
+```cpp
+auto handler = std::make_shared<Handler>();
+const std::weak_ptr<Handler> weak_handler = handler;
+
+*handler = [weak_handler](Args... args) {
+    const auto strong_handler = weak_handler.lock();
+    if (!strong_handler) {
+        return;
+    }
+
+    start_async([
+        strong_handler
+    ](Response response) {
+        // The next recursive call is valid while this operation owns the handler.
+        (*strong_handler)(make_next_args(response));
+    });
+};
+```
+
+For every recursive async flow, review all terminal paths: success, failure,
+cancel, timeout, and shutdown. The last strong owner must be released when no
+next operation is scheduled. Also verify the lifetime of every captured `this`:
+use shutdown cancel/drain/join or a stable lifetime guard, rather than assuming
+that an unrelated `std::shared_ptr` capture makes a raw pointer safe.
+
 ## Status Notifications
 
 `SERVER_STOPPED` is part of lifecycle finalization.
