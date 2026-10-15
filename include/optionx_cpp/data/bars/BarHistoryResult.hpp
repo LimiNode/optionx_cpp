@@ -9,25 +9,32 @@ namespace optionx {
 
     /// \struct BarHistoryResult
     /// \brief Public result DTO for broker historical bar requests.
+    /// \details `range_complete` is a provider assertion. It remains false
+    ///          unless the provider can account for the complete requested
+    ///          range, including an explicitly authoritative empty range.
     struct BarHistoryResult {
         static constexpr long NO_HTTP_STATUS = 0;      ///< No HTTP status was captured.
         static constexpr long NO_RESPONSE_STATUS = -1; ///< The request did not produce a response.
 
         bool success = false;              ///< Whether the history request succeeded.
         long status_code = NO_HTTP_STATUS; ///< HTTP status code, when available.
-        std::string error_desc;            ///< Human-readable failure reason.
-        BarSequence sequence;              ///< Historical bar sequence returned by the broker.
+        bool range_complete = false;       ///< Whether the provider proved range completeness.
+        std::string error_desc;             ///< Human-readable failure reason.
+        BarSequence sequence;               ///< Historical bar sequence returned by the broker.
 
         /// \brief Creates a successful bar-history result.
         /// \param bar_sequence Historical bars returned by the broker.
         /// \param status HTTP status code, if available.
+        /// \param complete Provider proof that the requested range is complete.
         /// \return Successful result.
         static BarHistoryResult ok(
                 BarSequence bar_sequence,
-                long status = NO_HTTP_STATUS) {
+                long status = NO_HTTP_STATUS,
+                bool complete = false) {
             BarHistoryResult result;
             result.success = true;
             result.status_code = status;
+            result.range_complete = complete;
             result.sequence = std::move(bar_sequence);
             return result;
         }

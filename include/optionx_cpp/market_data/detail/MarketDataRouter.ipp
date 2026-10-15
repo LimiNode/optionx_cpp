@@ -551,11 +551,10 @@ namespace optionx::market_data {
                         std::shared_ptr<IMarketDataSubscriber>,
                         MarketDataContinuityUpdate>>& continuity_deliveries,
                     bool push_front);
-            static bool history_covers_range(
+            static bool history_is_well_formed(
                     const BarDataBatch& batch,
                     std::uint64_t from_time_ms,
-                    std::uint64_t to_time_ms,
-                    std::uint64_t timeframe_ms) noexcept;
+                    std::uint64_t to_time_ms) noexcept;
             static bool tick_history_covers_range(
                     const TickDataBatch& batch,
                     std::uint64_t from_time_ms,
@@ -2375,29 +2374,23 @@ namespace optionx::market_data {
             }
         }
 
-        inline bool MarketDataRouterState::history_covers_range(
+        inline bool MarketDataRouterState::history_is_well_formed(
                 const BarDataBatch& batch,
                 std::uint64_t from_time_ms,
-                std::uint64_t to_time_ms,
-                std::uint64_t timeframe_ms) noexcept {
-            if (from_time_ms == 0 ||
-                to_time_ms < from_time_ms ||
-                timeframe_ms == 0) {
-                return false;
-            }
+                std::uint64_t to_time_ms) noexcept {
+            if (from_time_ms == 0 || to_time_ms < from_time_ms) return false;
 
-            auto expected_time_ms = from_time_ms;
+            std::uint64_t previous_time_ms = 0;
             for (const auto& bar : batch.items) {
-                if (bar.time_ms < expected_time_ms) continue;
-                if (bar.time_ms != expected_time_ms) return false;
-                if (expected_time_ms == to_time_ms) return true;
-                if (expected_time_ms >
-                    std::numeric_limits<std::uint64_t>::max() - timeframe_ms) {
+                if (bar.time_ms == 0 ||
+                    bar.time_ms < from_time_ms ||
+                    bar.time_ms > to_time_ms ||
+                    (previous_time_ms != 0 && bar.time_ms <= previous_time_ms)) {
                     return false;
                 }
-                expected_time_ms += timeframe_ms;
+                previous_time_ms = bar.time_ms;
             }
-            return false;
+            return true;
         }
 
         inline void MarketDataRouterState::clip_history_to_range(
@@ -2804,6 +2797,8 @@ namespace optionx::market_data {
             BarDataBatch history_batch;
             bool has_history_batch = false;
             bool history_stream_matches = false;
+            bool history_response_valid = false;
+            const bool history_range_complete = result.range_complete;
             if (history_success) {
                 history_batch = *MarketDataContinuityService::make_bar_batch(
                     std::move(result.sequence),
@@ -2820,6 +2815,14 @@ namespace optionx::market_data {
                             from_time_ms,
                             to_time_ms);
                     }
+                    history_response_valid = history_is_well_formed(
+                        history_batch,
+                        kind == ContinuityRequestKind::PREFILL
+                            ? 1U
+                            : from_time_ms,
+                        kind == ContinuityRequestKind::PREFILL
+                            ? (std::numeric_limits<std::uint64_t>::max)()
+                            : to_time_ms);
                     std::lock_guard<std::mutex> lock(m_mutex);
                     const auto entry_it = m_entries.find(router_id);
                     if (entry_it == m_entries.end() ||
@@ -2828,19 +2831,19 @@ namespace optionx::market_data {
                         return;
                     }
                     delivered_history_items = history_batch.items.size();
-                    has_history_batch = !history_batch.items.empty();
+                    has_history_batch = history_response_valid &&
+                        !history_batch.items.empty();
                 }
             }
 
             const bool recovery_requires_full_range =
                 kind != ContinuityRequestKind::PREFILL;
+            const bool history_proves_range = history_success &&
+                history_stream_matches &&
+                history_response_valid &&
+                history_range_complete;
             const bool history_covers_recovery_range =
-                !recovery_requires_full_range ||
-                history_covers_range(
-                    history_batch,
-                    from_time_ms,
-                    to_time_ms,
-                    timeframe_ms);
+                !recovery_requires_full_range || history_proves_range;
             if (recovery_requires_full_range &&
                 !history_covers_recovery_range) {
                 // Do not expose a partial recovery response as trusted history.
@@ -2848,11 +2851,7 @@ namespace optionx::market_data {
                 has_history_batch = false;
                 delivered_history_items = 0;
             }
-            const bool usable_history = history_success &&
-                history_stream_matches &&
-                (kind == ContinuityRequestKind::PREFILL ||
-                 delivered_history_items > 0) &&
-                history_covers_recovery_range;
+            const bool usable_history = history_proves_range;
             std::uint64_t confirmed_from_time_ms = 0;
             std::uint64_t confirmed_to_time_ms = 0;
             for (const auto& bar : history_batch.items) {
@@ -2937,17 +2936,12 @@ namespace optionx::market_data {
                 const auto& entry = entry_it->second;
                 if (kind == ContinuityRequestKind::PREFILL) {
                     entry->continuity_state.initial_prefill_pending = false;
-                    start_reconnect_after_prefill =
-                        usable_history &&
-                        entry->continuity.recovers_gaps() &&
-                        entry->continuity_state.unverified_from_time_ms != 0;
-                    if (start_reconnect_after_prefill) {
-                        entry->continuity_state.phase =
-                            MarketDataContinuityPhase::RECOVERING;
-                    }
                 }
-                if (!usable_history) {
+                if (!usable_history &&
+                    entry->continuity_state.unverified_from_time_ms == 0) {
                     mark_unverified_no_lock(entry, from_time_ms);
+                    ++entry->continuity_state.failure_count;
+                } else if (!usable_history) {
                     ++entry->continuity_state.failure_count;
                 } else {
                     if (delivered_history_items == 0) {
@@ -2974,6 +2968,15 @@ namespace optionx::market_data {
                             has_more_reconnect_history);
                     }
                 }
+                start_reconnect_after_prefill =
+                    kind == ContinuityRequestKind::PREFILL &&
+                    history_response_valid &&
+                    entry->continuity.recovers_gaps() &&
+                    entry->continuity_state.unverified_from_time_ms != 0;
+                if (start_reconnect_after_prefill) {
+                    entry->continuity_state.phase =
+                        MarketDataContinuityPhase::RECOVERING;
+                }
             }
 
             if (!usable_history) {
@@ -2991,7 +2994,11 @@ namespace optionx::market_data {
                                 ? "Historical market-data continuity request failed."
                                 : !history_stream_matches
                                 ? "Historical bar response does not match the subscribed stream."
-                                : recovery_requires_full_range
+                            : !history_response_valid
+                            ? "Historical bar response is outside the requested range, unordered, or duplicated."
+                            : !history_range_complete
+                            ? "Historical bars do not prove the requested range is complete."
+                            : recovery_requires_full_range
                                 ? "Historical bars do not cover the requested recovery range."
                                 : "No historical bars were returned for prefill.")
                             : result.error_desc));

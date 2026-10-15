@@ -295,6 +295,12 @@ namespace optionx::market_data {
 
     public:
         /// \brief Requests historical bar data for a specified time range.
+        /// \details A successful `BarHistoryResult` carries an explicit
+        ///          `range_complete` provider assertion. Returned bars alone,
+        ///          including a non-empty or dense-looking sequence, do not
+        ///          prove continuity. A session-aware provider may set it for a
+        ///          sparse or empty range only when its own contract proves that
+        ///          the missing intervals are closed-market time.
         /// \param request Historical bar-data request parameters.
         /// \param callback Callback function to receive bars or a failure reason.
         /// \return True if the request was accepted for processing; false otherwise.

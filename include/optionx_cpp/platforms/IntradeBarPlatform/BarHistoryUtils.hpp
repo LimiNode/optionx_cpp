@@ -157,6 +157,57 @@ namespace optionx::platforms::intrade_bar {
         return chunks;
     }
 
+    /// \brief Checks a response against a dense bar-history request.
+    /// \details This proves only a dense timeframe grid. It deliberately does
+    ///          not infer that missing timestamps belong to a closed session.
+    /// \param sequence Parsed bars returned for the request.
+    /// \param request Original public history request.
+    /// \return True when every requested dense slot is present exactly once.
+    inline bool bar_sequence_covers_dense_range(
+            const BarSequence& sequence,
+            const BarHistoryRequest& request) noexcept {
+        if (request.symbol.empty() ||
+            request.timeframe <= 0 ||
+            request.from_ts <= 0 ||
+            request.to_ts < request.from_ts ||
+            sequence.timeframe != request.timeframe ||
+            sequence.symbol.empty() ||
+            normalize_symbol_name(sequence.symbol) != normalize_symbol_name(request.symbol)) {
+            return false;
+        }
+
+        const auto from_ts = static_cast<std::uint64_t>(request.from_ts);
+        const auto to_ts = static_cast<std::uint64_t>(request.to_ts);
+        const auto timeframe = static_cast<std::uint64_t>(request.timeframe);
+        if (timeframe == 0 ||
+            from_ts > (std::numeric_limits<std::uint64_t>::max)() / 1000U ||
+            to_ts > (std::numeric_limits<std::uint64_t>::max)() / 1000U) {
+            return false;
+        }
+
+        auto expected_time_ms = from_ts * 1000U;
+        const auto end_time_ms = to_ts * 1000U;
+        const auto step_ms = timeframe >
+                (std::numeric_limits<std::uint64_t>::max)() / 1000U
+            ? 0U
+            : timeframe * 1000U;
+        if (step_ms == 0 || sequence.bars.empty()) return false;
+
+        for (std::size_t index = 0; index < sequence.bars.size(); ++index) {
+            const auto& bar = sequence.bars[index];
+            if (bar.time_ms != expected_time_ms) return false;
+            if (expected_time_ms == end_time_ms) {
+                return index + 1 == sequence.bars.size();
+            }
+            if (expected_time_ms >
+                (std::numeric_limits<std::uint64_t>::max)() - step_ms) {
+                return false;
+            }
+            expected_time_ms += step_ms;
+        }
+        return false;
+    }
+
 } // namespace optionx::platforms::intrade_bar
 
 #endif // OPTIONX_HEADER_PLATFORMS_INTRADE_BAR_PLATFORM_BAR_HISTORY_UTILS_HPP_INCLUDED
