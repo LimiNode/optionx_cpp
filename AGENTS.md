@@ -121,6 +121,17 @@ supported public entry point or an internal leaf:
   manager или provider.
 - В async/HTTP/WebSocket коде сохраняй lifecycle: `run()` -> periodic
   `process()` -> `shutdown()`/drain/cancel.
+- В recursive async/HTTP callbacks проверяй ownership graph. `lambda` или
+  `std::function` не должна через `std::shared_ptr` владеть объектом, который
+  содержит эту же callback-функцию: это создаёт постоянный reference cycle.
+  Для self-reference храни `std::weak_ptr`, а strong ownership удерживай
+  только на время конкретной in-flight операции. Проверь освобождение на
+  success, failure, cancel и timeout и добавь regression/lifetime test.
+- `raw this` в delayed/in-flight callback допустим только при явно доказанном
+  owner lifecycle: shutdown должен cancel/drain/join такие callbacks до
+  уничтожения owner либо callback должен иметь stable lifetime guard. Наличие
+  другого `std::shared_ptr` в callback само по себе не продлевает lifetime
+  объекта, на который указывает `raw this`.
 - Для публичных headers сохраняй Doxygen `///` с `\file`, `\class`, `\brief`.
 - Для code changes запускай самые узкие релевантные tests/examples; для
   documentation-only изменений достаточно Markdown/link smoke-check.
