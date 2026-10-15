@@ -1086,6 +1086,29 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     platform.shutdown();
 }
 
+TEST(IntradeBarLogin, CachedModernSessionRoundTripRetainsUserId) {
+    auto& session_db = optionx::storage::ServiceSessionDB::get_instance();
+    const std::string platform = to_str(PlatformType::INTRADE_BAR);
+    const std::string email = "modern-session-roundtrip@example.test";
+    const std::string cookies = "PHPSESSID=fake_session; ui=demo";
+
+    session_db.remove_session(platform, email);
+    ASSERT_TRUE(session_db.set_session_value(
+        platform,
+        email,
+        serialize_cached_auth_session("866188", cookies)));
+
+    const auto stored = session_db.get_session_value(platform, email);
+    ASSERT_TRUE(stored.has_value());
+    const auto parsed = parse_cached_auth_session(*stored);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->user_id, "866188");
+    EXPECT_EQ(parsed->cookies, cookies);
+
+    session_db.remove_session(platform, email);
+    EXPECT_FALSE(parse_cached_auth_session(cookies).has_value());
+}
+
 TEST(IntradeBarLogin, ParsesOpaqueJavaScriptRedirectWithEitherQuoteStyle) {
     const auto single_quoted = parse_login_redirect_url(
         "<script>window.location.replace('https://intrade35.bar/auth/opaque-token')</script>");

@@ -35,7 +35,9 @@ Used by `AuthManager` for `AuthMethod::EMAIL_PASSWORD`.
    cookies remain supported; modern sessions may contain only `PHPSESSID`,
    with the JSON `userID` retained as the account identity hint. Legacy
    deployments continue through `request_login` -> `request_auth`.
-6. Store the returned session cookies in `ServiceSessionDB`.
+6. Store the returned session in `ServiceSessionDB` as a versioned envelope
+   containing both the complete cookie jar and the JSON `userID`. Older
+   plain-cookie records remain readable for backward compatibility.
 7. Continue with:
    `request_profile` -> optional `request_switch_account_type` ->
    optional `request_switch_currency` -> `request_balance`.

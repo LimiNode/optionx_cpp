@@ -7,6 +7,47 @@
 
 namespace optionx::platforms::intrade_bar {
 
+    /// \brief Versioned data stored for a modern Intrade session cache.
+    struct CachedAuthSession {
+        std::string user_id;
+        std::string cookies;
+    };
+
+    /// \brief Serializes the modern session identity together with its cookies.
+    /// \details Older builds stored only the cookie header. Keeping the user ID
+    /// in the same envelope is required when the broker returns PHPSESSID-only
+    /// cookies, because legacy endpoints still require the numeric user ID.
+    inline std::string serialize_cached_auth_session(
+            const std::string& user_id,
+            const std::string& cookies) {
+        return nlohmann::json{
+            {"version", 1},
+            {"user_id", user_id},
+            {"cookies", cookies}
+        }.dump();
+    }
+
+    /// \brief Parses a versioned session envelope.
+    /// \return Parsed session data, or std::nullopt for the legacy plain-cookie format.
+    inline std::optional<CachedAuthSession> parse_cached_auth_session(
+            const std::string& value) {
+        try {
+            const auto envelope = nlohmann::json::parse(value);
+            if (!envelope.is_object() ||
+                envelope.value("version", 0) != 1 ||
+                !envelope.contains("cookies") ||
+                !envelope.at("cookies").is_string()) {
+                return std::nullopt;
+            }
+
+            return CachedAuthSession{
+                envelope.value("user_id", std::string()),
+                envelope.at("cookies").get<std::string>()};
+        } catch (const nlohmann::json::exception&) {
+            return std::nullopt;
+        }
+    }
+
     /// \class AuthManager
     /// \brief Manages the authentication process for the Intrade Bar platform.
     /// \details Handles user authentication, session management, and account information updates.
@@ -383,7 +424,7 @@ namespace optionx::platforms::intrade_bar {
         storage::ServiceSessionDB::get_instance().set_session_value(
             to_str(PlatformType::INTRADE_BAR),
             m_auth_data->email,
-            session_cookies);
+            serialize_cached_auth_session(user_id, session_cookies));
         m_request_manager.set_auth_credentials(user_id, user_hash, session_cookies);
         set_account_user_id(user_id);
     }
@@ -394,7 +435,7 @@ namespace optionx::platforms::intrade_bar {
         storage::ServiceSessionDB::get_instance().set_session_value(
             to_str(PlatformType::INTRADE_BAR),
             m_auth_data->email,
-            cookies);
+            serialize_cached_auth_session(user_id, cookies));
         m_request_manager.set_auth_session(user_id, cookies);
         if (!user_id.empty()) {
             set_account_user_id(user_id);
@@ -706,8 +747,16 @@ namespace optionx::platforms::intrade_bar {
         LOGIT_INFO("Intrade Bar auth: saved session found, validating it.");
         LOGIT_TRACE("Session retrieved for configured Intrade Bar account.");
 
-        // Set cookies from the session
-        std::string cookies = *session;
+        // Set cookies from the session. Current values use a versioned
+        // envelope so PHPSESSID-only sessions retain the JSON user ID;
+        // older installations continue to provide a plain cookie string.
+        const auto cached_session = parse_cached_auth_session(*session);
+        std::string cookies = cached_session
+            ? cached_session->cookies
+            : *session;
+        const std::string cached_user_id = cached_session
+            ? cached_session->user_id
+            : std::string();
         auto parsed_data = parse_cookies(cookies);
 
         if (parsed_data) {
@@ -735,7 +784,9 @@ namespace optionx::platforms::intrade_bar {
             // Modern trading login sessions contain PHPSESSID rather than the
             // retired user_id/user_hash cookie pair.
             LOGIT_INFO("Intrade Bar auth: saved trading session found, validating it.");
-            const auto user_id = parse_cookie_value(cookies, "user_id").value_or(std::string());
+            const auto user_id = !cached_user_id.empty()
+                ? cached_user_id
+                : parse_cookie_value(cookies, "user_id").value_or(std::string());
             m_request_manager.set_auth_session(user_id, cookies);
             set_account_user_id(user_id);
             start_authentication(
