@@ -93,7 +93,10 @@ public:
         sequence.volume_digits = 0;
         sequence.price_source = optionx::BarPriceSource::MID;
         sequence.bars = std::move(bars);
-        callback(optionx::BarHistoryResult::ok(std::move(sequence)));
+        callback(optionx::BarHistoryResult::ok(
+            std::move(sequence),
+            optionx::BarHistoryResult::NO_HTTP_STATUS,
+            true));
     }
 
 private:

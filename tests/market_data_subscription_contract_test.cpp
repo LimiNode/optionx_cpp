@@ -22,7 +22,10 @@ public:
         last_request = request;
         if (callback) {
             if (next_result) {
-                callback(BarHistoryResult::ok(next_sequence, next_result.status_code));
+                callback(BarHistoryResult::ok(
+                    next_sequence,
+                    next_result.status_code,
+                    next_result.range_complete));
             } else {
                 callback(next_result);
             }
@@ -80,6 +83,24 @@ TEST(BarSubscriptionRequest, BuildsAndValidatesBarRequests) {
     EXPECT_FALSE(BarSubscriptionRequest("EUR/USD", 0).valid());
     EXPECT_FALSE(BarSubscriptionRequest("EUR/USD", -16).valid());
     EXPECT_FALSE(BarSubscriptionRequest("", 60).valid());
+}
+
+TEST(BarHistoryResult, RequiresExplicitCompletenessProof) {
+    const auto sequence = BarSequence{};
+
+    const auto default_result = BarHistoryResult::ok(sequence);
+    EXPECT_TRUE(default_result);
+    EXPECT_FALSE(default_result.range_complete);
+
+    const auto complete_result = BarHistoryResult::ok(sequence, 200, true);
+    EXPECT_TRUE(complete_result);
+    EXPECT_TRUE(complete_result.range_complete);
+    EXPECT_EQ(complete_result.status_code, 200);
+
+    const auto legacy_status_result = BarHistoryResult::ok(sequence, 206);
+    EXPECT_TRUE(legacy_status_result);
+    EXPECT_FALSE(legacy_status_result.range_complete);
+    EXPECT_EQ(legacy_status_result.status_code, 206);
 }
 
 TEST(MarketDataSubscriptionHandle, BuildsTickAndBarHandlesAndReportsValidity) {
@@ -476,7 +497,7 @@ TEST(MarketDataBatch, CarriesSharedStreamMetadata) {
 
 TEST(MarketDataContinuityService, RoutesHistoricalBarsAsBackfillBatch) {
     FakeHistoryProvider provider;
-    provider.next_result = BarHistoryResult::ok(BarSequence{}, 200);
+    provider.next_result = BarHistoryResult::ok(BarSequence{}, 200, true);
     provider.next_sequence.symbol = "EURUSD";
     provider.next_sequence.provider = "fake";
     provider.next_sequence.timeframe = 60;
@@ -502,7 +523,7 @@ TEST(MarketDataContinuityService, RoutesHistoricalBarsAsBackfillBatch) {
     std::unique_ptr<BarDataBatch> delivered;
     MarketDataContinuityService service(provider);
     const bool accepted = service.request_bar_history_batch(
-        BarHistoryRequest("EUR/USD", 60, 1000, 2000, BarPriceSource::MID),
+        BarHistoryRequest("EURUSD", 60, 1, 2, BarPriceSource::MID),
         handle,
         [&delivered](std::unique_ptr<BarDataBatch> batch) {
             delivered = std::move(batch);

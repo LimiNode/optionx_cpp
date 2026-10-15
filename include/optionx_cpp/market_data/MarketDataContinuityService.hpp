@@ -106,13 +106,16 @@ namespace optionx::market_data {
         /// \param callback Batch callback used by the consumer pipeline.
         /// \param error_callback Optional callback for typed fetch failures.
         /// \param backfill_marks Whether to add the BACKFILL flag in addition to HISTORICAL.
+        /// \param require_complete_range Whether incomplete provider history
+        ///        should be rejected instead of delivered as observations.
         /// \return True if the provider accepted the history request.
         bool request_bar_history_batch(
                 BarHistoryRequest request,
                 MarketDataSubscriptionHandle subscription,
                 BaseMarketDataProvider::bars_callback_t callback,
                 error_callback_t error_callback = nullptr,
-                bool backfill_marks = true) {
+                bool backfill_marks = true,
+                bool require_complete_range = true) {
             if (!callback) return false;
 
             const auto callback_request = request;
@@ -122,10 +125,29 @@ namespace optionx::market_data {
                  subscription = std::move(subscription),
                  callback = std::move(callback),
                  error_callback = std::move(error_callback),
-                 backfill_marks](BarHistoryResult result) mutable {
+                 backfill_marks,
+                 require_complete_range](BarHistoryResult result) mutable {
                     if (!result) {
                         if (error_callback) {
                             error_callback(std::move(result));
+                        }
+                        return;
+                    }
+
+                    if (require_complete_range && !result.range_complete) {
+                        if (error_callback) {
+                            error_callback(BarHistoryResult::fail(
+                                "Historical bar response does not prove the requested range is complete.",
+                                result.status_code));
+                        }
+                        return;
+                    }
+
+                    if (!bars_fit_request(result.sequence, request)) {
+                        if (error_callback) {
+                            error_callback(BarHistoryResult::fail(
+                                "Historical bar response is outside the requested range, unordered, or duplicated.",
+                                result.status_code));
                         }
                         return;
                     }
@@ -273,6 +295,32 @@ namespace optionx::market_data {
         }
 
     private:
+        static bool bars_fit_request(
+                const BarSequence& sequence,
+                const BarHistoryRequest& request) noexcept {
+            if (sequence.timeframe > 0 && sequence.timeframe != request.timeframe) {
+                return false;
+            }
+
+            const auto from_ms = safe_multiply(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(0, request.from_ts)),
+                1000U);
+            const auto to_ms = safe_multiply(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(0, request.to_ts)),
+                1000U);
+            std::uint64_t previous_time_ms = 0;
+            for (const auto& bar : sequence.bars) {
+                if (bar.time_ms == 0 ||
+                    bar.time_ms < from_ms ||
+                    bar.time_ms > to_ms ||
+                    (previous_time_ms != 0 && bar.time_ms <= previous_time_ms)) {
+                    return false;
+                }
+                previous_time_ms = bar.time_ms;
+            }
+            return true;
+        }
+
         static bool ticks_fit_range(
                 const TickSequence& sequence,
                 std::uint64_t from_time_ms,

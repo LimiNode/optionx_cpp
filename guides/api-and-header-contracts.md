@@ -287,6 +287,11 @@ Contract rules:
   physical streams.
 - Historical bars use `BarHistoryResult` so callers can distinguish an empty
   successful range from transport, validation or parser failures.
+- `BarHistoryResult::range_complete` is a fail-closed provider assertion. A
+  dense provider may set it after proving every requested timeframe slot; a
+  session-aware provider may set it for sparse or empty ranges only when its
+  own contract proves that the missing intervals are closed-market time. The
+  returned bar count never implies completeness.
 - `MarketDataContinuityService` is the thin helper for routing recovered history
   into the same bar batch pipeline. It marks payload bars as
   `HISTORICAL` and, for gap recovery, `BACKFILL`.

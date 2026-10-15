@@ -142,11 +142,16 @@ namespace optionx::platforms {
             if (!callback) return false;
             m_request_manager.request_bar_history_result(
                 request,
-                [callback = std::move(callback)](intrade_bar::BarHistoryApiResult result) {
+                [callback = std::move(callback), request](intrade_bar::BarHistoryApiResult result) {
                     if (result) {
+                        const auto range_complete =
+                            intrade_bar::bar_sequence_covers_dense_range(
+                                result.value,
+                                request);
                         callback(BarHistoryResult::ok(
                             std::move(result.value),
-                            result.status_code));
+                            result.status_code,
+                            range_complete));
                         return;
                     }
                     callback(BarHistoryResult::fail(

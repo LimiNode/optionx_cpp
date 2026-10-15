@@ -15,6 +15,7 @@ namespace market_data_continuity_test_clock {
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,6 +26,45 @@ using namespace optionx;
 using namespace optionx::market_data;
 
 namespace {
+
+bool dense_bar_history_complete(
+        const BarSequence& sequence,
+        const BarHistoryRequest& request) {
+    if (sequence.bars.empty() ||
+        sequence.timeframe != request.timeframe ||
+        request.from_ts <= 0 ||
+        request.to_ts < request.from_ts) {
+        return false;
+    }
+
+    const auto expected_count = static_cast<std::uint64_t>(
+        request.to_ts - request.from_ts) /
+        static_cast<std::uint64_t>(request.timeframe) + 1U;
+    // Older continuity fixtures use an arbitrary timestamp for a one-slot
+    // prefill. The provider still proves the requested one-slot response.
+    if (expected_count == 1U && sequence.bars.size() == 1U) return true;
+
+    std::vector<std::uint64_t> in_range_times;
+    for (const auto& bar : sequence.bars) {
+        if (bar.time_ms >= static_cast<std::uint64_t>(request.from_ts) * 1000U &&
+            bar.time_ms <= static_cast<std::uint64_t>(request.to_ts) * 1000U) {
+            in_range_times.push_back(bar.time_ms);
+        }
+    }
+    if (in_range_times.size() != expected_count) return false;
+
+    auto expected_time_ms = static_cast<std::uint64_t>(request.from_ts) * 1000U;
+    const auto end_time_ms = static_cast<std::uint64_t>(request.to_ts) * 1000U;
+    const auto step_ms = static_cast<std::uint64_t>(request.timeframe) * 1000U;
+    for (std::size_t index = 0; index < in_range_times.size(); ++index) {
+        if (in_range_times[index] != expected_time_ms) return false;
+        if (expected_time_ms == end_time_ms) {
+            return index + 1 == in_range_times.size();
+        }
+        expected_time_ms += step_ms;
+    }
+    return false;
+}
 
 class OwnerQueue {
 public:
@@ -107,20 +147,32 @@ public:
         history_requests.push_back(request);
         if (reject_history) return false;
         m_history_callbacks.push_back(std::move(callback));
+        m_pending_history_requests.push_back(request);
         return true;
     }
 
-    void complete_history(BarSequence sequence) {
+    void complete_history(
+            BarSequence sequence,
+            std::optional<bool> range_complete = std::nullopt) {
         ASSERT_FALSE(m_history_callbacks.empty());
         auto callback = std::move(m_history_callbacks.front());
         m_history_callbacks.pop_front();
-        callback(BarHistoryResult::ok(std::move(sequence)));
+        ASSERT_FALSE(m_pending_history_requests.empty());
+        const auto complete = range_complete.value_or(
+            dense_bar_history_complete(sequence, m_pending_history_requests.front()));
+        m_pending_history_requests.pop_front();
+        callback(BarHistoryResult::ok(
+            std::move(sequence),
+            BarHistoryResult::NO_HTTP_STATUS,
+            complete));
     }
 
     void fail_history(std::string message) {
         ASSERT_FALSE(m_history_callbacks.empty());
         auto callback = std::move(m_history_callbacks.front());
         m_history_callbacks.pop_front();
+        ASSERT_FALSE(m_pending_history_requests.empty());
+        m_pending_history_requests.pop_front();
         callback(BarHistoryResult::fail(std::move(message)));
     }
 
@@ -170,6 +222,7 @@ private:
     SubscriptionId m_next_subscription_id = 1;
     MarketDataSubscriptionHandle m_active_subscription;
     std::deque<bar_history_callback_t> m_history_callbacks;
+    std::deque<BarHistoryRequest> m_pending_history_requests;
     bars_callback_t m_bar_callback;
     ticks_callback_t m_tick_callback;
     status_callback_t m_status_callback;
@@ -501,6 +554,86 @@ TEST(MarketDataContinuity, RecoversTimestampGapBeforeReleasingLiveBatch) {
     EXPECT_EQ(
         subscriber->continuity[3].subscription.id,
         route.provider_subscription().id);
+}
+
+TEST(MarketDataContinuity, AcceptsSparseSessionRangeOnlyWithProviderProof) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({60000}));
+
+    provider.emit_live_bar(300000);
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    EXPECT_EQ(provider.history_requests[1].from_ts, 120);
+    EXPECT_EQ(provider.history_requests[1].to_ts, 240);
+
+    provider.complete_history(
+        make_history({120000, 240000}),
+        true);
+
+    ASSERT_EQ(subscriber->bars.size(), 3U);
+    EXPECT_EQ(subscriber->bars[1].items.front().time_ms, 120000U);
+    EXPECT_EQ(subscriber->bars[1].items.back().time_ms, 240000U);
+    EXPECT_EQ(subscriber->bars[2].items.front().time_ms, 300000U);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
+}
+
+TEST(MarketDataContinuity, DoesNotTreatSparseSessionRangeAsCompleteWithoutProof) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL_AND_RECOVER));
+    ASSERT_TRUE(route.active());
+    provider.complete_history(make_history({60000}));
+
+    provider.emit_live_bar(300000);
+    ASSERT_EQ(provider.history_requests.size(), 2U);
+    provider.complete_history(make_history({120000, 240000}));
+
+    ASSERT_EQ(subscriber->bars.size(), 2U);
+    EXPECT_EQ(subscriber->bars.front().items.front().time_ms, 60000U);
+    EXPECT_EQ(subscriber->bars.back().items.front().time_ms, 300000U);
+    ASSERT_GE(subscriber->continuity.size(), 2U);
+    EXPECT_EQ(
+        subscriber->continuity[subscriber->continuity.size() - 2].status,
+        MarketDataContinuityStatus::FAILED);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+}
+
+TEST(MarketDataContinuity, AcceptsAuthoritativeEmptyPrefill) {
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+
+    auto route = router.subscribe_bars(
+        provider,
+        subscriber,
+        continuity_request(MarketDataContinuityMode::PREFILL));
+    ASSERT_TRUE(route.active());
+    provider.emit_live_bar(300000);
+    ASSERT_TRUE(subscriber->bars.empty());
+
+    provider.complete_history({}, true);
+
+    ASSERT_EQ(subscriber->bars.size(), 1U);
+    expect_live_delivery(subscriber->bars.front().items.front(), true);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
 }
 
 TEST(MarketDataContinuity, RejectsGapHistoryMissingRangeStart) {
