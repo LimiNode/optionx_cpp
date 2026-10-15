@@ -365,6 +365,99 @@ namespace optionx::platforms::intrade_bar {
         return changed ? kurlyk::utils::to_cookie_string(merged) : cookies;
     }
 
+    /// \brief Describes the next action for one login redirect response.
+    enum class LoginRedirectResponseAction {
+        FOLLOW,
+        COMPLETE_LEGACY,
+        UNSUPPORTED_MODERN,
+        FAILURE
+    };
+
+    /// \brief Result of validating one response in the login redirect chain.
+    struct LoginRedirectResponseAnalysis {
+        LoginRedirectResponseAction action = LoginRedirectResponseAction::FAILURE;
+        std::string next_origin;
+        std::optional<LoginRedirectTarget> next_target;
+        std::string cookies;
+        std::string reason;
+    };
+
+    /// \brief Analyzes one manually-followed login redirect response.
+    /// \param response HTTP response from the current redirect target.
+    /// \param origin Origin used for the current request.
+    /// \param request_cookies Cookies sent with the current request.
+    /// \return Next redirect, supported completion, unsupported modern
+    ///         completion, or a descriptive failure.
+    inline LoginRedirectResponseAnalysis analyze_login_redirect_response(
+            const kurlyk::HttpResponsePtr& response,
+            const std::string& origin,
+            const std::string& request_cookies) {
+        LoginRedirectResponseAnalysis result;
+        if (!response) {
+            result.reason = "No response received from the server.";
+            return result;
+        }
+
+        if (response->status_code >= 300 &&
+            response->status_code < 400 &&
+            !response->error_code) {
+            const auto location = response->headers.find("location");
+            if (location == response->headers.end() || location->second.empty()) {
+                result.reason = "Login redirect response had no Location header.";
+                return result;
+            }
+
+            const auto next_target = resolve_login_redirect_target(location->second);
+            if (!next_target) {
+                result.reason = "Malformed login redirect URL.";
+                return result;
+            }
+
+            result.next_origin = origin;
+            if (next_target->origin) {
+                result.next_origin = *next_target->origin;
+                if (classify_intrade_login_origin(result.next_origin) ==
+                        IntradeLoginOrigin::UNKNOWN) {
+                    result.reason = "Rejected login redirect origin.";
+                    return result;
+                }
+            }
+
+            result.action = LoginRedirectResponseAction::FOLLOW;
+            result.next_target = next_target;
+            result.cookies = merge_set_cookies(
+                request_cookies,
+                response->headers);
+            return result;
+        }
+
+        if (response->error_code || response->status_code != 200) {
+            result.reason = ::optionx::utils::describe_response_error(
+                response,
+                "Invalid HTTP response.");
+            return result;
+        }
+        if (!::optionx::utils::validate_ddos_protection(response)) {
+            result.reason = "DDoS protection detected.";
+            return result;
+        }
+
+        result.cookies = merge_set_cookies(request_cookies, response->headers);
+        if (is_authenticated_modern_intrade_session(origin, result.cookies)) {
+            result.action = LoginRedirectResponseAction::UNSUPPORTED_MODERN;
+            result.reason = unsupported_modern_intrade_account_reason();
+            return result;
+        }
+        if (classify_intrade_login_origin(origin) ==
+                IntradeLoginOrigin::MODERN_UNSUPPORTED) {
+            result.reason = "Failed to parse login cookies.";
+            return result;
+        }
+
+        result.action = LoginRedirectResponseAction::COMPLETE_LEGACY;
+        return result;
+    }
+
     /// \brief Parses balance information and detects the currency.
     /// \param content Raw HTML fragment containing the balance value and currency symbol.
     /// \return Optional pair of balance amount and detected currency type. Returns

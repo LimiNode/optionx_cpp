@@ -981,6 +981,87 @@ TEST(IntradeBarLogin, ParsesModernTradingLoginResponse) {
     EXPECT_EQ(failure->error, "Invalid credentials");
 }
 
+TEST(IntradeBarLogin, AnalyzesLegacyModernAndUnknownRedirectChains) {
+    const auto legacy_redirect = std::make_unique<kurlyk::HttpResponse>();
+    legacy_redirect->status_code = 302;
+    legacy_redirect->headers.emplace("Location", "/profile");
+    legacy_redirect->headers.emplace(
+        "Set-Cookie",
+        "user_id=866188; Path=/; HttpOnly");
+
+    const auto legacy_step = analyze_login_redirect_response(
+        legacy_redirect,
+        "https://intrade35.bar",
+        "challenge=fake");
+    ASSERT_EQ(
+        legacy_step.action,
+        LoginRedirectResponseAction::FOLLOW);
+    ASSERT_TRUE(legacy_step.next_target);
+    EXPECT_EQ(legacy_step.next_origin, "https://intrade35.bar");
+    EXPECT_EQ(legacy_step.next_target->path, "/profile");
+    EXPECT_TRUE(has_cookie(legacy_step.cookies, "user_id"));
+
+    const auto legacy_final = std::make_unique<kurlyk::HttpResponse>();
+    legacy_final->status_code = 200;
+    legacy_final->headers.emplace(
+        "Set-Cookie",
+        "user_hash=fake_user_hash; Path=/; HttpOnly");
+    const auto legacy_result = analyze_login_redirect_response(
+        legacy_final,
+        legacy_step.next_origin,
+        legacy_step.cookies);
+    EXPECT_EQ(
+        legacy_result.action,
+        LoginRedirectResponseAction::COMPLETE_LEGACY);
+    EXPECT_TRUE(parse_cookies(legacy_result.cookies).has_value());
+
+    const auto modern_redirect = std::make_unique<kurlyk::HttpResponse>();
+    modern_redirect->status_code = 302;
+    modern_redirect->headers.emplace(
+        "Location",
+        "https://trading.intrade.bar/auth/t=opaque");
+    const auto modern_step = analyze_login_redirect_response(
+        modern_redirect,
+        "https://intrade35.bar",
+        "challenge=fake");
+    ASSERT_EQ(
+        modern_step.action,
+        LoginRedirectResponseAction::FOLLOW);
+    ASSERT_TRUE(modern_step.next_target);
+    EXPECT_EQ(modern_step.next_origin, "https://trading.intrade.bar");
+    EXPECT_EQ(modern_step.next_target->path, "/auth/t=opaque");
+
+    const auto modern_final = std::make_unique<kurlyk::HttpResponse>();
+    modern_final->status_code = 200;
+    modern_final->headers.emplace(
+        "Set-Cookie",
+        "PHPSESSID=fake_session; Path=/; HttpOnly");
+    const auto modern_result = analyze_login_redirect_response(
+        modern_final,
+        modern_step.next_origin,
+        modern_step.cookies);
+    EXPECT_EQ(
+        modern_result.action,
+        LoginRedirectResponseAction::UNSUPPORTED_MODERN);
+    EXPECT_EQ(
+        modern_result.reason,
+        unsupported_modern_intrade_account_reason());
+
+    const auto unknown_redirect = std::make_unique<kurlyk::HttpResponse>();
+    unknown_redirect->status_code = 302;
+    unknown_redirect->headers.emplace(
+        "Location",
+        "https://evil.example/auth/t=opaque");
+    const auto unknown_result = analyze_login_redirect_response(
+        unknown_redirect,
+        "https://intrade35.bar",
+        "challenge=fake");
+    EXPECT_EQ(
+        unknown_result.action,
+        LoginRedirectResponseAction::FAILURE);
+    EXPECT_EQ(unknown_result.reason, "Rejected login redirect origin.");
+}
+
 TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     ModernLoginServer server;
     ASSERT_TRUE(server.start());

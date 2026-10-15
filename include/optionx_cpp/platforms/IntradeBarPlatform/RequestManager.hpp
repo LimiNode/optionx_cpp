@@ -815,8 +815,13 @@ namespace optionx::platforms::intrade_bar {
                     const std::string& path,
                     const std::string& request_cookies,
                     int redirect_count)>>();
+                const std::weak_ptr<std::function<void(
+                    const std::string& origin,
+                    const std::string& path,
+                    const std::string& request_cookies,
+                    int redirect_count)>> weak_follow_redirect = follow_redirect;
                 *follow_redirect = [this, legacy_host, modern_user_id, result_callback,
-                                    follow_redirect](
+                                    weak_follow_redirect](
                         const std::string& origin,
                         const std::string& path,
                         const std::string& request_cookies,
@@ -843,6 +848,12 @@ namespace optionx::platforms::intrade_bar {
                             error_text);
                     };
 
+                    const auto strong_follow_redirect = weak_follow_redirect.lock();
+                    if (!strong_follow_redirect) {
+                        fail("Login redirect handler expired.");
+                        return;
+                    }
+
                     if (redirect_count > 5) {
                         fail("Too many login redirects.");
                         return;
@@ -868,7 +879,7 @@ namespace optionx::platforms::intrade_bar {
                     auto redirect_callback = [
                             modern_user_id,
                             result_callback,
-                            follow_redirect,
+                            strong_follow_redirect,
                             origin,
                             request_cookies,
                             redirect_count,
@@ -879,72 +890,25 @@ namespace optionx::platforms::intrade_bar {
                             return;
                         }
 
-                        if (redirect_response->status_code >= 300 &&
-                            redirect_response->status_code < 400 &&
-                            !redirect_response->error_code) {
-                            const auto location = redirect_response->headers.find("location");
-                            if (location == redirect_response->headers.end() ||
-                                location->second.empty()) {
-                                fail("Login redirect response had no Location header.");
-                                return;
-                            }
-
-                            const auto next_target = resolve_login_redirect_target(
-                                location->second);
-                            if (!next_target) {
-                                fail("Malformed login redirect URL.");
-                                return;
-                            }
-
-                            std::string next_origin = origin;
-                            if (next_target->origin) {
-                                next_origin = *next_target->origin;
-                                if (classify_intrade_login_origin(next_origin) ==
-                                        IntradeLoginOrigin::UNKNOWN) {
-                                    fail("Rejected login redirect origin.");
-                                    return;
-                                }
-                            }
-
-                            const std::string next_cookies = merge_set_cookies(
-                                request_cookies,
-                                redirect_response->headers);
-                            (*follow_redirect)(
-                                next_origin,
-                                next_target->path,
-                                next_cookies,
+                        const auto analysis = analyze_login_redirect_response(
+                            redirect_response,
+                            origin,
+                            request_cookies);
+                        if (analysis.action == LoginRedirectResponseAction::FAILURE) {
+                            fail(analysis.reason);
+                            return;
+                        }
+                        if (analysis.action == LoginRedirectResponseAction::FOLLOW) {
+                            (*strong_follow_redirect)(
+                                analysis.next_origin,
+                                analysis.next_target->path,
+                                analysis.cookies,
                                 redirect_count + 1);
                             return;
                         }
-
-                        if (redirect_response->error_code ||
-                            redirect_response->status_code != 200) {
-                            fail(::optionx::utils::describe_response_error(
-                                redirect_response,
-                                "Invalid HTTP response."));
-                            return;
-                        }
-                        if (!::optionx::utils::validate_ddos_protection(redirect_response)) {
-                            fail("DDoS protection detected.");
-                            return;
-                        }
-
-                        const std::string final_cookies = merge_set_cookies(
-                            request_cookies,
-                            redirect_response->headers);
-                        if (is_authenticated_modern_intrade_session(
-                                origin,
-                                final_cookies)) {
-                            fail(unsupported_modern_intrade_account_reason());
-                            return;
-                        }
-                        if (classify_intrade_login_origin(origin) ==
-                                IntradeLoginOrigin::MODERN_UNSUPPORTED) {
-                            if (!has_cookie(final_cookies, "PHPSESSID")) {
-                                fail("Failed to parse login cookies.");
-                                return;
-                            }
-                            fail(unsupported_modern_intrade_account_reason());
+                        if (analysis.action ==
+                                LoginRedirectResponseAction::UNSUPPORTED_MODERN) {
+                            fail(analysis.reason);
                             return;
                         }
 
@@ -952,10 +916,10 @@ namespace optionx::platforms::intrade_bar {
 
                         std::string user_id = modern_user_id;
                         std::string user_hash;
-                        if (const auto parsed_cookies = parse_cookies(final_cookies)) {
+                        if (const auto parsed_cookies = parse_cookies(analysis.cookies)) {
                             user_id = std::get<0>(*parsed_cookies);
                             user_hash = std::get<1>(*parsed_cookies);
-                        } else if (!has_cookie(final_cookies, "PHPSESSID")) {
+                        } else if (!has_cookie(analysis.cookies, "PHPSESSID")) {
                             result_callback(
                                 false,
                                 std::string(),
@@ -969,7 +933,7 @@ namespace optionx::platforms::intrade_bar {
                             true,
                             user_id,
                             user_hash,
-                            final_cookies,
+                            analysis.cookies,
                             std::string());
                     };
 
