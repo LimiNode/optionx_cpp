@@ -540,9 +540,12 @@ response без proof считается failed recovery и не доставл�
 
 Явный `range_complete` provider result теперь является источником истины для
 полноты. Router не выводит закрытую сессию из количества баров, пустого ответа
-или похожего на dense prefix результата. Последняя закрытая граница пока ещё
-вычисляется по wall clock приложения; следующий PR перенесёт её на provider
-time при наличии свежей оценки и сохранит local fallback.
+или похожего на dense prefix результата. Для reconnect recovery последняя
+закрытая граница вычисляется через
+`BaseMarketDataProvider::provider_time_ms()`, если он возвращает свежую
+оценку, и через wall clock приложения, если он возвращает `0`. Это не даёт
+расхождению часов преждевременно запрашивать ещё не закрытую у provider
+свечу или задерживать recovery уже закрытой свечи.
 
 `max_backfill_bars` применяется до отправки provider request. Поэтому
 continuity updates содержат фактические bounded `from_time_ms`,
@@ -844,7 +847,8 @@ tick archive:
 чтобы отфильтровать polling jitter, и округляет результат вниз до секундной
 сетки истории. Если оценка недоступна, Router использует локальные часы.
 Провайдеры без дискретной сетки оставляют оба optional hook со значениями по
-умолчанию.
+умолчанию. Provider time является только wall-clock metadata; retry, timeout
+и duration по-прежнему используют монотонные часы.
 
 ### Tick continuity в Router
 

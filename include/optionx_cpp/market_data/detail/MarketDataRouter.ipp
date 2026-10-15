@@ -1846,8 +1846,10 @@ namespace optionx::market_data {
                     !continuity.buffer.empty() ||
                     observed_time_ms > continuity.verified_through_time_ms;
 
-                const auto now_ms = static_cast<std::uint64_t>(
-                    OPTIONX_TIMESTAMP_MS);
+                // Provider wall-clock estimates define history boundaries when
+                // fresh. The helper falls back to application wall time when a
+                // provider has no usable estimate; retry/backoff remains monotonic.
+                const auto now_ms = provider_time_ms(*entry->provider);
                 const auto aligned_now_ms = now_ms - (now_ms % timeframe_ms);
                 const auto last_closed_time_ms = aligned_now_ms > timeframe_ms
                     ? aligned_now_ms - timeframe_ms
