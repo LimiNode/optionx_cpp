@@ -25,6 +25,9 @@ series. Keep it short and remove items once they are handled.
 - Reconnect bar recovery uses a fresh provider-aligned wall-clock estimate for
   the last closed candle and falls back to the application wall clock when the
   estimate is unavailable. Retry, timeout, and duration logic remains monotonic.
+- `trade_check2.php` has been researched and is documented as a
+  trade-derived-result source only; it is not an authoritative range-history
+  API and remains outside `fetch_tick_history()`.
 - Router tick continuity now uses that provider history contract for opt-in
   `PREFILL` and `PREFILL_AND_RECOVER` routes. It buffers live ticks, treats
   `range_complete` as the authority, retries transport failures through

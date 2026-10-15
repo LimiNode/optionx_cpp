@@ -28,6 +28,9 @@
   локальные проверки, примеры и generated output.
 - [Implementation notes](guides/implementation-notes.md) - lifecycle, pub-sub,
   task scheduling, HTTP/WebSocket, trade queue, session DB и ограничения.
+- [Trade check API research](guides/trade-check2-research.md) - границы
+  доказанного контракта `trade_check2.php` и решение не использовать его как
+  authoritative tick-history API.
 - [Bridge lifecycle guide](guides/bridge-lifecycle-guide.md) - reusable
   lifecycle, callback, shutdown, thread-joining and transport-race patterns for
   bridge implementations and reviews.
