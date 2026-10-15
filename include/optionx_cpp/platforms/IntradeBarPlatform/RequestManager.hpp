@@ -676,8 +676,9 @@ namespace optionx::platforms::intrade_bar {
         LOGIT_DEBUG(req_id, req_value, utils::redact_secret_value(cookies));
 
         // The broker's current public host is a Nuxt shell. Its login endpoint
-        // returns an opaque /auth/t=... redirect; the existing legacy
-        // user_id/user_hash and /auth flow remains valid after following it.
+        // returns an opaque /auth/t=... redirect. Follow that chain manually:
+        // legacy terminal origins remain supported, while a successfully
+        // established session on the modern SPA is reported as unsupported.
         if (req_id.empty() && req_value.empty()) {
             const std::string legacy_host =
                 m_api_host.empty() ? auth_data->host : m_api_host;
@@ -781,38 +782,45 @@ namespace optionx::platforms::intrade_bar {
                     return;
                 }
 
-                auto& client = get_http_client();
-                if (redirect_target->origin) {
-                    if (!is_allowed_intrade_redirect_origin(*redirect_target->origin)) {
-                        restore_legacy_host();
-                        result_callback(
-                            false,
-                            std::string(),
-                            std::string(),
-                            std::string(),
-                            "Rejected login redirect origin.");
-                        return;
+                const std::string modern_user_id = parsed->user_id;
+                const auto origin_from_host = [](const std::string& host) {
+                    if (const auto origin = parse_login_redirect_origin(host)) {
+                        return *origin;
                     }
-                    client.set_host(*redirect_target->origin);
-                    client.set_origin(*redirect_target->origin);
-                    client.set_referer(*redirect_target->origin + "/");
+                    std::string result = host;
+                    while (!result.empty() && result.back() == '/') {
+                        result.pop_back();
+                    }
+                    return result;
+                };
+                const std::string initial_origin = redirect_target->origin
+                    ? *redirect_target->origin
+                    : origin_from_host(legacy_host);
+
+                if (redirect_target->origin &&
+                    classify_intrade_login_origin(initial_origin) ==
+                        IntradeLoginOrigin::UNKNOWN) {
+                    restore_legacy_host();
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        "Rejected login redirect origin.");
+                    return;
                 }
 
-                auto redirect_future = client.get(
-                    redirect_target->path,
-                    kurlyk::QueryParams(),
-                    {
-                        {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
-                        {"Upgrade-Insecure-Requests", "1"},
-                        {"Cookie", merged_cookies}
-                    },
-                    get_rate_limit(RateLimitType::ACCOUNT_INFO)
-                );
-
-                const std::string modern_user_id = parsed->user_id;
-                auto redirect_callback = [this, legacy_host, merged_cookies,
-                                          modern_user_id, result_callback](
-                        kurlyk::HttpResponsePtr redirect_response) {
+                auto follow_redirect = std::make_shared<std::function<void(
+                    const std::string& origin,
+                    const std::string& path,
+                    const std::string& request_cookies,
+                    int redirect_count)>>();
+                *follow_redirect = [this, legacy_host, modern_user_id, result_callback,
+                                    follow_redirect](
+                        const std::string& origin,
+                        const std::string& path,
+                        const std::string& request_cookies,
+                        const int redirect_count) {
                     const auto restore_legacy_host = [this, legacy_host]() {
                         if (!legacy_host.empty()) {
                             auto& client = get_http_client();
@@ -823,51 +831,159 @@ namespace optionx::platforms::intrade_bar {
                         }
                     };
 
-                    if (!validate_response(redirect_response, [
-                            &restore_legacy_host,
-                            &result_callback](const std::string& error_text) {
-                            restore_legacy_host();
-                            result_callback(
-                                false,
-                                std::string(),
-                                std::string(),
-                                std::string(),
-                                error_text);
-                        })) {
-                        return;
-                    }
-
-                    const std::string final_cookies = merge_set_cookies(
-                        merged_cookies,
-                        redirect_response->headers);
-                    restore_legacy_host();
-
-                    std::string user_id = modern_user_id;
-                    std::string user_hash;
-                    if (const auto parsed_cookies = parse_cookies(final_cookies)) {
-                        user_id = std::get<0>(*parsed_cookies);
-                        user_hash = std::get<1>(*parsed_cookies);
-                    } else if (!has_cookie(final_cookies, "PHPSESSID")) {
+                    const auto fail = [
+                            restore_legacy_host,
+                            result_callback](const std::string& error_text) {
+                        restore_legacy_host();
                         result_callback(
                             false,
                             std::string(),
                             std::string(),
                             std::string(),
-                            "Failed to parse login cookies.");
+                            error_text);
+                    };
+
+                    if (redirect_count > 5) {
+                        fail("Too many login redirects.");
                         return;
                     }
 
-                    result_callback(
-                        true,
-                        user_id,
-                        user_hash,
-                        final_cookies,
-                        std::string());
+                    auto& client = get_http_client();
+                    client.set_host(origin);
+                    client.set_origin(origin);
+                    client.set_referer(origin + "/");
+                    client.set_follow_location(false);
+                    auto redirect_future = client.get(
+                        path,
+                        kurlyk::QueryParams(),
+                        {
+                            {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                            {"Upgrade-Insecure-Requests", "1"},
+                            {"Cookie", request_cookies}
+                        },
+                        get_rate_limit(RateLimitType::ACCOUNT_INFO)
+                    );
+                    client.set_follow_location(true);
+
+                    auto redirect_callback = [
+                            modern_user_id,
+                            result_callback,
+                            follow_redirect,
+                            origin,
+                            request_cookies,
+                            redirect_count,
+                            restore_legacy_host,
+                            fail](kurlyk::HttpResponsePtr redirect_response) {
+                        if (!redirect_response) {
+                            fail("No response received from the server.");
+                            return;
+                        }
+
+                        if (redirect_response->status_code >= 300 &&
+                            redirect_response->status_code < 400 &&
+                            !redirect_response->error_code) {
+                            const auto location = redirect_response->headers.find("location");
+                            if (location == redirect_response->headers.end() ||
+                                location->second.empty()) {
+                                fail("Login redirect response had no Location header.");
+                                return;
+                            }
+
+                            const auto next_target = resolve_login_redirect_target(
+                                location->second);
+                            if (!next_target) {
+                                fail("Malformed login redirect URL.");
+                                return;
+                            }
+
+                            std::string next_origin = origin;
+                            if (next_target->origin) {
+                                next_origin = *next_target->origin;
+                                if (classify_intrade_login_origin(next_origin) ==
+                                        IntradeLoginOrigin::UNKNOWN) {
+                                    fail("Rejected login redirect origin.");
+                                    return;
+                                }
+                            }
+
+                            const std::string next_cookies = merge_set_cookies(
+                                request_cookies,
+                                redirect_response->headers);
+                            (*follow_redirect)(
+                                next_origin,
+                                next_target->path,
+                                next_cookies,
+                                redirect_count + 1);
+                            return;
+                        }
+
+                        if (redirect_response->error_code ||
+                            redirect_response->status_code != 200) {
+                            fail(::optionx::utils::describe_response_error(
+                                redirect_response,
+                                "Invalid HTTP response."));
+                            return;
+                        }
+                        if (!::optionx::utils::validate_ddos_protection(redirect_response)) {
+                            fail("DDoS protection detected.");
+                            return;
+                        }
+
+                        const std::string final_cookies = merge_set_cookies(
+                            request_cookies,
+                            redirect_response->headers);
+                        if (is_authenticated_modern_intrade_session(
+                                origin,
+                                final_cookies)) {
+                            fail(unsupported_modern_intrade_account_reason());
+                            return;
+                        }
+                        if (classify_intrade_login_origin(origin) ==
+                                IntradeLoginOrigin::MODERN_UNSUPPORTED) {
+                            if (!has_cookie(final_cookies, "PHPSESSID")) {
+                                fail("Failed to parse login cookies.");
+                                return;
+                            }
+                            fail(unsupported_modern_intrade_account_reason());
+                            return;
+                        }
+
+                        restore_legacy_host();
+
+                        std::string user_id = modern_user_id;
+                        std::string user_hash;
+                        if (const auto parsed_cookies = parse_cookies(final_cookies)) {
+                            user_id = std::get<0>(*parsed_cookies);
+                            user_hash = std::get<1>(*parsed_cookies);
+                        } else if (!has_cookie(final_cookies, "PHPSESSID")) {
+                            result_callback(
+                                false,
+                                std::string(),
+                                std::string(),
+                                std::string(),
+                                "Failed to parse login cookies.");
+                            return;
+                        }
+
+                        result_callback(
+                            true,
+                            user_id,
+                            user_hash,
+                            final_cookies,
+                            std::string());
+                    };
+
+                    add_http_request_task(
+                        std::move(redirect_future),
+                        std::move(redirect_callback));
                 };
 
-                add_http_request_task(
-                    std::move(redirect_future),
-                    std::move(redirect_callback));
+                (*follow_redirect)(
+                    initial_origin,
+                    redirect_target->path,
+                    merged_cookies,
+                    0);
+                return;
             };
 
             add_http_request_task(std::move(future), std::move(callback));

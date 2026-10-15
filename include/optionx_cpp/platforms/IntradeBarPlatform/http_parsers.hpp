@@ -262,6 +262,57 @@ namespace optionx::platforms::intrade_bar {
         return std::regex_match(origin, allowed_origin_regex);
     }
 
+    /// \brief Identifies the platform behind an Intrade login origin.
+    enum class IntradeLoginOrigin {
+        LEGACY,
+        MODERN_UNSUPPORTED,
+        UNKNOWN
+    };
+
+    /// \brief Recognizes the current SPA host separately from legacy hosts.
+    /// \param origin The `scheme://authority` origin to inspect.
+    /// \return True only for the current `trading.intrade.bar` SPA origin.
+    inline bool is_modern_intrade_origin(const std::string& origin) {
+        static const std::regex modern_origin_regex(
+            R"(^https://trading\.intrade\.bar$)",
+            std::regex::icase);
+        return std::regex_match(origin, modern_origin_regex);
+    }
+
+    /// \brief Classifies a broker-selected login destination.
+    /// \param origin The `scheme://authority` origin to classify.
+    /// \return Legacy for the supported terminal family, modern for the known
+    ///         unsupported SPA, and unknown for every other origin.
+    inline IntradeLoginOrigin classify_intrade_login_origin(
+            const std::string& origin) {
+        if (is_allowed_intrade_redirect_origin(origin)) {
+            return IntradeLoginOrigin::LEGACY;
+        }
+        if (is_modern_intrade_origin(origin)) {
+            return IntradeLoginOrigin::MODERN_UNSUPPORTED;
+        }
+        return IntradeLoginOrigin::UNKNOWN;
+    }
+
+    /// \brief Detects a successfully established session on the unsupported SPA.
+    /// \param origin Final origin reached by the login redirect chain.
+    /// \param cookies Cookies accumulated during login.
+    /// \return True when the modern platform issued its session cookie.
+    inline bool is_authenticated_modern_intrade_session(
+            const std::string& origin,
+            const std::string& cookies) {
+        return classify_intrade_login_origin(origin) ==
+                IntradeLoginOrigin::MODERN_UNSUPPORTED &&
+            has_cookie(cookies, "PHPSESSID");
+    }
+
+    /// \brief Explains why a modern Intrade account cannot be used here.
+    inline const char* unsupported_modern_intrade_account_reason() noexcept {
+        return
+            "Unsupported Intrade account: accounts created on "
+            "trading.intrade.bar are not supported by this API.";
+    }
+
     /// \brief Resolves a login redirect into a request path and optional origin.
     /// \param redirect_url Absolute or relative redirect URL.
     /// \return The path and origin, or empty when an absolute URL is malformed.

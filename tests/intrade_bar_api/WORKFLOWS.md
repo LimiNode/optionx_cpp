@@ -30,11 +30,17 @@ Used by `AuthManager` for `AuthMethod::EMAIL_PASSWORD`.
    that endpoint is unavailable or does not contain the retired hidden-input
    form, probe the root page and recognize the current Nuxt SPA shell.
 5. For the current SPA, `request_login` posts JSON `email/password` to
-   `/route/ts_login_user`, follows the returned opaque `/auth/t=...` redirect,
-   and stores the complete returned cookie jar. Legacy `user_id/user_hash`
-   cookies remain supported; modern sessions may contain only `PHPSESSID`,
-   with the JSON `userID` retained as the account identity hint. Legacy
-   deployments continue through `request_login` -> `request_auth`.
+   `/route/ts_login_user`, follows the returned opaque `/auth/t=...` redirect
+   chain while checking each `Location`, and stores the complete returned
+   cookie jar. A successful chain ending on a legacy `intrade*.bar` origin is
+   supported. A successful chain ending on `trading.intrade.bar` with a
+   `PHPSESSID` is reported explicitly as an unsupported modern account; the
+   API does not claim that platform's account as connected. Transport errors,
+   malformed responses, and unsuccessful login responses keep their ordinary
+   error paths. Legacy `user_id/user_hash` cookies remain supported; modern
+   sessions may contain only `PHPSESSID`, with the JSON `userID` retained as
+   the account identity hint. Legacy deployments continue through
+   `request_login` -> `request_auth`.
 6. Store the returned session in `ServiceSessionDB` as a versioned envelope
    containing both the complete cookie jar and the JSON `userID`. Older
    plain-cookie records remain readable for backward compatibility.

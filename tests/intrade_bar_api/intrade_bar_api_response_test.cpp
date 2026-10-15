@@ -944,6 +944,28 @@ TEST(IntradeBarLogin, ParsesModernTradingLoginResponse) {
     EXPECT_TRUE(is_modern_intrade_landing_page("<script>window.__NUXT__={}</script>"));
     EXPECT_FALSE(is_modern_intrade_landing_page("<form action=\"/login\"></form>"));
 
+    EXPECT_TRUE(is_modern_intrade_origin("https://trading.intrade.bar"));
+    EXPECT_FALSE(is_modern_intrade_origin("https://intrade35.bar"));
+    EXPECT_EQ(
+        classify_intrade_login_origin("https://intrade35.bar"),
+        IntradeLoginOrigin::LEGACY);
+    EXPECT_EQ(
+        classify_intrade_login_origin("https://trading.intrade.bar"),
+        IntradeLoginOrigin::MODERN_UNSUPPORTED);
+    EXPECT_EQ(
+        classify_intrade_login_origin("https://evil.example"),
+        IntradeLoginOrigin::UNKNOWN);
+    EXPECT_FALSE(is_authenticated_modern_intrade_session(
+        "https://trading.intrade.bar",
+        "landing=1"));
+    EXPECT_TRUE(is_authenticated_modern_intrade_session(
+        "https://trading.intrade.bar",
+        "PHPSESSID=fake_session"));
+    EXPECT_EQ(
+        std::string(unsupported_modern_intrade_account_reason()),
+        "Unsupported Intrade account: accounts created on "
+        "trading.intrade.bar are not supported by this API.");
+
     const auto success = parse_modern_login_response(
         R"({"success":true,"userID":"866188","message":"/auth/t=opaque","type":"intrade-redirect"})");
     ASSERT_TRUE(success);
