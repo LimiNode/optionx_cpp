@@ -36,6 +36,10 @@ namespace optionx::platforms::intrade_bar {
         /// broker-clock estimate.
         std::size_t clock_offset_sample_count = 9;
 
+        /// Maximum age of the newest offset sample used for provider time.
+        /// Zero disables the age check.
+        std::uint64_t clock_offset_max_age_ms = 60ULL * 1000ULL;
+
         /// \brief Returns true when the archive can be used safely.
         [[nodiscard]] bool valid() const noexcept {
             return max_items_per_symbol > 0 && sampling_interval_ms > 0;
@@ -139,6 +143,7 @@ namespace optionx::platforms::intrade_bar {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_symbols.clear();
             m_clock_offsets_ms.clear();
+            m_latest_clock_sample_received_ms = 0;
         }
 
         /// \brief Returns the number of retained observations for a symbol.
@@ -157,12 +162,13 @@ namespace optionx::platforms::intrade_bar {
         /// \param local_time_ms Current local wall-clock time in milliseconds.
         /// \details The estimate uses the median of recent
         ///          `tick.time_ms - tick.received_ms` observations and is then
-        ///          rounded down to the provider's sampling grid. With no
-        ///          usable samples this still provides a conservative aligned
-        ///          local-time fallback.
+        ///          rounded down to the provider's sampling grid. With no fresh
+        ///          usable samples it returns zero so the Router can apply its
+        ///          application-clock fallback.
         [[nodiscard]] std::uint64_t provider_time_ms(
                 std::uint64_t local_time_ms) const noexcept {
             std::lock_guard<std::mutex> lock(m_mutex);
+            if (!has_fresh_clock_estimate_no_lock(local_time_ms)) return 0;
             const auto adjusted = add_offset(
                 local_time_ms,
                 median_clock_offset_no_lock());
@@ -226,10 +232,27 @@ namespace optionx::platforms::intrade_bar {
             if (tick.received_ms == 0 || m_options.clock_offset_sample_count == 0) {
                 return;
             }
+            m_latest_clock_sample_received_ms = std::max(
+                m_latest_clock_sample_received_ms,
+                tick.received_ms);
             m_clock_offsets_ms.push_back(observation_offset(tick));
             while (m_clock_offsets_ms.size() > m_options.clock_offset_sample_count) {
                 m_clock_offsets_ms.pop_front();
             }
+        }
+
+        [[nodiscard]] bool has_fresh_clock_estimate_no_lock(
+                std::uint64_t local_time_ms) const noexcept {
+            if (m_clock_offsets_ms.empty() ||
+                m_latest_clock_sample_received_ms == 0 ||
+                local_time_ms == 0) {
+                return false;
+            }
+            if (m_options.clock_offset_max_age_ms == 0) return true;
+            const auto age = local_time_ms >= m_latest_clock_sample_received_ms
+                ? local_time_ms - m_latest_clock_sample_received_ms
+                : m_latest_clock_sample_received_ms - local_time_ms;
+            return age <= m_options.clock_offset_max_age_ms;
         }
 
         [[nodiscard]] std::int64_t median_clock_offset_no_lock() const noexcept {
@@ -344,6 +367,7 @@ namespace optionx::platforms::intrade_bar {
         mutable std::mutex m_mutex;
         std::unordered_map<std::string, SymbolHistory> m_symbols;
         std::deque<std::int64_t> m_clock_offsets_ms;
+        std::uint64_t m_latest_clock_sample_received_ms = 0;
     };
 
 } // namespace optionx::platforms::intrade_bar
