@@ -2817,12 +2817,8 @@ namespace optionx::market_data {
                     }
                     history_response_valid = history_is_well_formed(
                         history_batch,
-                        kind == ContinuityRequestKind::PREFILL
-                            ? 1U
-                            : from_time_ms,
-                        kind == ContinuityRequestKind::PREFILL
-                            ? (std::numeric_limits<std::uint64_t>::max)()
-                            : to_time_ms);
+                        from_time_ms,
+                        to_time_ms);
                     std::lock_guard<std::mutex> lock(m_mutex);
                     const auto entry_it = m_entries.find(router_id);
                     if (entry_it == m_entries.end() ||

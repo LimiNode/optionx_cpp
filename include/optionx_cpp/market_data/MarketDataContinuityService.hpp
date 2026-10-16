@@ -6,6 +6,7 @@
 /// \brief Defines helpers for routing historical bars through market-data batches.
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -302,6 +303,15 @@ namespace optionx::market_data {
                 return false;
             }
 
+            // Providers may use slash-separated or differently cased symbols,
+            // but a successful response must still identify the requested
+            // instrument. An empty response symbol remains valid metadata
+            // fallback, as documented by BaseMarketDataProvider.
+            if (!sequence.symbol.empty() &&
+                !symbols_match(sequence.symbol, request.symbol)) {
+                return false;
+            }
+
             const auto from_ms = safe_multiply(
                 static_cast<std::uint64_t>(std::max<std::int64_t>(0, request.from_ts)),
                 1000U);
@@ -319,6 +329,34 @@ namespace optionx::market_data {
                 previous_time_ms = bar.time_ms;
             }
             return true;
+        }
+
+        static bool symbols_match(
+                const std::string& lhs,
+                const std::string& rhs) noexcept {
+            std::size_t lhs_index = 0;
+            std::size_t rhs_index = 0;
+            while (true) {
+                while (lhs_index < lhs.size() &&
+                       (lhs[lhs_index] == '/' ||
+                        std::isspace(static_cast<unsigned char>(lhs[lhs_index])) != 0)) {
+                    ++lhs_index;
+                }
+                while (rhs_index < rhs.size() &&
+                       (rhs[rhs_index] == '/' ||
+                        std::isspace(static_cast<unsigned char>(rhs[rhs_index])) != 0)) {
+                    ++rhs_index;
+                }
+                if (lhs_index == lhs.size() || rhs_index == rhs.size()) {
+                    return lhs_index == lhs.size() && rhs_index == rhs.size();
+                }
+
+                const auto lhs_char = static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(lhs[lhs_index++])));
+                const auto rhs_char = static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(rhs[rhs_index++])));
+                if (lhs_char != rhs_char) return false;
+            }
         }
 
         static bool ticks_fit_range(

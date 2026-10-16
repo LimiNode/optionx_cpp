@@ -446,6 +446,9 @@ stream-level `MarketDataStatusUpdate` events such as `READY` or `DISCONNECTED`.
 assertion:
 
 - bars must be ordered, have valid timestamps, and match the subscribed stream;
+- a non-empty `sequence.symbol` must match the requested instrument after
+  case, slash, and whitespace normalization; an empty symbol is allowed as
+  provider metadata fallback;
 - a dense provider may set `range_complete=true` only after proving every
   requested timeframe slot, including an empty result only when emptiness is
   authoritative;
@@ -456,6 +459,12 @@ assertion:
 - an incomplete or unproved recovery response keeps the earliest
   `unverified_from_time_ms` and leaves the route sticky `DEGRADED` until an
   authoritative response covers that boundary.
+
+Structural validation uses the actual inclusive request boundaries for
+`PREFILL` as well as recovery. It never substitutes an unbounded synthetic
+window for the requested prefill range. For a dense grid, the expected slots
+run from `from_ts` through the last timeframe boundary not greater than
+`to_ts`; an upper request boundary does not need to be aligned itself.
 
 `MarketDataContinuityService::request_bar_history_batch()` rejects incomplete
 results by default. Callers that intentionally want observations rather than a

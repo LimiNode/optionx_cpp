@@ -186,26 +186,29 @@ namespace optionx::platforms::intrade_bar {
         }
 
         auto expected_time_ms = from_ts * 1000U;
-        const auto end_time_ms = to_ts * 1000U;
         const auto step_ms = timeframe >
                 (std::numeric_limits<std::uint64_t>::max)() / 1000U
             ? 0U
             : timeframe * 1000U;
         if (step_ms == 0 || sequence.bars.empty()) return false;
 
+        const auto expected_count =
+            (to_ts - from_ts) / timeframe + 1U;
+        if (sequence.bars.size() != expected_count) return false;
+
         for (std::size_t index = 0; index < sequence.bars.size(); ++index) {
             const auto& bar = sequence.bars[index];
             if (bar.time_ms != expected_time_ms) return false;
-            if (expected_time_ms == end_time_ms) {
-                return index + 1 == sequence.bars.size();
-            }
-            if (expected_time_ms >
-                (std::numeric_limits<std::uint64_t>::max)() - step_ms) {
+            if (index + 1 < sequence.bars.size() &&
+                expected_time_ms >
+                    (std::numeric_limits<std::uint64_t>::max)() - step_ms) {
                 return false;
             }
-            expected_time_ms += step_ms;
+            if (index + 1 < sequence.bars.size()) {
+                expected_time_ms += step_ms;
+            }
         }
-        return false;
+        return true;
     }
 
 } // namespace optionx::platforms::intrade_bar
