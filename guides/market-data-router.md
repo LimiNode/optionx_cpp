@@ -545,10 +545,13 @@ only when no unresolved boundary remains known.
 
 The provider's explicit `range_complete` result is now the completeness
 authority. Router does not infer a closed session from the number of returned
-bars, from an empty response, or from a dense-looking prefix. The last-closed
-boundary still uses the application wall clock; the follow-up broker-aligned
-clock change will move that boundary to provider time when a fresh estimate is
-available while retaining the local fallback.
+bars, from an empty response, or from a dense-looking prefix. For reconnect
+recovery, the last-closed boundary uses
+`BaseMarketDataProvider::provider_time_ms()` when it returns a fresh estimate
+and falls back to the application wall clock when it returns zero. This
+prevents local/provider clock skew from either requesting a candle before the
+provider has closed it or delaying recovery after the provider has already
+closed it.
 
 The payload flags distinguish source from delivery timing. A provider live
 payload normally starts as `LIVE_SOURCE | REALTIME`. If a route holds it in the
@@ -692,7 +695,8 @@ its provider time from recent `(Tick::time_ms - Tick::received_ms)` samples,
 uses their median to reject polling jitter, and rounds the estimate down to
 the one-second history grid. With no estimate, Router falls back to the local
 clock. Providers without a discrete history grid leave both optional hooks at
-their defaults.
+their defaults. Provider time is wall-clock metadata only; retry, timeout, and
+duration logic continues to use monotonic clocks.
 
 ### Tick continuity in Router
 

@@ -158,6 +158,24 @@ TEST(IntradeObservedTickHistory, EstimatesBrokerAlignedTimeFromMedianOffsets) {
     EXPECT_EQ(archive.provider_time_ms(4123), 4000U);
 }
 
+TEST(IntradeObservedTickHistory, ReturnsZeroWithoutClockSamples) {
+    IntradeObservedTickHistory archive;
+
+    EXPECT_EQ(archive.provider_time_ms(4123), 0U);
+}
+
+TEST(IntradeObservedTickHistory, ReturnsZeroForStaleClockEstimate) {
+    IntradeObservedTickHistoryOptions options;
+    options.clock_offset_max_age_ms = 1000;
+    IntradeObservedTickHistory archive(options);
+    archive.record({make_batch(
+        "EURUSD",
+        {make_tick(1.1000, 1.1002, 1000, 1100)})});
+
+    EXPECT_EQ(archive.provider_time_ms(2100), 2000U);
+    EXPECT_EQ(archive.provider_time_ms(2101), 0U);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

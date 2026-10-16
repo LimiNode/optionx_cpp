@@ -92,6 +92,9 @@ namespace optionx::market_data {
         ///          cannot estimate its own clock. Router continuity falls back
         ///          to the local clock in that case. Providers with a discrete
         ///          history grid should return a timestamp aligned to that grid.
+        ///          Providers must return zero for a missing or stale estimate;
+        ///          this wall-clock metadata must not be confused with the
+        ///          monotonic clock used for retry, timeout, or duration logic.
         /// \return Current provider timestamp in milliseconds, or zero when unavailable.
         virtual std::uint64_t provider_time_ms() const noexcept {
             return 0;
