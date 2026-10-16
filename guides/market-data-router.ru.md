@@ -448,6 +448,9 @@ stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNE
 
 - бары должны быть упорядочены, иметь корректные timestamps и соответствовать
   подписанному stream;
+- непустой `sequence.symbol` должен совпадать с запрошенным инструментом после
+  нормализации регистра, slash и пробельных символов; пустой symbol допустим
+  как fallback metadata провайдера;
 - dense provider может выставить `range_complete=true` только после проверки
   каждого запрошенного timeframe slot; пустой ответ допустим только при
   авторитетном доказательстве пустоты;
@@ -458,6 +461,12 @@ stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNE
 - неполный или неподтверждённый recovery сохраняет ранний
   `unverified_from_time_ms` и оставляет route в sticky `DEGRADED`, пока
   авторитетный ответ не покроет эту границу.
+
+Структурная проверка использует фактические inclusive-границы запроса и для
+`PREFILL`, и для recovery. Router не заменяет диапазон prefill искусственным
+неограниченным окном. Для dense grid ожидаются слоты от `from_ts` до последней
+timeframe boundary, не превышающей `to_ts`; верхняя граница запроса не обязана
+сама быть выровнена по timeframe.
 
 `MarketDataContinuityService::request_bar_history_batch()` по умолчанию
 отклоняет неполные результаты. Вызывающая сторона, которой нужны именно
