@@ -295,6 +295,40 @@ namespace optionx::market_data {
             return batch;
         }
 
+    public:
+        /// \brief Compares provider and request symbols using the history policy.
+        /// \details Matching ignores case, slash separators, and whitespace so
+        ///          providers may return equivalent symbols in their canonical
+        ///          notation. This helper is shared by Router history validation;
+        ///          live stream identity remains an exact-match contract.
+        static bool symbols_match(
+                const std::string& lhs,
+                const std::string& rhs) noexcept {
+            std::size_t lhs_index = 0;
+            std::size_t rhs_index = 0;
+            while (true) {
+                while (lhs_index < lhs.size() &&
+                       (lhs[lhs_index] == '/' ||
+                        std::isspace(static_cast<unsigned char>(lhs[lhs_index])) != 0)) {
+                    ++lhs_index;
+                }
+                while (rhs_index < rhs.size() &&
+                       (rhs[rhs_index] == '/' ||
+                        std::isspace(static_cast<unsigned char>(rhs[rhs_index])) != 0)) {
+                    ++rhs_index;
+                }
+                if (lhs_index == lhs.size() || rhs_index == rhs.size()) {
+                    return lhs_index == lhs.size() && rhs_index == rhs.size();
+                }
+
+                const auto lhs_char = static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(lhs[lhs_index++])));
+                const auto rhs_char = static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(rhs[rhs_index++])));
+                if (lhs_char != rhs_char) return false;
+            }
+        }
+
     private:
         static bool bars_fit_request(
                 const BarSequence& sequence,
@@ -329,34 +363,6 @@ namespace optionx::market_data {
                 previous_time_ms = bar.time_ms;
             }
             return true;
-        }
-
-        static bool symbols_match(
-                const std::string& lhs,
-                const std::string& rhs) noexcept {
-            std::size_t lhs_index = 0;
-            std::size_t rhs_index = 0;
-            while (true) {
-                while (lhs_index < lhs.size() &&
-                       (lhs[lhs_index] == '/' ||
-                        std::isspace(static_cast<unsigned char>(lhs[lhs_index])) != 0)) {
-                    ++lhs_index;
-                }
-                while (rhs_index < rhs.size() &&
-                       (rhs[rhs_index] == '/' ||
-                        std::isspace(static_cast<unsigned char>(rhs[rhs_index])) != 0)) {
-                    ++rhs_index;
-                }
-                if (lhs_index == lhs.size() || rhs_index == rhs.size()) {
-                    return lhs_index == lhs.size() && rhs_index == rhs.size();
-                }
-
-                const auto lhs_char = static_cast<char>(std::toupper(
-                    static_cast<unsigned char>(lhs[lhs_index++])));
-                const auto rhs_char = static_cast<char>(std::toupper(
-                    static_cast<unsigned char>(rhs[rhs_index++])));
-                if (lhs_char != rhs_char) return false;
-            }
         }
 
         static bool ticks_fit_range(

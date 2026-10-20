@@ -451,6 +451,9 @@ stream-level `MarketDataStatusUpdate`, например `READY` или `DISCONNE
 - непустой `sequence.symbol` должен совпадать с запрошенным инструментом после
   нормализации регистра, slash и пробельных символов; пустой symbol допустим
   как fallback metadata провайдера;
+- эта нормализация применяется только к историческим bar responses; identity
+  live bars и ticks, provider subscription handles и stream status по-прежнему
+  сопоставляются точно;
 - dense provider может выставить `range_complete=true` только после проверки
   каждого запрошенного timeframe slot; пустой ответ допустим только при
   авторитетном доказательстве пустоты;

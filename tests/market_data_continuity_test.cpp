@@ -1047,6 +1047,114 @@ TEST(MarketDataContinuity, RejectsHistoryResponseFromAnotherStream) {
     EXPECT_EQ(subscriber->bars.front().items.front().time_ms, 280000U);
 }
 
+TEST(MarketDataContinuity, AcceptsNormalizedEquivalentHistorySymbolThroughRouter) {
+    ScopedTestClock clock(60000ULL);
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.symbol = "EUR/USD";
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    auto equivalent = make_history({60000});
+    equivalent.symbol = "EURUSD";
+    provider.complete_history(std::move(equivalent), true);
+
+    ASSERT_EQ(subscriber->bars.size(), 1U);
+    EXPECT_EQ(subscriber->bars.front().items.front().time_ms, 60000U);
+    EXPECT_EQ(
+        continuity_status_count(
+            *subscriber,
+            MarketDataContinuityStatus::FAILED),
+        0U);
+    ASSERT_TRUE(!subscriber->continuity.empty());
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::LIVE);
+}
+
+TEST(MarketDataContinuity, RejectsForeignHistorySymbolThroughRouter) {
+    ScopedTestClock clock(60000ULL);
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.symbol = "EUR/USD";
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    auto foreign = make_history({60000});
+    foreign.symbol = "GBPUSD";
+    provider.complete_history(std::move(foreign), true);
+
+    EXPECT_TRUE(subscriber->bars.empty());
+    EXPECT_EQ(
+        continuity_status_count(
+            *subscriber,
+            MarketDataContinuityStatus::FAILED),
+        1U);
+    ASSERT_GE(subscriber->continuity.size(), 2U);
+    EXPECT_EQ(
+        subscriber->continuity[1].message,
+        "Historical bar response does not match the subscribed stream.");
+}
+
+TEST(MarketDataContinuity, EquivalentIncompleteHistoryDegradesRouterRoute) {
+    ScopedTestClock clock(60000ULL);
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.symbol = "EUR/USD";
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    auto equivalent = make_history({60000});
+    equivalent.symbol = "EURUSD";
+    provider.complete_history(std::move(equivalent), false);
+
+    ASSERT_EQ(subscriber->bars.size(), 1U);
+    EXPECT_EQ(
+        continuity_status_count(
+            *subscriber,
+            MarketDataContinuityStatus::FAILED),
+        1U);
+    EXPECT_EQ(
+        subscriber->continuity.back().status,
+        MarketDataContinuityStatus::DEGRADED);
+}
+
+TEST(MarketDataContinuity, EquivalentHistoryOutsideRequestRangeIsRejected) {
+    ScopedTestClock clock(60000ULL);
+    FakeHistoryProvider provider;
+    MarketDataRouter router;
+    auto subscriber = std::make_shared<RecordingSubscriber>();
+    auto request = continuity_request(MarketDataContinuityMode::PREFILL);
+    request.symbol = "EUR/USD";
+
+    auto route = router.subscribe_bars(provider, subscriber, request);
+    ASSERT_TRUE(route.active());
+
+    auto equivalent = make_history({120000});
+    equivalent.symbol = "EURUSD";
+    provider.complete_history(std::move(equivalent), true);
+
+    EXPECT_TRUE(subscriber->bars.empty());
+    EXPECT_EQ(
+        continuity_status_count(
+            *subscriber,
+            MarketDataContinuityStatus::FAILED),
+        1U);
+    ASSERT_GE(subscriber->continuity.size(), 2U);
+    EXPECT_EQ(
+        subscriber->continuity[1].message,
+        "Historical bar response is outside the requested range, unordered, or duplicated.");
+}
+
 TEST(MarketDataContinuity, RejectsForeignBarSymbolWithCompleteProviderProof) {
     FakeHistoryProvider provider;
     MarketDataContinuityService service(provider);
@@ -1120,14 +1228,12 @@ TEST(MarketDataContinuity, RejectsPrefillHistoryOutsideActualRequestRange) {
 }
 
 TEST(MarketDataContinuity, DenseHistoryProofRejectsWrongSingleSlotTimestamp) {
-    const BarHistoryRequest request("EURUSD", 60, 60, 180);
+    const BarHistoryRequest request("EURUSD", 60, 60, 60);
 
     EXPECT_FALSE(dense_bar_history_complete(
         make_history({120000}),
         request));
-    EXPECT_TRUE(dense_bar_history_complete(
-        make_history({60000, 120000, 180000}),
-        request));
+    EXPECT_TRUE(dense_bar_history_complete(make_history({60000}), request));
 }
 
 TEST(MarketDataContinuity, ReconnectMarksRouteStale) {

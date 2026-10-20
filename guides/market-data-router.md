@@ -449,6 +449,9 @@ assertion:
 - a non-empty `sequence.symbol` must match the requested instrument after
   case, slash, and whitespace normalization; an empty symbol is allowed as
   provider metadata fallback;
+- this normalized policy applies to historical bar responses only; live bar
+  and tick identity, provider subscription handles, and stream status matching
+  remain exact;
 - a dense provider may set `range_complete=true` only after proving every
   requested timeframe slot, including an empty result only when emptiness is
   authoritative;

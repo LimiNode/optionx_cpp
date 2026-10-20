@@ -384,6 +384,9 @@ namespace optionx::market_data {
             static bool batch_matches_stream(
                     const BarDataBatch& batch,
                     const StreamDescriptor& stream) noexcept;
+            static bool history_batch_matches_stream(
+                    const BarDataBatch& batch,
+                    const StreamDescriptor& stream) noexcept;
 
             bool bind_provider(BaseMarketDataProvider& provider, std::string& error_message);
             void unbind_provider(BaseMarketDataProvider& provider) const noexcept;
@@ -1076,6 +1079,17 @@ namespace optionx::market_data {
             return stream.type == MarketDataType::BARS &&
                    batch.type == MarketDataType::BARS &&
                    batch.symbol == stream.symbol &&
+                   batch.timeframe == stream.timeframe;
+        }
+
+        inline bool MarketDataRouterState::history_batch_matches_stream(
+                const BarDataBatch& batch,
+                const StreamDescriptor& stream) noexcept {
+            return stream.type == MarketDataType::BARS &&
+                   batch.type == MarketDataType::BARS &&
+                   MarketDataContinuityService::symbols_match(
+                       batch.symbol,
+                       stream.symbol) &&
                    batch.timeframe == stream.timeframe;
         }
 
@@ -2805,7 +2819,7 @@ namespace optionx::market_data {
                     request,
                     subscription,
                     kind == ContinuityRequestKind::GAP_BACKFILL);
-                history_stream_matches = batch_matches_stream(
+                history_stream_matches = history_batch_matches_stream(
                     history_batch,
                     expected_stream);
                 if (history_stream_matches) {
