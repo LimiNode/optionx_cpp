@@ -38,6 +38,9 @@ The public `TradeResultQuery` also carries a local `trade_id` and an
 `option_hash`, but this Intrade request path ultimately requires a positive
 numeric `option_id`. The local persistent ID and string hash are useful for
 tracing and storage, but they are not sent as substitutes for `trade_id`.
+Any synthetic IDs used in sanitized examples or isolated parser tests are
+fixtures only; the production request path never fabricates, enumerates, or
+substitutes a broker trade ID.
 
 The implementation accepts a successful response only when the body contains
 at least one semicolon and both sides parse as `double`:
