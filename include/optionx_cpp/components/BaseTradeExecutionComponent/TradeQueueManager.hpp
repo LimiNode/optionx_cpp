@@ -673,8 +673,8 @@ namespace optionx::components {
         std::lock_guard<std::mutex> lock(m_trade_result_mutex);
         if (m_trade_result_callback) {
             m_trade_result_callback(
-                std::move(request->clone_unique()),
-                std::move(result->clone_unique()));
+                request->clone_unique(),
+                result->clone_unique());
         }
     }
 
