@@ -134,6 +134,76 @@ contract from the `/price_now` archive, not from `trade_check2.php`.
 | `TradeRecord` history | Closed-trade lifecycle facts and stored open/close fields | A quote stream, intermediate ticks, or dense coverage |
 | Authoritative historical tick range | Only a provider API that explicitly supplies timestamped observations and completeness semantics | Not provided by the currently observed `trade_check2.php` contract |
 
+## Modern SPA Chart-History Evidence
+
+A read-only inspection of the current `trading.intrade.bar` SPA found a
+separate chart-history API. This is evidence for aggregate market history; it
+does not change the `trade_check2.php` decision above.
+
+The main observed request is:
+
+```text
+GET /ajax/instrument/chart-history
+    instrumentId=<numeric instrument id>
+    period=1m|5m|1h|1d
+    limit=<number of candles>
+    to=<optional ISO timestamp for older-page loading>
+```
+
+The response is shaped like:
+
+```json
+{
+  "instrumentId": 1,
+  "period": "1m",
+  "from": 1791596815,
+  "to": 1792806415,
+  "count": 6,
+  "limit": 5,
+  "aggs": [
+    {
+      "timestamp": 1792799940000,
+      "open": 1.12025,
+      "high": 1.1205,
+      "low": 1.1202,
+      "close": 1.1202
+    }
+  ]
+}
+```
+
+The observed aggregate timestamps are milliseconds, while the response
+`from`/`to` fields are seconds. The SPA normalizes and sorts `aggs` itself,
+and uses an initial request of up to 1000 candles followed by older-page
+requests with `limit=300` and `to` set to the oldest loaded candle. A request
+with `limit=5` returned six aggregates in one observation, so `limit` must be
+treated as a broker hint until its exact boundary semantics are established.
+
+The SPA also exposes `/ajax/instrument/history`, which returns a mapping from
+instrument ID to `[timestamp_ms, price]` pairs for asset previews. It is a
+different response contract and is not a tick-history completeness proof.
+
+The loaded application bundles did not contain a dedicated quote-check or
+trade-history chart endpoint. The chart code fetches candles by instrument and
+timeframe, while trade data comes from `/ajax/user/trades` and is overlaid as
+local open/closed trade markers. Clicking a closed marker selects the
+position; the chart-history request itself carries no trade ID.
+
+Therefore the current evidence supports this narrower conclusion:
+
+- the broker exposes a useful aggregate OHLC history API for the modern SPA;
+- it is not a raw tick source and does not expose a `range_complete` field;
+- it does not prove that a chart around a trade is a special trade-scoped
+  quote-check request;
+- exact retention, maximum range, timezone, missing-candle semantics, and
+  price-source semantics still require authenticated UI replay with a real
+  closed trade.
+
+No runtime provider should be implemented from this observation alone. If the
+authenticated replay confirms the same contract, it is a candidate for a
+separate provider-aligned bar-history adapter, not for `fetch_tick_history()`
+or for replacing `trade_check2.php`.
+
 ## Hypothesis Review
 
 | Question | Evidence in this repository | Conclusion |
