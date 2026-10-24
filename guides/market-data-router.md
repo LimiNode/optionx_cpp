@@ -439,6 +439,41 @@ Implement `IMarketDataSubscriber::on_market_data_continuity()` when a chart or
 bot needs to display or record this state. These updates are separate from
 stream-level `MarketDataStatusUpdate` events such as `READY` or `DISCONNECTED`.
 
+### Bar History Completeness
+
+`BarHistoryResult::range_complete` is an explicit provider assertion and is
+`false` by default. Router separates response shape validation from that
+assertion:
+
+- bars must be ordered, have valid timestamps, and match the subscribed stream;
+- a non-empty `sequence.symbol` must match the requested instrument after
+  case, slash, and whitespace normalization; an empty symbol is allowed as
+  provider metadata fallback;
+- this normalized policy applies to historical bar responses only; live bar
+  and tick identity, provider subscription handles, and stream status matching
+  remain exact;
+- a dense provider may set `range_complete=true` only after proving every
+  requested timeframe slot, including an empty result only when emptiness is
+  authoritative;
+- a session-aware provider may set it for a sparse range when its own contract
+  proves that the missing intervals are closed-market time;
+- a non-empty response with `range_complete=false` may be delivered during
+  prefill as observations, but it cannot establish a trusted `LIVE` state;
+- an incomplete or unproved recovery response keeps the earliest
+  `unverified_from_time_ms` and leaves the route sticky `DEGRADED` until an
+  authoritative response covers that boundary.
+
+Structural validation uses the actual inclusive request boundaries for
+`PREFILL` as well as recovery. It never substitutes an unbounded synthetic
+window for the requested prefill range. For a dense grid, the expected slots
+run from `from_ts` through the last timeframe boundary not greater than
+`to_ts`; an upper request boundary does not need to be aligned itself.
+
+`MarketDataContinuityService::request_bar_history_batch()` rejects incomplete
+results by default. Callers that intentionally want observations rather than a
+continuity proof can pass `require_complete_range=false`; this does not change
+Router's recovery policy.
+
 ### Recovery After Transport Loss
 
 For an initialized `PREFILL_AND_RECOVER` bar route, `DISCONNECTED`,
@@ -493,12 +528,13 @@ missing interval. When a provider returns a partial but non-empty backfill,
 Router treats that response as an unsuccessful recovery: it does not deliver
 the partial batch or advance the continuity watermark, reports `FAILED`,
 releases the queued live data, and finishes in `DEGRADED`. A bounded gap
-response is accepted only when, after clipping to the actual requested range,
-it contains every expected timeframe slot. An empty successful response for a
-detected gap is treated the same way, so Router releases the queued live data
-once instead of retrying the same range forever. A successful empty prefill is
-terminal as well: it carries no historical batch and proceeds to the buffered
-live stream without retry.
+response is accepted when, after clipping to the actual requested range, it is
+structurally valid and the provider sets `range_complete=true`. The response
+may be sparse for a session-aware provider. An empty successful response is
+accepted only with the same explicit proof; otherwise it is an unproved
+response and cannot advance the continuity watermark. A successful authoritative
+empty prefill is terminal: it carries no historical batch and proceeds to the
+buffered live stream without retry.
 
 `max_backfill_bars` is applied before the provider request is sent. Therefore
 continuity updates report the actual bounded `from_time_ms`, `to_time_ms`, and
@@ -510,11 +546,12 @@ earliest unresolved boundary. A later successful history range cannot clear
 that trust loss unless it covers the unresolved boundary; Router emits `LIVE`
 only when no unresolved boundary remains known.
 
-The current completeness check assumes dense timeframe slots. Providers for
-session-based markets may need a future provider capability or explicit
-`range_complete` result before Router can distinguish a closed session from a
-missing candle. The last-closed boundary also uses the application wall clock;
-deployments with material broker-clock skew should account for that limitation.
+The provider's explicit `range_complete` result is now the completeness
+authority. Router does not infer a closed session from the number of returned
+bars, from an empty response, or from a dense-looking prefix. The last-closed
+boundary still uses the application wall clock; the follow-up broker-aligned
+clock change will move that boundary to provider time when a fresh estimate is
+available while retaining the local fallback.
 
 The payload flags distinguish source from delivery timing. A provider live
 payload normally starts as `LIVE_SOURCE | REALTIME`. If a route holds it in the

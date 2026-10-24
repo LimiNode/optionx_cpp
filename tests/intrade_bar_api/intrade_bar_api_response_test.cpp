@@ -3694,6 +3694,19 @@ TEST(IntradeBarApiResponses, UsesKnownBarHistoryStartLimits) {
     EXPECT_EQ(minimum_bar_history_from_ts("UNKNOWN"), 0);
 }
 
+TEST(IntradeBarApiResponses, DenseHistoryProofChecksSingleSlotTimestamp) {
+    const BarHistoryRequest request("EURUSD", 60, 60, 60);
+    BarSequence sequence;
+    sequence.symbol = "EURUSD";
+    sequence.timeframe = 60;
+    sequence.bars.emplace_back(1.0, 2.0, 0.5, 1.5, 1.0, 120000);
+
+    EXPECT_FALSE(bar_sequence_covers_dense_range(sequence, request));
+
+    sequence.bars.front().time_ms = 60000;
+    EXPECT_TRUE(bar_sequence_covers_dense_range(sequence, request));
+}
+
 TEST(IntradeBarApiResponses, PlatformBarHistoryResultPreservesFailureReason) {
     IntradeBarPlatform platform;
     BarHistoryResult result;
