@@ -19,6 +19,12 @@ series. Keep it short and remove items once they are handled.
   `/price_now`. It preserves distinct same-second snapshots and reports
   `range_complete` only for proven one-second coverage; it is not a persistent
   or authoritative broker tick archive.
+- Bar continuity now consumes explicit provider completeness proof instead of
+  inferring dense coverage from returned candle count. Session-aware providers
+  may prove sparse ranges, while unproved results remain degraded.
+- Reconnect bar recovery uses a fresh provider-aligned wall-clock estimate for
+  the last closed candle and falls back to the application wall clock when the
+  estimate is unavailable. Retry, timeout, and duration logic remains monotonic.
 - Router tick continuity now uses that provider history contract for opt-in
   `PREFILL` and `PREFILL_AND_RECOVER` routes. It buffers live ticks, treats
   `range_complete` as the authority, retries transport failures through
@@ -30,10 +36,6 @@ series. Keep it short and remove items once they are handled.
 
 - Add an authoritative provider tick-history implementation only if a broker
   later exposes one; do not treat `trade_check2.php` as a range-history API.
-- Replace the dense-bar assumption with an explicit provider completeness
-  capability or `range_complete` history result for session-based markets.
-- Allow reconnect candle boundaries to use a broker-aligned clock instead of
-  relying only on the application wall clock.
 - Add a fuller CMake package/export story for consumers that do not use the
   project as a direct submodule. The current `optionx_cpp::optionx_cpp`
   interface target covers build-tree/submodule consumption.
