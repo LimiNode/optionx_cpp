@@ -150,7 +150,8 @@ GET /ajax/instrument/chart-history
     to=<optional ISO timestamp for older-page loading>
 ```
 
-The response is shaped like:
+The following is an abbreviated response observed from the broker; only one of
+the six returned `aggs` items is shown:
 
 ```json
 {
@@ -186,8 +187,9 @@ different response contract and is not a tick-history completeness proof.
 The loaded application bundles did not contain a dedicated quote-check or
 trade-history chart endpoint. The chart code fetches candles by instrument and
 timeframe, while trade data comes from `/ajax/user/trades` and is overlaid as
-local open/closed trade markers. Clicking a closed marker selects the
-position; the chart-history request itself carries no trade ID.
+local open/closed trade markers. The inspected SPA code indicates that a
+closed marker selects the corresponding position locally; the chart-history
+request itself carries no trade ID.
 
 Therefore the current evidence supports this narrower conclusion:
 
