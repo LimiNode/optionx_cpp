@@ -6,6 +6,9 @@
 /// \brief Handles HTTP requests for user authentication, trade execution, balance updates, and market data retrieval.
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <iterator>
 
 #include "ApiResponses.hpp"
@@ -29,8 +32,10 @@ namespace optionx::platforms::intrade_bar {
                 BaseTradingPlatform& platform,
                 HttpClientComponent& client)
                 : BaseComponent(platform.event_bus()),
+                  m_platform(platform),
                   m_client(client),
-                  m_binance_client("https://api.binance.com") {
+                  m_binance_client("https://api.binance.com"),
+                  m_pow_lifecycle(std::make_shared<PowLifecycleState>()) {
             subscribe<events::AuthDataEvent>();
 
             m_api_headers = {
@@ -55,8 +60,31 @@ namespace optionx::platforms::intrade_bar {
             platform.register_component(this);
         }
 
-        /// \brief Default destructor.
-        virtual ~RequestManager() = default;
+        /// \brief Stops proof-of-work workers before the manager is destroyed.
+        ~RequestManager() override {
+            shutdown();
+        }
+
+        /// \brief Cancels background proof-of-work and stale login completions.
+        void shutdown() override {
+            if (m_pow_lifecycle) {
+                m_pow_lifecycle->alive.store(false, std::memory_order_release);
+                invalidate_auth_operations();
+            }
+            m_pow_task_manager.shutdown();
+        }
+
+        /// \brief Invalidates proof-of-work and login completions from an older auth flow.
+        ///
+        /// This is called by AuthManager whenever its public auth generation is
+        /// restarted, replaced, or invalidated. It deliberately does not stop
+        /// the worker: the worker observes the generation fence and exits
+        /// cooperatively, while shutdown() joins it during final teardown.
+        void invalidate_auth_operations() noexcept {
+            if (m_pow_lifecycle) {
+                m_pow_lifecycle->generation.fetch_add(1, std::memory_order_acq_rel);
+            }
+        }
 
         /// \brief Processes incoming events and dispatches them to the appropriate handlers.
         /// \param event The received event.
@@ -341,8 +369,33 @@ namespace optionx::platforms::intrade_bar {
             std::function<void(TradeOpenResult)> result_callback);
 
     private:
+        struct PowLifecycleState {
+            std::atomic<std::uint64_t> generation{0};
+            std::atomic<bool> alive{true};
+            std::atomic<bool> pow_active{false};
+        };
+
+        struct PowOperation {
+            explicit PowOperation(std::shared_ptr<PowLifecycleState> lifecycle_state)
+                : lifecycle(std::move(lifecycle_state)) {
+            }
+
+            ~PowOperation() {
+                if (lifecycle) {
+                    lifecycle->pow_active.store(false, std::memory_order_release);
+                }
+            }
+
+            std::atomic<bool> cancelled{false};
+            std::atomic<bool> completed{false};
+            std::shared_ptr<PowLifecycleState> lifecycle;
+        };
+
+        BaseTradingPlatform& m_platform; ///< Owner loop used to deliver async completions.
         HttpClientComponent& m_client;      ///< Reference to the HTTP client component.
         kurlyk::HttpClient m_binance_client; ///< Separate backend for BTCUSDT history.
+        utils::TaskManager m_pow_task_manager; ///< Dedicated worker for site-login proof-of-work.
+        std::shared_ptr<PowLifecycleState> m_pow_lifecycle; ///< Lifetime and auth-generation fence.
         kurlyk::Headers   m_api_headers; ///< Default API headers.
         std::string       m_user_id;     ///< User ID for authentication.
         std::string       m_user_hash;   ///< User authentication hash.
@@ -423,6 +476,7 @@ namespace optionx::platforms::intrade_bar {
         /// \param event The received authentication data event.
         void handle_event(const events::AuthDataEvent& event) {
             if (auto msg = std::dynamic_pointer_cast<AuthData>(event.auth_data)) {
+                m_pow_lifecycle->generation.fetch_add(1, std::memory_order_acq_rel);
                 LOGIT_TRACE0();
                 const std::string referer(msg->host + "/");
                 auto& client = get_http_client();
@@ -572,6 +626,15 @@ namespace optionx::platforms::intrade_bar {
                     const std::string& reason) {
                 if (!success) {
                     result_callback(false, {}, {}, {}, reason);
+                    return;
+                }
+                if (challenge.flow != LoginPageFlow::LEGACY_FORM) {
+                    result_callback(
+                        false,
+                        {},
+                        {},
+                        {},
+                        "Detected login flow requires the typed RequestManager API.");
                     return;
                 }
                 result_callback(
@@ -803,10 +866,13 @@ namespace optionx::platforms::intrade_bar {
             kurlyk::utils::to_query_string(query),
             get_rate_limit(RateLimitType::AUTHENTICATION));
 
-        auto callback = [this, config, origin, cookies, result_callback = std::move(result_callback)](
+        const auto result_callback_holder =
+            std::make_shared<std::function<void(MainPageChallengeResult)>>(
+                std::move(result_callback));
+        auto callback = [this, config, origin, cookies, result_callback_holder](
                 kurlyk::HttpResponsePtr response) mutable {
-            if (!validate_response(response, [&result_callback](const std::string& error_text) {
-                    result_callback(MainPageChallengeResult::fail(error_text));
+            if (!validate_response(response, [result_callback_holder](const std::string& error_text) {
+                    (*result_callback_holder)(MainPageChallengeResult::fail(error_text));
                 })) {
                 return;
             }
@@ -815,23 +881,131 @@ namespace optionx::platforms::intrade_bar {
                 const auto parsed = parse_site_login_challenge_response(
                     response->content,
                     config.bits);
-                const auto nonce = solve_site_login_pow(parsed.challenge, parsed.bits);
-                if (!nonce) {
-                    result_callback(MainPageChallengeResult::fail(
-                        "Failed to solve Intrade site login proof-of-work."));
+                const auto lifecycle = m_pow_lifecycle;
+                const auto generation = lifecycle->generation.load(std::memory_order_acquire);
+                const auto owner_loop = &m_platform;
+                const auto challenge_cookies = merge_set_cookies(cookies, response->headers);
+
+                if (!lifecycle->alive.load(std::memory_order_acquire)) {
+                    (*result_callback_holder)(MainPageChallengeResult::fail(
+                        "Intrade site login proof-of-work worker is unavailable."));
                     return;
                 }
 
-                MainPageChallenge challenge;
-                challenge.flow = LoginPageFlow::SITE_FORM;
-                challenge.origin = origin;
-                challenge.cookies = merge_set_cookies(cookies, response->headers);
-                challenge.site_api_path = config.api_path;
-                challenge.site_csrf = config.csrf;
-                challenge.site_pow = parsed.challenge;
-                challenge.site_nonce = *nonce;
-                challenge.site_pow_bits = parsed.bits;
-                result_callback(MainPageChallengeResult::ok(std::move(challenge)));
+                bool expected_pow_active = false;
+                if (!lifecycle->pow_active.compare_exchange_strong(
+                        expected_pow_active,
+                        true,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    (*result_callback_holder)(MainPageChallengeResult::fail(
+                        "Intrade site login proof-of-work is already running."));
+                    return;
+                }
+
+                const auto operation = std::make_shared<PowOperation>(lifecycle);
+
+                const auto post_completion = [owner_loop,
+                                              lifecycle,
+                                              operation,
+                                              generation,
+                                              config,
+                                              origin,
+                                              challenge_cookies,
+                                              parsed_challenge = parsed.challenge,
+                                              parsed_bits = parsed.bits,
+                                              result_callback_holder](
+                        std::optional<std::string> nonce,
+                        std::string failure_reason) {
+                    auto deliver = [lifecycle,
+                                    operation,
+                                    generation,
+                                    config,
+                                    origin,
+                                    challenge_cookies,
+                                    parsed_challenge,
+                                    parsed_bits,
+                                    nonce = std::move(nonce),
+                                    failure_reason = std::move(failure_reason),
+                                    result_callback_holder]() mutable {
+                        if (operation->completed.exchange(true, std::memory_order_acq_rel)) {
+                            return;
+                        }
+                        if (operation->cancelled.load(std::memory_order_acquire) ||
+                            !lifecycle->alive.load(std::memory_order_acquire) ||
+                            lifecycle->generation.load(std::memory_order_acquire) != generation) {
+                            return;
+                        }
+                        if (!nonce) {
+                            (*result_callback_holder)(MainPageChallengeResult::fail(
+                                failure_reason.empty()
+                                    ? "Failed to solve Intrade site login proof-of-work."
+                                    : failure_reason));
+                            return;
+                        }
+
+                        MainPageChallenge challenge;
+                        challenge.flow = LoginPageFlow::SITE_FORM;
+                        challenge.origin = origin;
+                        challenge.cookies = challenge_cookies;
+                        challenge.site_api_path = config.api_path;
+                        challenge.site_csrf = config.csrf;
+                        challenge.site_pow = parsed_challenge;
+                        challenge.site_nonce = *nonce;
+                        challenge.site_pow_bits = parsed_bits;
+                        (*result_callback_holder)(MainPageChallengeResult::ok(std::move(challenge)));
+                    };
+
+                    if (!owner_loop->post_task(std::move(deliver))) {
+                        operation->cancelled.store(true, std::memory_order_release);
+                    }
+                };
+
+                m_pow_task_manager.run();
+                const bool scheduled = m_pow_task_manager.add_single_task(
+                    "intrade-site-login-pow",
+                    [lifecycle,
+                      operation,
+                      generation,
+                      parsed_challenge = parsed.challenge,
+                      parsed_bits = parsed.bits,
+                      post_completion](
+                             std::shared_ptr<utils::Task> task) mutable {
+                        const auto cancelled = [
+                                lifecycle,
+                                operation,
+                                generation,
+                                task]() {
+                            return task->is_shutdown() ||
+                                operation->cancelled.load(std::memory_order_acquire) ||
+                                !lifecycle->alive.load(std::memory_order_acquire) ||
+                                lifecycle->generation.load(std::memory_order_acquire) != generation;
+                        };
+                        if (cancelled()) return;
+
+                        try {
+                            const auto nonce = solve_site_login_pow(
+                                parsed_challenge,
+                                parsed_bits,
+                                std::uint64_t{1} << (parsed_bits + 4U),
+                                cancelled,
+                                std::chrono::steady_clock::now() + SITE_LOGIN_POW_TIME_BUDGET);
+                            if (cancelled()) return;
+                            post_completion(std::move(nonce), {});
+                        } catch (const std::exception& ex) {
+                            post_completion(
+                                std::nullopt,
+                                std::string("Intrade site login proof-of-work failed: ") + ex.what());
+                        } catch (...) {
+                            post_completion(
+                                std::nullopt,
+                                "Intrade site login proof-of-work failed with an unknown exception.");
+                        }
+                    });
+                if (!scheduled) {
+                    (*result_callback_holder)(MainPageChallengeResult::fail(
+                        "Intrade site login proof-of-work worker is unavailable."));
+                }
             } catch (const std::exception& ex) {
                 LOGIT_ERROR(
                     "Failed to process Intrade site login challenge. status=",
@@ -840,7 +1014,9 @@ namespace optionx::platforms::intrade_bar {
                     response->content.size(),
                     ", reason=",
                     ex.what());
-                result_callback(MainPageChallengeResult::fail(ex.what(), response->status_code));
+                (*result_callback_holder)(MainPageChallengeResult::fail(
+                    ex.what(),
+                    response->status_code));
             }
         };
 
@@ -2007,17 +2183,11 @@ namespace optionx::platforms::intrade_bar {
 
             auto [currency, account] = parse_profile_response(response->content);
             if (currency == CurrencyType::UNKNOWN || account == AccountType::UNKNOWN) {
-                //LOGIT_PRINT_ERROR("Response validation failed: expected 'ok', but received '", response->content, "'.");
-#               ifdef OPTIONX_LOG_UNIQUE_FILE_INDEX
-                const int log_index = OPTIONX_LOG_UNIQUE_FILE_INDEX;
-                LOGIT_STREAM_ERROR_TO(log_index) << response->content;
                 LOGIT_PRINT_ERROR(
-                    "Response validation failed: currency=",currency,";account=",account,"; Content log was written to file: ",
-                    LOGIT_GET_LAST_FILE_NAME(log_index)
-                );
-#               else
-                LOGIT_PRINT_ERROR("Response validation failed: currency=", currency, ";account=", account);
-#               endif
+                    "Response validation failed: status=", response->status_code,
+                    ";body_bytes=", response->content.size(),
+                    ";currency=", currency,
+                    ";account=", account);
                 profile_callback(false, currency, account);
                 return;
             }

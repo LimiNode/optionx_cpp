@@ -330,6 +330,7 @@ namespace optionx::platforms::intrade_bar {
             connection_callback_t callback) {
         cancel_pending_connect_callback(reason);
         const std::uint64_t generation = ++m_auth_generation;
+        m_request_manager.invalidate_auth_operations();
         if (callback) {
             m_pending_connect_generation = generation;
             m_pending_connect_callback = std::move(callback);
@@ -344,6 +345,7 @@ namespace optionx::platforms::intrade_bar {
 
     inline void AuthManager::invalidate_auth_generation(const char* reason) {
         const std::uint64_t generation = ++m_auth_generation;
+        m_request_manager.invalidate_auth_operations();
         cancel_pending_connect_callback(reason);
         LOGIT_DEBUG(
             "Intrade Bar auth: generation invalidated. reason=",

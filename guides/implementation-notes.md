@@ -148,6 +148,33 @@ overloads. `run()` запускает worker thread, `process()` выполня�
 - Rate limit ids хранятся в `m_rate_limits`; используй enum class
   `RateLimitType` внутри конкретной платформы.
 
+## Platform Owner-Loop HTTP Contract
+
+Platform-owned HTTP state is confined to the platform owner loop.
+
+- `BaseTradingPlatform::run()` schedules the periodic owner-loop task.
+- The owner loop processes the `EventBus`, HTTP futures, and manager callbacks
+  in one serialized `TaskManager` execution context.
+- `RequestManager` and `HttpClient` configuration, request creation, and
+  follow-up requests must run on that owner loop.
+- Concrete platform facade methods that initiate broker HTTP work must enqueue
+  before delegating to a manager. IntradeBar trade-result, trade-history, and
+  bar-history facade methods follow this rule; local read-only snapshots may
+  remain synchronous when their storage is independently synchronized.
+- External threads must enqueue work with `BaseTradingPlatform::post_task()` or
+  use a facade API that performs the enqueue. They must not call
+  `RequestManager` or mutate `HttpClient` configuration directly.
+- HTTP callbacks may create follow-up requests because they are delivered by
+  the owner loop. CPU-heavy helper work must use a dedicated bounded worker and
+  return its result through `post_task()`. Such work needs both a bounded
+  attempt count and a monotonic deadline; admission must be explicitly bounded
+  (currently one site-login PoW operation), with the slot released on every
+  terminal path including cancellation, timeout, scheduler rejection, and
+  shutdown.
+- Shutdown stops the platform loop before component destruction. Dedicated
+  workers must be cancelable and joined, and their completion callbacks must
+  check shutdown and operation-generation state before touching platform data.
+
 ## Broker HTTP Adapter Pattern
 
 Platform `RequestManager` classes should keep broker-specific HTTP and parser

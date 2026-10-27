@@ -102,32 +102,52 @@ namespace optionx::platforms {
         /// \param query Broker-side trade identity and retry settings.
         /// \param result Partially filled result object to update with broker data.
         /// \param callback Callback receiving the updated result.
+        /// \details The request is queued onto the platform owner loop before
+        ///          the trade manager touches account or HTTP state.
         /// \return True if the check was accepted for processing; false otherwise.
         bool fetch_trade_result(
                 TradeResultQuery query,
                 std::unique_ptr<TradeResult> result,
                 trade_result_check_callback_t callback) override {
-            return m_trade_manager.fetch_trade_result(
-                std::move(query),
-                std::move(result),
-                std::move(callback));
+            if (!result || !callback) return false;
+            auto result_holder =
+                std::make_shared<std::unique_ptr<TradeResult>>(std::move(result));
+            return post_task(
+                [this,
+                 query = std::move(query),
+                 result_holder,
+                 callback = std::move(callback)]() mutable {
+                    auto owned_result = std::move(*result_holder);
+                    if (!owned_result) return;
+                    m_trade_manager.fetch_trade_result(
+                        std::move(query),
+                        std::move(owned_result),
+                        std::move(callback));
+                });
         }
 
         /// \brief Requests closed Intrade Bar trade history.
         /// \param request Trade history range and timestamp field.
         /// \param callback Callback receiving closed trade history or an error.
+        /// \details The request is queued onto the platform owner loop.
         /// \return True if the history request was accepted for processing; false otherwise.
         bool fetch_trade_history(
                 const TradeHistoryRequest& request,
                 trade_history_callback_t callback) override {
-            return m_trade_manager.fetch_trade_history(request, std::move(callback));
+            if (!callback || !request.has_valid_range()) return false;
+            return post_task(
+                [this, request, callback = std::move(callback)]() mutable {
+                    m_trade_manager.fetch_trade_history(
+                        request,
+                        std::move(callback));
+                });
         }
 
         /// \brief Requests all available closed Intrade Bar trade history.
         /// \param callback Callback receiving closed trade history or an error.
         /// \return True if the history request was accepted for processing; false otherwise.
         bool fetch_trade_history(trade_history_callback_t callback) override {
-            return m_trade_manager.fetch_trade_history(
+            return fetch_trade_history(
                 TradeHistoryRequest::all(),
                 std::move(callback));
         }
@@ -135,30 +155,34 @@ namespace optionx::platforms {
         /// \brief Requests historical Intrade Bar candle data.
         /// \param request Symbol, timeframe, range, and preferred price source.
         /// \param callback Callback receiving parsed bars or a failure reason.
+        /// \details The request is queued onto the platform owner loop before
+        ///          the broker HTTP client is configured or invoked.
         /// \return True if the history request was accepted for processing; false otherwise.
         bool fetch_bar_history(
                 const BarHistoryRequest& request,
                 market_data::BaseMarketDataProvider::bar_history_callback_t callback) override {
             if (!callback) return false;
-            m_request_manager.request_bar_history_result(
-                request,
-                [callback = std::move(callback), request](intrade_bar::BarHistoryApiResult result) {
-                    if (result) {
-                        const auto range_complete =
-                            intrade_bar::bar_sequence_covers_dense_range(
-                                result.value,
-                                request);
-                        callback(BarHistoryResult::ok(
-                            std::move(result.value),
-                            result.status_code,
-                            range_complete));
-                        return;
-                    }
-                    callback(BarHistoryResult::fail(
-                        std::move(result.error_message),
-                        result.status_code));
+            return post_task(
+                [this, request, callback = std::move(callback)]() mutable {
+                    m_request_manager.request_bar_history_result(
+                        request,
+                        [callback = std::move(callback), request](intrade_bar::BarHistoryApiResult result) mutable {
+                            if (result) {
+                                const auto range_complete =
+                                    intrade_bar::bar_sequence_covers_dense_range(
+                                        result.value,
+                                        request);
+                                callback(BarHistoryResult::ok(
+                                    std::move(result.value),
+                                    result.status_code,
+                                    range_complete));
+                                return;
+                            }
+                            callback(BarHistoryResult::fail(
+                                std::move(result.error_message),
+                                result.status_code));
+                        });
                 });
-            return true;
         }
 
         /// \brief Returns observed Intrade polling ticks from the in-memory archive.

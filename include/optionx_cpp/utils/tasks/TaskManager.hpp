@@ -35,18 +35,14 @@ namespace optionx::utils {
         /// \brief Adds a single execution task.
         /// \param callback The callback function to execute.
         bool add_single_task(Task::Callback callback) {
-            if (m_shutdown) return false;
-            add_task(std::make_shared<Task>(TaskType::SINGLE, std::move(callback)));
-            return true;
+            return add_task(std::make_shared<Task>(TaskType::SINGLE, std::move(callback)));
         }
 
         /// \brief Adds a delayed task.
         /// \param delay_ms Delay in milliseconds before execution.
         /// \param callback The callback function to execute.
         bool add_delayed_task(int64_t delay_ms, Task::Callback callback) {
-            if (m_shutdown) return false;
-            add_task(std::make_shared<Task>(TaskType::DELAYED_SINGLE, std::move(callback), delay_ms));
-            return true;
+            return add_task(std::make_shared<Task>(TaskType::DELAYED_SINGLE, std::move(callback), delay_ms));
         }
 
         /// \brief Adds a periodic task.
@@ -54,8 +50,7 @@ namespace optionx::utils {
         /// \param callback The callback function to execute.
         bool add_periodic_task(int64_t period_ms, Task::Callback callback) {
             if (!can_add_periodic_task(period_ms)) return false;
-            add_task(std::make_shared<Task>(TaskType::PERIODIC, std::move(callback), 0, period_ms));
-            return true;
+            return add_task(std::make_shared<Task>(TaskType::PERIODIC, std::move(callback), 0, period_ms));
         }
 
         /// \brief Adds a delayed periodic task.
@@ -64,17 +59,14 @@ namespace optionx::utils {
         /// \param callback The callback function to execute.
         bool add_delayed_periodic_task(int64_t delay_ms, int64_t period_ms, Task::Callback callback) {
             if (!can_add_periodic_task(period_ms)) return false;
-            add_task(std::make_shared<Task>(TaskType::DELAYED_PERIODIC, std::move(callback), delay_ms, period_ms));
-            return true;
+            return add_task(std::make_shared<Task>(TaskType::DELAYED_PERIODIC, std::move(callback), delay_ms, period_ms));
         }
 
         /// \brief Adds a task to execute at a specific timestamp.
         /// \param timestamp_ms Timestamp in milliseconds for execution.
         /// \param callback The callback function to execute.
         bool add_on_date_task(int64_t timestamp_ms, Task::Callback callback) {
-            if (m_shutdown) return false;
-            add_task(std::make_shared<Task>(TaskType::ON_DATE, std::move(callback), 0, 0, timestamp_ms));
-            return true;
+            return add_task(std::make_shared<Task>(TaskType::ON_DATE, std::move(callback), 0, 0, timestamp_ms));
         }
 
         /// \brief Adds a periodic task starting at a specific timestamp.
@@ -83,8 +75,7 @@ namespace optionx::utils {
         /// \param callback The callback function to execute.
         bool add_periodic_on_date_task(int64_t timestamp_ms, int64_t period_ms, Task::Callback callback) {
             if (!can_add_periodic_task(period_ms)) return false;
-            add_task(std::make_shared<Task>(TaskType::PERIODIC_ON_DATE, std::move(callback), 0, period_ms, timestamp_ms));
-            return true;
+            return add_task(std::make_shared<Task>(TaskType::PERIODIC_ON_DATE, std::move(callback), 0, period_ms, timestamp_ms));
         }
         
         // ---
@@ -93,9 +84,7 @@ namespace optionx::utils {
         /// \param name
         /// \param callback The callback function to execute.
         bool add_single_task(std::string name, Task::Callback callback) {
-            if (m_shutdown) return false;
-            add_task(std::make_shared<Task>(std::move(name), TaskType::SINGLE, std::move(callback)));
-            return true;
+            return add_task(std::make_shared<Task>(std::move(name), TaskType::SINGLE, std::move(callback)));
         }
 
         /// \brief Adds a delayed task.
@@ -103,9 +92,7 @@ namespace optionx::utils {
         /// \param delay_ms Delay in milliseconds before execution.
         /// \param callback The callback function to execute.
         bool add_delayed_task(std::string name, int64_t delay_ms, Task::Callback callback) {
-            if (m_shutdown) return false;
-            add_task(std::make_shared<Task>(std::move(name), TaskType::DELAYED_SINGLE, std::move(callback), delay_ms));
-            return true;
+            return add_task(std::make_shared<Task>(std::move(name), TaskType::DELAYED_SINGLE, std::move(callback), delay_ms));
         }
 
         /// \brief Adds a periodic task.
@@ -114,8 +101,7 @@ namespace optionx::utils {
         /// \param callback The callback function to execute.
         bool add_periodic_task(std::string name, int64_t period_ms, Task::Callback callback) {
             if (!can_add_periodic_task(period_ms)) return false;
-            add_task(std::make_shared<Task>(std::move(name), TaskType::PERIODIC, std::move(callback), 0, period_ms));
-            return true;
+            return add_task(std::make_shared<Task>(std::move(name), TaskType::PERIODIC, std::move(callback), 0, period_ms));
         }
 
         /// \brief Adds a delayed periodic task.
@@ -125,8 +111,7 @@ namespace optionx::utils {
         /// \param callback The callback function to execute.
         bool add_delayed_periodic_task(std::string name, int64_t delay_ms, int64_t period_ms, Task::Callback callback) {
             if (!can_add_periodic_task(period_ms)) return false;
-            add_task(std::make_shared<Task>(std::move(name), TaskType::DELAYED_PERIODIC, std::move(callback), delay_ms, period_ms));
-            return true;
+            return add_task(std::make_shared<Task>(std::move(name), TaskType::DELAYED_PERIODIC, std::move(callback), delay_ms, period_ms));
         }
 
         /// \brief Adds a task to execute at a specific timestamp.
@@ -134,9 +119,7 @@ namespace optionx::utils {
         /// \param timestamp_ms Timestamp in milliseconds for execution.
         /// \param callback The callback function to execute.
         bool add_on_date_task(std::string name, int64_t timestamp_ms, Task::Callback callback) {
-            if (m_shutdown) return false;
-            add_task(std::make_shared<Task>(std::move(name), TaskType::ON_DATE, std::move(callback), 0, 0, timestamp_ms));
-            return true;
+            return add_task(std::make_shared<Task>(std::move(name), TaskType::ON_DATE, std::move(callback), 0, 0, timestamp_ms));
         }
 
         /// \brief Adds a periodic task starting at a specific timestamp.
@@ -146,8 +129,7 @@ namespace optionx::utils {
         /// \param callback The callback function to execute.
         bool add_periodic_on_date_task(std::string name, int64_t timestamp_ms, int64_t period_ms, Task::Callback callback) {
             if (!can_add_periodic_task(period_ms)) return false;
-            add_task(std::make_shared<Task>(std::move(name), TaskType::PERIODIC_ON_DATE, std::move(callback), 0, period_ms, timestamp_ms));
-            return true;
+            return add_task(std::make_shared<Task>(std::move(name), TaskType::PERIODIC_ON_DATE, std::move(callback), 0, period_ms, timestamp_ms));
         }
 
         /// \brief Processes and executes ready tasks.
@@ -264,11 +246,13 @@ namespace optionx::utils {
 
         /// \brief Adds a new task to the manager.
         /// \param task A unique pointer to the task.
-        void add_task(TaskPtr task) {
+        bool add_task(TaskPtr task) {
             std::unique_lock<std::mutex> lock(m_mutex);
+            if (m_shutdown) return false;
             m_pending_tasks.push_back(std::move(task));
             lock.unlock();
             m_cv.notify_one();
+            return true;
         }
 
         /// \brief Validates state and period before adding a periodic task.

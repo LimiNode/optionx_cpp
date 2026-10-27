@@ -124,6 +124,16 @@ supported public entry point or an internal leaf:
   manager или provider.
 - В async/HTTP/WebSocket коде сохраняй lifecycle: `run()` -> periodic
   `process()` -> `shutdown()`/drain/cancel.
+- Platform-owned HTTP requests and `RequestManager` state are owner-loop
+  confined: create/configure requests from the platform `TaskManager` loop.
+  External threads must use `BaseTradingPlatform::post_task()` or an
+  equivalent enqueue API; do not add direct cross-thread `RequestManager` or
+  `HttpClient` calls without an explicit synchronization and lifecycle contract.
+- CPU-heavy work such as site-login proof-of-work must have both a bounded
+  attempt budget and a `std::chrono::steady_clock` deadline. Admit at most the
+  explicitly supported number of concurrent operations, reject excess work
+  before queueing, and release admission state on success, failure, cancel,
+  timeout, scheduler rejection, and shutdown.
 - В recursive async/HTTP callbacks проверяй ownership graph. `lambda` или
   `std::function` не должна через `std::shared_ptr` владеть объектом, который
   содержит эту же callback-функцию: это создаёт постоянный reference cycle.

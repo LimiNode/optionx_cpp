@@ -467,7 +467,8 @@ struct SiteLoginServer {
                 challenge_body = body;
                 response->write(
                     SimpleWeb::StatusCode::success_ok,
-                    R"JSON({"ok":true,"challenge":"fixture-challenge","bits":8})JSON");
+                    std::string(R"JSON({"ok":true,"challenge":"fixture-challenge","bits":)JSON") +
+                        std::to_string(challenge_bits.load()) + "}");
                 return;
             }
 
@@ -541,6 +542,7 @@ struct SiteLoginServer {
     std::thread thread;
     std::atomic<int> login_page_requests{0};
     std::atomic<int> challenge_requests{0};
+    std::atomic<int> challenge_bits{8};
     std::atomic<int> login_requests{0};
     std::atomic<int> auth_redirect_requests{0};
     std::atomic<int> session_requests{0};
@@ -1134,6 +1136,30 @@ TEST(IntradeBarLogin, ParsesSiteLoginContractByContent) {
         std::runtime_error);
 }
 
+TEST(IntradeBarLogin, BoundsAndCancelsSiteLoginPow) {
+    EXPECT_FALSE(solve_site_login_pow("fixture-challenge", 8, 1));
+
+    std::atomic<int> cancellation_checks{0};
+    const auto cancelled = solve_site_login_pow(
+        "fixture-challenge",
+        8,
+        1000,
+        [&cancellation_checks]() {
+            return ++cancellation_checks > 1;
+        });
+    EXPECT_FALSE(cancelled);
+    EXPECT_GT(cancellation_checks.load(), 1);
+}
+
+TEST(IntradeBarLogin, EnforcesMonotonicSiteLoginPowDeadline) {
+    EXPECT_FALSE(solve_site_login_pow(
+        "fixture-challenge",
+        8,
+        std::numeric_limits<std::uint64_t>::max(),
+        {},
+        std::chrono::steady_clock::now()));
+}
+
 TEST(IntradeBarLogin, AnalyzesLegacyModernAndUnknownRedirectChains) {
     const auto legacy_redirect = std::make_unique<kurlyk::HttpResponse>();
     legacy_redirect->status_code = 302;
@@ -1234,19 +1260,17 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
 
     bool main_callback_received = false;
     bool main_success = false;
+    MainPageChallenge main_challenge;
     std::string main_reason;
     request_manager.request_main_page(
         auth_data,
         [&](bool success,
-            const std::string& req_id,
-            const std::string& req_value,
-            const std::string&,
+            const MainPageChallenge& challenge,
             const std::string& reason) {
             main_callback_received = true;
             main_success = success;
+            main_challenge = challenge;
             main_reason = reason;
-            EXPECT_TRUE(req_id.empty());
-            EXPECT_TRUE(req_value.empty());
         });
 
     for (int i = 0; i < 500 && !main_callback_received; ++i) {
@@ -1255,6 +1279,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     }
     ASSERT_TRUE(main_callback_received);
     ASSERT_TRUE(main_success) << main_reason;
+    EXPECT_EQ(main_challenge.flow, LoginPageFlow::MODERN_NUXT);
 
     bool callback_received = false;
     bool success = false;
@@ -1263,9 +1288,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     std::string cookies;
     std::string reason;
     request_manager.request_login(
-        "",
-        "",
-        "landing=1",
+        main_challenge,
         auth_data,
         [&](bool login_success,
             const std::string& login_user_id,
@@ -1282,6 +1305,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
 
     for (int i = 0; i < 500 && !callback_received; ++i) {
         http_client.process();
+        platform.process();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -1308,9 +1332,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     cookies.clear();
     reason.clear();
     request_manager.request_login(
-        "",
-        "",
-        "landing=1",
+        main_challenge,
         auth_data,
         [&](bool login_success,
             const std::string& login_user_id,
@@ -1327,6 +1349,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
 
     for (int i = 0; i < 500 && !callback_received; ++i) {
         http_client.process();
+        platform.process();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -1377,6 +1400,7 @@ TEST(IntradeBarLogin, UsesSiteFormWithoutHostnameSpecialCase) {
 
     for (int i = 0; i < 1000 && !page_callback_received; ++i) {
         http_client.process();
+        platform.process();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -1421,6 +1445,7 @@ TEST(IntradeBarLogin, UsesSiteFormWithoutHostnameSpecialCase) {
 
     for (int i = 0; i < 1000 && !callback_received; ++i) {
         http_client.process();
+        platform.process();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -1444,6 +1469,94 @@ TEST(IntradeBarLogin, UsesSiteFormWithoutHostnameSpecialCase) {
     EXPECT_NE(server.login_body.find("password=fake_password"), std::string::npos);
 
     platform.shutdown();
+}
+
+TEST(IntradeBarLogin, LegacyMainPageOverloadRejectsSiteForm) {
+    SiteLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool callback_received = false;
+    bool success = true;
+    std::string reason;
+    request_manager.request_main_page(
+        auth_data,
+        [&](bool callback_success,
+            const std::string&,
+            const std::string&,
+            const std::string&,
+            const std::string& callback_reason) {
+            callback_received = true;
+            success = callback_success;
+            reason = callback_reason;
+        });
+
+    for (int i = 0; i < 1000 && !callback_received; ++i) {
+        http_client.process();
+        platform.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(callback_received) << reason;
+    EXPECT_FALSE(success);
+    EXPECT_EQ(reason, "Detected login flow requires the typed RequestManager API.");
+    EXPECT_EQ(server.challenge_requests.load(), 1);
+    EXPECT_EQ(server.login_requests.load(), 0);
+    platform.shutdown();
+}
+
+TEST(IntradeBarLogin, ShutsDownWhileSiteLoginPowIsRunning) {
+    SiteLoginServer server;
+    server.challenge_bits.store(20);
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    std::atomic<bool> callback_received{false};
+    request_manager.request_main_page(
+        auth_data,
+        [&](bool,
+            const MainPageChallenge&,
+            const std::string&) {
+            callback_received.store(true);
+        });
+
+    for (int i = 0; i < 1000 && server.challenge_requests.load() == 0; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_EQ(server.challenge_requests.load(), 1);
+
+    // Deliver the challenge response, then cancel the worker before it can
+    // complete a high-difficulty search or post a stale owner-loop callback.
+    http_client.process();
+    platform.shutdown();
+
+    EXPECT_FALSE(callback_received.load());
+    EXPECT_EQ(server.login_requests.load(), 0);
 }
 
 TEST(IntradeBarLogin, CachedModernSessionRoundTripRetainsUserId) {
@@ -3976,6 +4089,7 @@ TEST(IntradeBarApiResponses, PlatformBarHistoryResultPreservesFailureReason) {
             ++callback_count;
         }));
 
+    platform.process();
     platform.shutdown();
 
     ASSERT_EQ(callback_count, 1);
@@ -3997,6 +4111,7 @@ TEST(IntradeBarApiResponses, PlatformBarHistoryRejectsNegativeTimeframe) {
             ++callback_count;
         }));
 
+    platform.process();
     platform.shutdown();
 
     ASSERT_EQ(callback_count, 1);

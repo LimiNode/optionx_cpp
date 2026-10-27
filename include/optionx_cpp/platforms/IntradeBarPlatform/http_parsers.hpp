@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <vector>
 #include <unordered_map>
 #include <sstream>
@@ -62,6 +64,7 @@ namespace optionx::platforms::intrade_bar {
     };
 
     inline constexpr std::uint32_t MAX_SITE_LOGIN_POW_BITS = 20;
+    inline constexpr std::chrono::milliseconds SITE_LOGIN_POW_TIME_BUDGET{2500};
 
     /// \brief Validates a same-origin API path from site configuration.
     inline bool is_safe_site_login_api_path(const std::string& path) {
@@ -199,14 +202,18 @@ namespace optionx::platforms::intrade_bar {
     /// \return Decimal nonce, or empty when the bounded search fails.
     inline std::optional<std::string> solve_site_login_pow(
             const std::string& challenge,
-            std::uint32_t bits) {
+            std::uint32_t bits,
+            std::uint64_t max_attempts,
+            const std::function<bool()>& should_cancel = {},
+            const std::chrono::steady_clock::time_point deadline =
+                std::chrono::steady_clock::time_point::max()) {
         if (challenge.empty() || bits == 0 || bits > MAX_SITE_LOGIN_POW_BITS) {
             return std::nullopt;
         }
 
         const std::uint32_t limit =
             (std::numeric_limits<std::uint32_t>::max)() >> bits;
-        const std::uint64_t max_attempts = std::uint64_t{1} << (bits + 4U);
+        if (max_attempts == 0) return std::nullopt;
         std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
             EVP_MD_CTX_new(),
             &EVP_MD_CTX_free);
@@ -214,6 +221,11 @@ namespace optionx::platforms::intrade_bar {
 
         const std::string prefix = challenge + ':';
         for (std::uint64_t nonce = 0; nonce < max_attempts; ++nonce) {
+            if ((should_cancel && should_cancel()) ||
+                std::chrono::steady_clock::now() >= deadline) {
+                return std::nullopt;
+            }
+
             const std::string candidate = prefix + std::to_string(nonce);
             unsigned char digest[EVP_MAX_MD_SIZE] = {};
             unsigned int digest_size = 0;
@@ -232,6 +244,24 @@ namespace optionx::platforms::intrade_bar {
             if (first_word <= limit) return std::to_string(nonce);
         }
         return std::nullopt;
+    }
+
+    /// \brief Solves a site login proof-of-work with the standard bounded budget.
+    /// \param challenge Printable broker challenge.
+    /// \param bits Required leading-zero difficulty.
+    /// \return Decimal nonce, or empty when the bounded search fails.
+    inline std::optional<std::string> solve_site_login_pow(
+            const std::string& challenge,
+            std::uint32_t bits) {
+        if (bits == 0 || bits > MAX_SITE_LOGIN_POW_BITS) {
+            return std::nullopt;
+        }
+        return solve_site_login_pow(
+            challenge,
+            bits,
+            std::uint64_t{1} << (bits + 4U),
+            {},
+            std::chrono::steady_clock::now() + SITE_LOGIN_POW_TIME_BUDGET);
     }
 
     /// \brief Parses the broker site login JSON response.
