@@ -110,19 +110,69 @@ namespace optionx::platforms {
                 std::unique_ptr<TradeResult> result,
                 trade_result_check_callback_t callback) override {
             if (!result || !callback) return false;
+
             auto result_holder =
                 std::make_shared<std::unique_ptr<TradeResult>>(std::move(result));
+            auto fallback_result = result_holder->get()->clone_shared();
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto callback_holder =
+                std::make_shared<trade_result_check_callback_t>(std::move(callback));
+            auto complete = std::make_shared<
+                std::function<void(std::unique_ptr<TradeResult>)>>();
+            *complete = [completed, callback_holder, fallback_result](
+                    std::unique_ptr<TradeResult> completed_result) mutable {
+                if (completed->exchange(true, std::memory_order_acq_rel)) return;
+                if (!completed_result) {
+                    completed_result = fallback_result->clone_unique();
+                    completed_result->trade_state = completed_result->live_state = TradeState::CHECK_ERROR;
+                    completed_result->error_code = TradeErrorCode::PARSING_ERROR;
+                    completed_result->error_desc =
+                        "Intrade Bar trade result callback returned no result.";
+                }
+                auto terminal_callback = std::move(*callback_holder);
+                if (terminal_callback) {
+                    terminal_callback(std::move(completed_result));
+                }
+            };
+            auto fail = [complete, fallback_result](
+                    TradeErrorCode error_code,
+                    std::string reason) mutable {
+                auto failed_result = fallback_result->clone_unique();
+                failed_result->trade_state = failed_result->live_state = TradeState::CHECK_ERROR;
+                failed_result->error_code = error_code;
+                failed_result->error_desc = std::move(reason);
+                (*complete)(std::move(failed_result));
+            };
+
             return post_task(
                 [this,
                  query = std::move(query),
                  result_holder,
-                 callback = std::move(callback)]() mutable {
+                 complete,
+                 fail]() mutable {
                     auto owned_result = std::move(*result_holder);
-                    if (!owned_result) return;
-                    m_trade_manager.fetch_trade_result(
+                    if (!owned_result) {
+                        fail(
+                            TradeErrorCode::INVALID_REQUEST,
+                            "Intrade Bar trade result request lost its result object.");
+                        return;
+                    }
+                    const bool accepted = m_trade_manager.fetch_trade_result(
                         std::move(query),
                         std::move(owned_result),
-                        std::move(callback));
+                        [complete](std::unique_ptr<TradeResult> fetched_result) mutable {
+                            (*complete)(std::move(fetched_result));
+                        });
+                    if (!accepted) {
+                        fail(
+                            TradeErrorCode::INVALID_REQUEST,
+                            "Intrade Bar trade result request was rejected by TradeManager.");
+                    }
+                },
+                [fail]() mutable {
+                    fail(
+                        TradeErrorCode::CLIENT_FORCED_CLOSE,
+                        "Intrade Bar trade result request was cancelled during platform shutdown.");
                 });
         }
 
@@ -135,11 +185,35 @@ namespace optionx::platforms {
                 const TradeHistoryRequest& request,
                 trade_history_callback_t callback) override {
             if (!callback || !request.has_valid_range()) return false;
+
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto callback_holder =
+                std::make_shared<trade_history_callback_t>(std::move(callback));
+            auto complete = std::make_shared<
+                std::function<void(TradeHistoryResult)>>();
+            *complete = [completed, callback_holder](
+                    TradeHistoryResult result) mutable {
+                if (completed->exchange(true, std::memory_order_acq_rel)) return;
+                auto terminal_callback = std::move(*callback_holder);
+                if (terminal_callback) terminal_callback(std::move(result));
+            };
+            auto fail = [complete](std::string reason) mutable {
+                (*complete)(TradeHistoryResult::fail(std::move(reason)));
+            };
+
             return post_task(
-                [this, request, callback = std::move(callback)]() mutable {
-                    m_trade_manager.fetch_trade_history(
+                [this, request, complete, fail]() mutable {
+                    const bool accepted = m_trade_manager.fetch_trade_history(
                         request,
-                        std::move(callback));
+                        [complete](TradeHistoryResult result) mutable {
+                            (*complete)(std::move(result));
+                        });
+                    if (!accepted) {
+                        fail("Intrade Bar trade history request was rejected by TradeManager.");
+                    }
+                },
+                [fail]() mutable {
+                    fail("Intrade Bar trade history request was cancelled during platform shutdown.");
                 });
         }
 
@@ -162,26 +236,49 @@ namespace optionx::platforms {
                 const BarHistoryRequest& request,
                 market_data::BaseMarketDataProvider::bar_history_callback_t callback) override {
             if (!callback) return false;
+
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto callback_holder =
+                std::make_shared<market_data::BaseMarketDataProvider::bar_history_callback_t>(
+                    std::move(callback));
+            auto complete = std::make_shared<
+                std::function<void(BarHistoryResult)>>();
+            *complete = [completed, callback_holder](
+                    BarHistoryResult result) mutable {
+                if (completed->exchange(true, std::memory_order_acq_rel)) return;
+                auto terminal_callback = std::move(*callback_holder);
+                if (terminal_callback) terminal_callback(std::move(result));
+            };
+            auto fail = [complete](std::string reason) mutable {
+                (*complete)(BarHistoryResult::fail(std::move(reason)));
+            };
+
             return post_task(
-                [this, request, callback = std::move(callback)]() mutable {
-                    m_request_manager.request_bar_history_result(
+                [this, request, complete, fail]() mutable {
+                    const bool accepted = m_request_manager.request_bar_history_result(
                         request,
-                        [callback = std::move(callback), request](intrade_bar::BarHistoryApiResult result) mutable {
+                        [complete, request](intrade_bar::BarHistoryApiResult result) mutable {
                             if (result) {
                                 const auto range_complete =
                                     intrade_bar::bar_sequence_covers_dense_range(
                                         result.value,
                                         request);
-                                callback(BarHistoryResult::ok(
+                                (*complete)(BarHistoryResult::ok(
                                     std::move(result.value),
                                     result.status_code,
                                     range_complete));
                                 return;
                             }
-                            callback(BarHistoryResult::fail(
+                            (*complete)(BarHistoryResult::fail(
                                 std::move(result.error_message),
                                 result.status_code));
                         });
+                    if (!accepted) {
+                        fail("Intrade Bar bar-history request was rejected by RequestManager.");
+                    }
+                },
+                [fail]() mutable {
+                    fail("Intrade Bar bar-history request was cancelled during platform shutdown.");
                 });
         }
 

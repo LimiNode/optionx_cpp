@@ -309,7 +309,9 @@ namespace optionx::platforms::intrade_bar {
         /// \brief Requests historical bars from the broker market-data backend.
         /// \param request Symbol, timeframe, range, and preferred price source.
         /// \param callback Callback receiving a typed bar history result.
-        void request_bar_history_result(
+        /// \return True when the request was admitted or completed synchronously;
+        ///         false when the request callback itself was invalid.
+        bool request_bar_history_result(
             const BarHistoryRequest& request,
             std::function<void(BarHistoryApiResult)> callback);
 
@@ -381,13 +383,26 @@ namespace optionx::platforms::intrade_bar {
             }
 
             ~PowOperation() {
+                release_pow_slot();
+            }
+
+            /// \brief Releases the CPU admission slot exactly once.
+            ///
+            /// `pow_active` describes the proof-of-work calculation itself,
+            /// not the lifetime of the owner-loop continuation. The fallback
+            /// destructor release protects scheduler rejection and early exits,
+            /// while the worker calls this explicitly before posting delivery.
+            void release_pow_slot() noexcept {
                 if (lifecycle) {
-                    lifecycle->pow_active.store(false, std::memory_order_release);
+                    if (!pow_slot_released.exchange(true, std::memory_order_acq_rel)) {
+                        lifecycle->pow_active.store(false, std::memory_order_release);
+                    }
                 }
             }
 
             std::atomic<bool> cancelled{false};
             std::atomic<bool> completed{false};
+            std::atomic<bool> pow_slot_released{false};
             std::shared_ptr<PowLifecycleState> lifecycle;
         };
 
@@ -903,7 +918,15 @@ namespace optionx::platforms::intrade_bar {
                     return;
                 }
 
-                const auto operation = std::make_shared<PowOperation>(lifecycle);
+                std::shared_ptr<PowOperation> operation;
+                try {
+                    operation = std::make_shared<PowOperation>(lifecycle);
+                } catch (...) {
+                    // The admission flag is set before the operation object
+                    // exists, so also release it if allocation itself fails.
+                    lifecycle->pow_active.store(false, std::memory_order_release);
+                    throw;
+                }
 
                 const auto post_completion = [owner_loop,
                                               lifecycle,
@@ -990,13 +1013,18 @@ namespace optionx::platforms::intrade_bar {
                                 std::uint64_t{1} << (parsed_bits + 4U),
                                 cancelled,
                                 std::chrono::steady_clock::now() + SITE_LOGIN_POW_TIME_BUDGET);
+                            // The continuation may wait in the owner-loop queue;
+                            // that wait must not hold the CPU admission slot.
+                            operation->release_pow_slot();
                             if (cancelled()) return;
                             post_completion(std::move(nonce), {});
                         } catch (const std::exception& ex) {
+                            operation->release_pow_slot();
                             post_completion(
                                 std::nullopt,
                                 std::string("Intrade site login proof-of-work failed: ") + ex.what());
                         } catch (...) {
+                            operation->release_pow_slot();
                             post_completion(
                                 std::nullopt,
                                 "Intrade site login proof-of-work failed with an unknown exception.");
@@ -3112,22 +3140,22 @@ namespace optionx::platforms::intrade_bar {
             });
     }
 
-    inline void RequestManager::request_bar_history_result(
+    inline bool RequestManager::request_bar_history_result(
             const BarHistoryRequest& request,
             std::function<void(BarHistoryApiResult)> callback) {
-        if (!callback) return;
+        if (!callback) return false;
 
         if (request.symbol.empty()) {
             callback(BarHistoryApiResult::fail("Bar history symbol is required."));
-            return;
+            return true;
         }
         if (request.timeframe <= 0) {
             callback(BarHistoryApiResult::fail("Bar history timeframe is invalid."));
-            return;
+            return true;
         }
         if (request.from_ts <= 0 || request.to_ts < request.from_ts) {
             callback(BarHistoryApiResult::fail("Bar history request range is invalid."));
-            return;
+            return true;
         }
 
         BarHistoryRequest effective_request = request;
@@ -3154,7 +3182,7 @@ namespace optionx::platforms::intrade_bar {
             const auto source = use_binance ? BarPriceSource::LAST : effective_request.price_source;
             callback(BarHistoryApiResult::ok(
                 make_empty_sequence(effective_request, source)));
-            return;
+            return true;
         }
 
         std::string binance_interval;
@@ -3165,14 +3193,14 @@ namespace optionx::platforms::intrade_bar {
                 effective_request.price_source == BarPriceSource::UNKNOWN) {
                 callback(BarHistoryApiResult::fail(
                     "BTCUSDT bar history is available only as LAST trade-price bars."));
-                return;
+                return true;
             }
 
             binance_interval = binance_interval_from_timeframe(effective_request.timeframe);
             if (binance_interval.empty()) {
                 callback(BarHistoryApiResult::fail(
                     "Unsupported Binance kline timeframe for BTCUSDT history."));
-                return;
+                return true;
             }
             max_bars_per_request = BINANCE_KLINES_MAX_BARS_PER_REQUEST;
         } else {
@@ -3180,12 +3208,12 @@ namespace optionx::platforms::intrade_bar {
                 effective_request.price_source == BarPriceSource::LAST) {
                 callback(BarHistoryApiResult::fail(
                     "Intrade FX bar history supports only BID, ASK, or MID price sources."));
-                return;
+                return true;
             }
             if (effective_request.timeframe % time_shield::SEC_PER_MIN != 0) {
                 callback(BarHistoryApiResult::fail(
                     "Intrade FX bar history supports minute-based timeframes only."));
-                return;
+                return true;
             }
         }
 
@@ -3302,6 +3330,7 @@ namespace optionx::platforms::intrade_bar {
         };
 
         (*request_next)();
+        return true;
     }
 
     inline void RequestManager::request_trade_check_result(

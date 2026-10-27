@@ -200,6 +200,21 @@ namespace optionx::platforms {
         /// \param callback Work that must execute in the platform owner loop.
         /// \return True when the task was accepted for owner-loop processing.
         bool post_task(std::function<void()> callback) {
+            return post_task(std::move(callback), {});
+        }
+
+        /// \brief Queues owner-loop work with a callback for shutdown cancellation.
+        /// \details The cancellation callback is invoked when an already accepted
+        ///          task reaches the TaskManager shutdown drain before its work
+        ///          callback executes. It is not invoked when admission itself
+        ///          fails. This lets typed public operations complete their
+        ///          callback contract without changing the general scheduler.
+        /// \param callback Work that must execute in the platform owner loop.
+        /// \param cancellation_callback Terminal callback for pre-execution shutdown cancellation.
+        /// \return True when the task was accepted for owner-loop processing.
+        bool post_task(
+                std::function<void()> callback,
+                std::function<void()> cancellation_callback) {
             if (!callback) return false;
 
             std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
@@ -210,9 +225,13 @@ namespace optionx::platforms {
 
             return m_task_manager.add_single_task(
                 "external",
-                [callback = std::move(callback)](
+                [callback = std::move(callback),
+                 cancellation_callback = std::move(cancellation_callback)](
                         std::shared_ptr<utils::Task> task) mutable {
-                    if (task->is_shutdown()) return;
+                    if (task->is_shutdown()) {
+                        if (cancellation_callback) cancellation_callback();
+                        return;
+                    }
                     callback();
                 });
         }

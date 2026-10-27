@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -166,6 +167,111 @@ TEST(IntradeBarAuthLifecycle, InvalidAuthDataReportsValidationFailure) {
     EXPECT_FALSE(success);
     EXPECT_EQ(message, "Host is empty and auto_find_domain is disabled");
     platform.shutdown();
+}
+
+TEST(IntradeBarPublicRequests, OwnerLoopAndForeignThreadCallsHaveOneTerminalCallback) {
+    optionx::platforms::IntradeBarPlatform platform;
+    platform.run(false);
+
+    std::atomic<int> callback_count{0};
+    std::atomic<bool> foreign_accepted{false};
+    optionx::TradeHistoryResult owner_result;
+    optionx::TradeHistoryResult foreign_result;
+
+    ASSERT_TRUE(platform.fetch_trade_history(
+        optionx::TradeHistoryRequest::all(),
+        [&callback_count, &owner_result](optionx::TradeHistoryResult result) {
+            owner_result = std::move(result);
+            callback_count.fetch_add(1, std::memory_order_release);
+        }));
+    platform.process();
+
+    std::thread caller([&]() {
+        foreign_accepted.store(platform.fetch_trade_history(
+            optionx::TradeHistoryRequest::all(),
+            [&callback_count, &foreign_result](optionx::TradeHistoryResult result) {
+                foreign_result = std::move(result);
+                callback_count.fetch_add(1, std::memory_order_release);
+            }),
+            std::memory_order_release);
+    });
+    caller.join();
+
+    EXPECT_TRUE(foreign_accepted.load(std::memory_order_acquire));
+    EXPECT_EQ(callback_count.load(std::memory_order_acquire), 1);
+    platform.process();
+
+    EXPECT_EQ(callback_count.load(std::memory_order_acquire), 2);
+    EXPECT_FALSE(owner_result.success);
+    EXPECT_FALSE(foreign_result.success);
+    platform.shutdown();
+}
+
+TEST(IntradeBarPublicRequests, AcceptedRequestsCompleteWhenShutdownCancelsOwnerTask) {
+    optionx::platforms::IntradeBarPlatform platform;
+    platform.run(false);
+
+    int history_callbacks = 0;
+    int result_callbacks = 0;
+    int bar_callbacks = 0;
+    optionx::TradeHistoryResult history_result;
+    std::unique_ptr<optionx::TradeResult> trade_result;
+    optionx::BarHistoryResult bar_result;
+
+    optionx::TradeHistoryRequest history_request =
+        optionx::TradeHistoryRequest::all();
+    ASSERT_TRUE(platform.fetch_trade_history(
+        history_request,
+        [&history_callbacks, &history_result](optionx::TradeHistoryResult result) {
+            ++history_callbacks;
+            history_result = std::move(result);
+        }));
+
+    auto result = std::make_unique<optionx::TradeResult>();
+    result->trade_id = 77;
+    optionx::TradeResultQuery query;
+    query.trade_id = result->trade_id;
+    ASSERT_TRUE(platform.fetch_trade_result(
+        query,
+        std::move(result),
+        [&result_callbacks, &trade_result](std::unique_ptr<optionx::TradeResult> completed) {
+            ++result_callbacks;
+            trade_result = std::move(completed);
+        }));
+
+    optionx::BarHistoryRequest bar_request;
+    bar_request.symbol = "EURUSD";
+    bar_request.timeframe = 60;
+    bar_request.from_ts = 1;
+    bar_request.to_ts = 60;
+    ASSERT_TRUE(platform.fetch_bar_history(
+        bar_request,
+        [&bar_callbacks, &bar_result](optionx::BarHistoryResult result) {
+            ++bar_callbacks;
+            bar_result = std::move(result);
+        }));
+
+    platform.shutdown();
+
+    EXPECT_EQ(history_callbacks, 1);
+    EXPECT_FALSE(history_result.success);
+    EXPECT_NE(
+        history_result.error_desc.find("cancelled during platform shutdown"),
+        std::string::npos);
+
+    EXPECT_EQ(result_callbacks, 1);
+    ASSERT_TRUE(trade_result);
+    EXPECT_EQ(trade_result->trade_id, 77u);
+    EXPECT_EQ(trade_result->trade_state, optionx::TradeState::CHECK_ERROR);
+    EXPECT_EQ(
+        trade_result->error_code,
+        optionx::TradeErrorCode::CLIENT_FORCED_CLOSE);
+
+    EXPECT_EQ(bar_callbacks, 1);
+    EXPECT_FALSE(bar_result.success);
+    EXPECT_NE(
+        bar_result.error_desc.find("cancelled during platform shutdown"),
+        std::string::npos);
 }
 
 int main(int argc, char** argv) {

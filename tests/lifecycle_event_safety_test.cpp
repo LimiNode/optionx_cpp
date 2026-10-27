@@ -157,6 +157,26 @@ TEST(BaseTradingPlatformLifecycle, PostsForeignThreadWorkToTheOwnerLoop) {
     EXPECT_FALSE(platform.post_task([]() {}));
 }
 
+TEST(BaseTradingPlatformLifecycle, AcceptedPostedWorkCompletesCancellationOnShutdown) {
+    TestPlatform platform;
+    platform.run(false);
+    std::atomic<bool> executed{false};
+    std::atomic<bool> cancelled{false};
+
+    ASSERT_TRUE(platform.post_task(
+        [&executed]() {
+            executed.store(true, std::memory_order_release);
+        },
+        [&cancelled]() {
+            cancelled.store(true, std::memory_order_release);
+        }));
+
+    platform.shutdown();
+
+    EXPECT_FALSE(executed.load(std::memory_order_acquire));
+    EXPECT_TRUE(cancelled.load(std::memory_order_acquire));
+}
+
 TEST(BaseTradingPlatformLifecycle, ConcurrentRunAndShutdownDoNotRunAfterStop) {
     for (int attempt = 0; attempt < 64; ++attempt) {
         TestPlatform platform;
