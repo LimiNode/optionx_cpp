@@ -136,6 +136,14 @@ namespace optionx::platforms::intrade_bar {
             std::shared_ptr<AuthData> auth_data,
             std::function<void(
                 bool success,
+                const MainPageChallenge& challenge,
+                const std::string& reason)> callback);
+
+        /// \brief Compatibility overload exposing only legacy challenge fields.
+        void request_main_page(
+            std::shared_ptr<AuthData> auth_data,
+            std::function<void(
+                bool success,
                 const std::string& req_id,
                 const std::string& req_value,
                 const std::string& cookies,
@@ -157,12 +165,21 @@ namespace optionx::platforms::intrade_bar {
         void request_active_trades_snapshot_result(
             std::function<void(ActiveTradesSnapshotResult)> callback);
 
-        /// \brief Sends login credentials for authentication.
-        /// \param req_id The request ID obtained from the main page.
-        /// \param req_value The request value obtained from the main page.
-        /// \param cookies Cookies extracted from the main page.
+        /// \brief Sends credentials using the login contract detected on the page.
+        /// \param challenge Login contract and challenge data obtained from the page.
         /// \param auth_data Shared pointer to authentication data.
         /// \param result_callback Callback function to receive login result.
+        void request_login(
+            const MainPageChallenge& challenge,
+            std::shared_ptr<AuthData> auth_data,
+            std::function<void(
+                bool success,
+                const std::string& user_id,
+                const std::string& user_hash,
+                const std::string& cookies,
+                const std::string& reason)> result_callback);
+
+        /// \brief Compatibility overload for callers using legacy challenge fields.
         void request_login(
             const std::string& req_id,
             const std::string& req_value,
@@ -176,6 +193,12 @@ namespace optionx::platforms::intrade_bar {
                 const std::string& reason)> result_callback);
 
         /// \brief Typed variant of request_login.
+        void request_login_result(
+            const MainPageChallenge& challenge,
+            std::shared_ptr<AuthData> auth_data,
+            std::function<void(LoginCredentialsResult)> result_callback);
+
+        /// \brief Compatibility overload for legacy typed login callers.
         void request_login_result(
             const std::string& req_id,
             const std::string& req_value,
@@ -344,15 +367,46 @@ namespace optionx::platforms::intrade_bar {
             return m_client.get_rate_limit<T>(rate_limit_id);
         }
 
-        /// \brief Requests and parses the legacy login endpoint.
-        /// \param auth_data Shared pointer to authentication data.
-        /// \param result_callback Callback receiving the legacy challenge.
-        void request_legacy_login_page(
-            std::shared_ptr<AuthData> auth_data,
+        /// \brief Requests and classifies a broker login page by its content.
+        /// \param path Same-origin page path to request.
+        /// \param result_callback Callback receiving the detected login contract.
+        void request_login_page(
+            const std::string& path,
             std::function<void(
                 bool success,
-                const std::string& req_id,
-                const std::string& req_value,
+                const MainPageChallenge& challenge,
+                const std::string& reason)> result_callback);
+
+        /// \brief Requests and solves a site-form proof-of-work challenge.
+        void request_site_login_challenge(
+            const SiteLoginConfig& config,
+            const std::string& origin,
+            const std::string& cookies,
+            std::function<void(MainPageChallengeResult)> result_callback);
+
+        /// \brief Submits credentials through the site-form API.
+        void request_site_login(
+            const MainPageChallenge& challenge,
+            std::shared_ptr<AuthData> auth_data,
+            int early_retry_count,
+            bool challenge_refreshed,
+            std::function<void(
+                bool success,
+                const std::string& user_id,
+                const std::string& user_hash,
+                const std::string& cookies,
+                const std::string& reason)> result_callback);
+
+        /// \brief Follows a login redirect chain while validating every origin.
+        void follow_login_redirect(
+            const std::string& original_host,
+            const std::string& redirect_url,
+            const std::string& cookies,
+            const std::string& user_id,
+            std::function<void(
+                bool success,
+                const std::string& user_id,
+                const std::string& user_hash,
                 const std::string& cookies,
                 const std::string& reason)> result_callback);
 
@@ -452,9 +506,7 @@ namespace optionx::platforms::intrade_bar {
             std::shared_ptr<AuthData> auth_data,
             std::function<void(
                 bool success,
-                const std::string& req_id,
-                const std::string& req_value,
-                const std::string& cookies,
+                const MainPageChallenge& challenge,
                 const std::string& reason)> result_callback) {
         LOGIT_TRACE0();
 
@@ -463,68 +515,48 @@ namespace optionx::platforms::intrade_bar {
             auth_data->password.empty()) {
             LOGIT_ERROR_IF(auth_data->email.empty(), "Email is missing.");
             LOGIT_ERROR_IF(auth_data->password.empty(), "Password is missing.");
-            result_callback(false, std::string(), std::string(), std::string(), "Email or password is missing.");
+            result_callback(false, MainPageChallenge{}, "Email or password is missing.");
             return;
         }
 
-        // Prefer the explicit legacy endpoint. This preserves the compatibility
-        // path from #171 and avoids probing the public landing page when the
-        // broker still exposes the old challenge form. If that endpoint is no
-        // longer available, fall back to the current SPA landing page.
-        request_legacy_login_page(
-            auth_data,
-            [this, result_callback](
-                    bool success,
-                    const std::string& req_id,
-                    const std::string& req_value,
-                    const std::string& cookies,
-                    const std::string& reason) {
-                if (success) {
-                    result_callback(true, req_id, req_value, cookies, reason);
-                    return;
-                }
+        const std::string current_host = m_api_host.empty()
+            ? auth_data->host
+            : m_api_host;
+        if (is_modern_intrade_origin(current_host)) {
+            request_login_page("/", std::move(result_callback));
+            return;
+        }
 
-                auto future = get_http_client().get(
-                    "/",
-                    kurlyk::QueryParams(),
-                    {
-                        {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"},
-                        {"Content-Type", "application/x-www-form-urlencoded"},
-                        {"Upgrade-Insecure-Requests", "1"}
-                    },
-                    get_rate_limit(RateLimitType::ACCOUNT_INFO)
-                );
-
-                auto callback = [result_callback](kurlyk::HttpResponsePtr response) {
-                    if (!validate_response(response, [&result_callback](const std::string& error_text) {
-                            result_callback(false, std::string(), std::string(), std::string(), error_text);
-                        })) {
+        request_login_page(
+                "/login",
+                [this, result_callback](
+                        bool success,
+                        const MainPageChallenge& challenge,
+                        const std::string& reason) {
+                    if (success) {
+                        result_callback(true, challenge, reason);
                         return;
                     }
 
-                    if (!is_modern_intrade_landing_page(response->content)) {
-                        result_callback(
-                            false,
-                            std::string(),
-                            std::string(),
-                            std::string(),
-                            "Neither legacy /login nor modern landing page was recognized.");
-                        return;
-                    }
-
-                    result_callback(
-                        true,
-                        std::string(),
-                        std::string(),
-                        merge_set_cookies(std::string(), response->headers),
-                        std::string());
-                };
-
-                add_http_request_task(std::move(future), std::move(callback));
-            });
+                    request_login_page(
+                        "/",
+                        [result_callback, first_reason = reason](
+                                bool fallback_success,
+                                const MainPageChallenge& fallback_challenge,
+                                const std::string& fallback_reason) {
+                            if (fallback_success) {
+                                result_callback(true, fallback_challenge, std::string());
+                                return;
+                            }
+                            result_callback(
+                                false,
+                                MainPageChallenge{},
+                                fallback_reason.empty() ? first_reason : fallback_reason);
+                        });
+                });
     }
 
-    inline void RequestManager::request_legacy_login_page(
+    inline void RequestManager::request_main_page(
             std::shared_ptr<AuthData> auth_data,
             std::function<void(
                 bool success,
@@ -532,10 +564,34 @@ namespace optionx::platforms::intrade_bar {
                 const std::string& req_value,
                 const std::string& cookies,
                 const std::string& reason)> result_callback) {
-        static_cast<void>(auth_data);
+        request_main_page(
+            std::move(auth_data),
+            [result_callback = std::move(result_callback)](
+                    bool success,
+                    const MainPageChallenge& challenge,
+                    const std::string& reason) {
+                if (!success) {
+                    result_callback(false, {}, {}, {}, reason);
+                    return;
+                }
+                result_callback(
+                    true,
+                    challenge.req_id,
+                    challenge.req_value,
+                    challenge.cookies,
+                    {});
+            });
+    }
 
+    inline void RequestManager::request_login_page(
+            const std::string& path,
+            std::function<void(
+                bool success,
+                const MainPageChallenge& challenge,
+                const std::string& reason)> result_callback) {
+        const std::string page_origin = m_api_host;
         auto future = get_http_client().get(
-            "/login",
+            path,
             kurlyk::QueryParams(),
             {
                 {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"},
@@ -545,11 +601,71 @@ namespace optionx::platforms::intrade_bar {
             get_rate_limit(RateLimitType::ACCOUNT_INFO)
         );
 
-        auto callback = [result_callback = std::move(result_callback)](
+            auto callback = [this, page_origin, result_callback = std::move(result_callback)](
                 kurlyk::HttpResponsePtr response) mutable {
             if (!validate_response(response, [&result_callback](const std::string& error_text) {
-                    result_callback(false, std::string(), std::string(), std::string(), error_text);
+                    result_callback(false, MainPageChallenge{}, error_text);
                 })) {
+                return;
+            }
+
+            const std::string page_cookies = merge_set_cookies(
+                std::string(),
+                response->headers);
+            if (is_site_login_page(response->content)) {
+                try {
+                    const auto config = parse_site_login_config(response->content);
+                    if (!config) {
+                        result_callback(
+                            false,
+                            MainPageChallenge{},
+                            "Intrade site login configuration was not found.");
+                        return;
+                    }
+                    request_site_login_challenge(
+                        *config,
+                        page_origin,
+                        page_cookies,
+                        [this, result_callback = std::move(result_callback)](
+                                MainPageChallengeResult result) mutable {
+                            if (!result.success) {
+                                result_callback(false, MainPageChallenge{}, result.error_message);
+                                return;
+                            }
+                            result_callback(true, result.value, std::string());
+                        });
+                } catch (const std::exception& ex) {
+                    LOGIT_ERROR(
+                        "Failed to parse Intrade site login page. status=",
+                        response->status_code,
+                        ", body_bytes=",
+                        response->content.size(),
+                        ", reason=",
+                        ex.what());
+                    result_callback(false, MainPageChallenge{}, ex.what());
+                }
+                return;
+            }
+
+            if (is_modern_intrade_landing_page(response->content)) {
+                MainPageChallenge challenge;
+                challenge.flow = LoginPageFlow::MODERN_NUXT;
+                challenge.origin = page_origin;
+                challenge.cookies = page_cookies;
+                result_callback(true, challenge, std::string());
+                return;
+            }
+
+            if (response->content.find("name=\"g-rec-res-l\"") == std::string::npos) {
+                LOGIT_WARN(
+                    "Unrecognized Intrade login page. status=",
+                    response->status_code,
+                    ", body_bytes=",
+                    response->content.size());
+                result_callback(
+                    false,
+                    MainPageChallenge{},
+                    "No supported Intrade login contract was recognized.");
                 return;
             }
 
@@ -557,30 +673,26 @@ namespace optionx::platforms::intrade_bar {
                 response->content,
                 response->headers);
             if (!parsed_data) {
-#               ifdef OPTIONX_LOG_UNIQUE_FILE_INDEX
-                const int log_index = OPTIONX_LOG_UNIQUE_FILE_INDEX;
-                LOGIT_STREAM_ERROR_TO(log_index) << response->content;
-                LOGIT_PRINT_ERROR(
-                    "Failed to process legacy login response; content log was written to file: ",
-                    LOGIT_GET_LAST_FILE_NAME(log_index)
-                );
-#               else
                 LOGIT_ERROR(
-                    "Failed to process legacy login response.",
-                    (response ? response->status_code : -1)
-                );
-#               endif
+                    "Failed to process legacy login response. status=",
+                    response->status_code,
+                    ", body_bytes=",
+                    response->content.size());
                 result_callback(
                     false,
-                    std::string(),
-                    std::string(),
-                    std::string(),
+                    MainPageChallenge{},
                     "Failed to process legacy login response.");
                 return;
             }
 
-            const auto& [req_id, req_value, cookies] = *parsed_data;
-            result_callback(true, req_id, req_value, cookies, std::string());
+            const auto& [req_id, req_value, parsed_cookies] = *parsed_data;
+            MainPageChallenge challenge;
+            challenge.flow = LoginPageFlow::LEGACY_FORM;
+            challenge.origin = page_origin;
+            challenge.req_id = req_id;
+            challenge.req_value = req_value;
+            challenge.cookies = parsed_cookies;
+            result_callback(true, challenge, std::string());
         };
 
         add_http_request_task(std::move(future), std::move(callback));
@@ -662,10 +774,372 @@ namespace optionx::platforms::intrade_bar {
         add_http_request_task(std::move(future), std::move(response_callback));
     }
 
-    inline void RequestManager::request_login(
-            const std::string& req_id,
-            const std::string& req_value,
+    inline void RequestManager::request_site_login_challenge(
+            const SiteLoginConfig& config,
+            const std::string& origin,
             const std::string& cookies,
+            std::function<void(MainPageChallengeResult)> result_callback) {
+        const std::string referer = origin.empty() ? std::string() : origin + "/login";
+        if (!origin.empty()) {
+            auto& client = get_http_client();
+            client.set_host(origin);
+            client.set_origin(origin);
+            client.set_referer(referer);
+        }
+        const kurlyk::QueryParams query = {
+            {"csrf", config.csrf},
+            {"action", "challenge"},
+            {"for", "login"}
+        };
+        auto future = get_http_client().post(
+            config.api_path,
+            kurlyk::QueryParams(),
+            {
+                {"Accept", "application/json"},
+                {"Content-Type", "application/x-www-form-urlencoded"},
+                {"X-Requested-With", "XMLHttpRequest"},
+                {"Cookie", cookies}
+            },
+            kurlyk::utils::to_query_string(query),
+            get_rate_limit(RateLimitType::AUTHENTICATION));
+
+        auto callback = [this, config, origin, cookies, result_callback = std::move(result_callback)](
+                kurlyk::HttpResponsePtr response) mutable {
+            if (!validate_response(response, [&result_callback](const std::string& error_text) {
+                    result_callback(MainPageChallengeResult::fail(error_text));
+                })) {
+                return;
+            }
+
+            try {
+                const auto parsed = parse_site_login_challenge_response(
+                    response->content,
+                    config.bits);
+                const auto nonce = solve_site_login_pow(parsed.challenge, parsed.bits);
+                if (!nonce) {
+                    result_callback(MainPageChallengeResult::fail(
+                        "Failed to solve Intrade site login proof-of-work."));
+                    return;
+                }
+
+                MainPageChallenge challenge;
+                challenge.flow = LoginPageFlow::SITE_FORM;
+                challenge.origin = origin;
+                challenge.cookies = merge_set_cookies(cookies, response->headers);
+                challenge.site_api_path = config.api_path;
+                challenge.site_csrf = config.csrf;
+                challenge.site_pow = parsed.challenge;
+                challenge.site_nonce = *nonce;
+                challenge.site_pow_bits = parsed.bits;
+                result_callback(MainPageChallengeResult::ok(std::move(challenge)));
+            } catch (const std::exception& ex) {
+                LOGIT_ERROR(
+                    "Failed to process Intrade site login challenge. status=",
+                    response->status_code,
+                    ", body_bytes=",
+                    response->content.size(),
+                    ", reason=",
+                    ex.what());
+                result_callback(MainPageChallengeResult::fail(ex.what(), response->status_code));
+            }
+        };
+
+        add_http_request_task(std::move(future), std::move(callback));
+    }
+
+    inline void RequestManager::follow_login_redirect(
+            const std::string& original_host,
+            const std::string& redirect_url,
+            const std::string& cookies,
+            const std::string& user_id,
+            std::function<void(
+                bool success,
+                const std::string& user_id,
+                const std::string& user_hash,
+                const std::string& cookies,
+                const std::string& reason)> result_callback) {
+        const auto target = resolve_login_redirect_target(redirect_url);
+        if (!target) {
+            result_callback(false, {}, {}, {}, "Malformed login redirect URL.");
+            return;
+        }
+
+        const auto origin_from_host = [](const std::string& host) {
+            if (const auto origin = parse_login_redirect_origin(host)) return *origin;
+            std::string origin = host;
+            while (!origin.empty() && origin.back() == '/') origin.pop_back();
+            return origin;
+        };
+        const std::string initial_origin = target->origin
+            ? *target->origin
+            : origin_from_host(original_host);
+        if (target->origin &&
+            classify_intrade_login_origin(initial_origin) == IntradeLoginOrigin::UNKNOWN) {
+            result_callback(false, {}, {}, {}, "Rejected login redirect origin.");
+            return;
+        }
+
+        using RedirectHandler = std::function<void(
+            const std::string& origin,
+            const std::string& path,
+            const std::string& request_cookies,
+            int redirect_count)>;
+        auto handler = std::make_shared<RedirectHandler>();
+        const std::weak_ptr<RedirectHandler> weak_handler = handler;
+        *handler = [this, original_host, user_id, result_callback, weak_handler](
+                const std::string& origin,
+                const std::string& path,
+                const std::string& request_cookies,
+                const int redirect_count) {
+            const auto restore = [this, original_host]() {
+                if (original_host.empty()) return;
+                auto& client = get_http_client();
+                client.set_host(original_host);
+                client.set_origin(original_host);
+                client.set_referer(original_host + "/");
+                m_api_host = original_host;
+            };
+            const auto fail = [restore, result_callback](const std::string& reason) {
+                restore();
+                result_callback(false, {}, {}, {}, reason);
+            };
+
+            const auto strong_handler = weak_handler.lock();
+            if (!strong_handler) {
+                fail("Login redirect handler expired.");
+                return;
+            }
+            if (redirect_count > 5) {
+                fail("Too many login redirects.");
+                return;
+            }
+
+            auto& client = get_http_client();
+            client.set_host(origin);
+            client.set_origin(origin);
+            client.set_referer(origin + "/login");
+            client.set_follow_location(false);
+            client.set_valid_statuses({200, 301, 302, 303, 307, 308});
+            auto future = client.get(
+                path,
+                kurlyk::QueryParams(),
+                {
+                    {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                    {"Upgrade-Insecure-Requests", "1"},
+                    {"Cookie", request_cookies}
+                },
+                get_rate_limit(RateLimitType::ACCOUNT_INFO));
+            client.set_follow_location(true);
+            client.set_valid_statuses({200});
+
+            auto callback = [
+                    this,
+                    user_id,
+                    result_callback,
+                    strong_handler,
+                    origin,
+                    request_cookies,
+                    redirect_count,
+                    restore,
+                    fail](kurlyk::HttpResponsePtr response) {
+                const auto analysis = analyze_login_redirect_response(
+                    response,
+                    origin,
+                    request_cookies);
+                LOGIT_INFO(
+                    "Intrade Bar login redirect response: origin=",
+                    origin,
+                    ", status=",
+                    (response ? response->status_code : -1),
+                    ", set_cookie_headers=",
+                    (response ? response->headers.count("set-cookie") : 0),
+                    ", cookie_names=",
+                    describe_cookie_names(analysis.cookies));
+                if (analysis.action == LoginRedirectResponseAction::FAILURE ||
+                    analysis.action == LoginRedirectResponseAction::UNSUPPORTED_MODERN) {
+                    fail(analysis.reason);
+                    return;
+                }
+                if (analysis.action == LoginRedirectResponseAction::FOLLOW) {
+                    (*strong_handler)(
+                        analysis.next_origin,
+                        analysis.next_target->path,
+                        analysis.cookies,
+                        redirect_count + 1);
+                    return;
+                }
+
+                restore();
+                std::string resolved_user_id = user_id;
+                std::string resolved_user_hash;
+                if (const auto parsed = parse_cookies(analysis.cookies)) {
+                    resolved_user_id = std::get<0>(*parsed);
+                    resolved_user_hash = std::get<1>(*parsed);
+                } else if (!has_cookie(analysis.cookies, "PHPSESSID")) {
+                    const bool returned_public_landing =
+                        response && is_modern_intrade_landing_page(response->content);
+                    result_callback(
+                        false,
+                        {},
+                        {},
+                        {},
+                        std::string(returned_public_landing
+                            ? "Login redirect returned a public landing page instead of an authenticated session; "
+                            : "Failed to parse login cookies; ") +
+                            "origin=" + origin +
+                            ", status=" + std::to_string(response ? response->status_code : -1) +
+                            ", body_bytes=" + std::to_string(response ? response->content.size() : 0) +
+                            ", cookie_names=" +
+                            describe_cookie_names(analysis.cookies));
+                    return;
+                }
+                result_callback(
+                    true,
+                    resolved_user_id,
+                    resolved_user_hash,
+                    analysis.cookies,
+                    {});
+            };
+            add_http_request_task(std::move(future), std::move(callback));
+        };
+
+        (*handler)(initial_origin, target->path, cookies, 0);
+    }
+
+    inline void RequestManager::request_site_login(
+            const MainPageChallenge& challenge,
+            std::shared_ptr<AuthData> auth_data,
+            const int early_retry_count,
+            const bool challenge_refreshed,
+            std::function<void(
+                bool success,
+                const std::string& user_id,
+                const std::string& user_hash,
+                const std::string& cookies,
+                const std::string& reason)> result_callback) {
+        const std::string origin = challenge.origin.empty()
+            ? m_api_host
+            : challenge.origin;
+        const std::string referer = origin.empty() ? std::string() : origin + "/login";
+        if (!origin.empty()) {
+            auto& client = get_http_client();
+            client.set_host(origin);
+            client.set_origin(origin);
+            client.set_referer(referer);
+        }
+        const kurlyk::QueryParams query = {
+            {"csrf", challenge.site_csrf},
+            {"action", "login"},
+            {"pow", challenge.site_pow},
+            {"nonce", challenge.site_nonce},
+            {"email", auth_data->email},
+            {"password", auth_data->password},
+            {"website", ""}
+        };
+        auto future = get_http_client().post(
+            challenge.site_api_path,
+            kurlyk::QueryParams(),
+            {
+                {"Accept", "application/json"},
+                {"Content-Type", "application/x-www-form-urlencoded"},
+                {"X-Requested-With", "XMLHttpRequest"},
+                {"Cookie", challenge.cookies}
+            },
+            kurlyk::utils::to_query_string(query),
+            get_rate_limit(RateLimitType::AUTHENTICATION));
+
+        auto callback = [this, challenge, auth_data, early_retry_count,
+                         challenge_refreshed, result_callback = std::move(result_callback)](
+                kurlyk::HttpResponsePtr response) mutable {
+            if (!validate_response(response, [&result_callback](const std::string& error_text) {
+                    result_callback(false, {}, {}, {}, error_text);
+                })) {
+                return;
+            }
+
+            const auto parsed = parse_site_login_response(response->content);
+            if (!parsed) {
+                result_callback(false, {}, {}, {}, "Failed to parse Intrade site login response.");
+                return;
+            }
+            if (parsed->error == "pow_early" && early_retry_count < 3) {
+                request_site_login(
+                    challenge,
+                    auth_data,
+                    early_retry_count + 1,
+                    challenge_refreshed,
+                    std::move(result_callback));
+                return;
+            }
+            if ((parsed->error == "pow_expired" ||
+                 parsed->error == "pow_bad" ||
+                 parsed->error == "pow_work") && !challenge_refreshed) {
+                SiteLoginConfig config{
+                    challenge.site_api_path,
+                    challenge.site_csrf,
+                    challenge.site_pow_bits};
+                request_site_login_challenge(
+                    config,
+                    challenge.origin,
+                    challenge.cookies,
+                    [this, auth_data, result_callback = std::move(result_callback)](
+                            MainPageChallengeResult refreshed) mutable {
+                        if (!refreshed.success) {
+                            result_callback(false, {}, {}, {}, refreshed.error_message);
+                            return;
+                        }
+                        request_site_login(
+                            refreshed.value,
+                            auth_data,
+                            0,
+                            true,
+                            std::move(result_callback));
+                    });
+                return;
+            }
+            if (!parsed->ok) {
+                result_callback(
+                    false,
+                    {},
+                    {},
+                    {},
+                    parsed->error.empty()
+                        ? "Intrade site login rejected credentials."
+                        : parsed->error);
+                return;
+            }
+            if (parsed->step == "2fa" || parsed->step == "code") {
+                result_callback(
+                    false,
+                    {},
+                    {},
+                    {},
+                    "Intrade site login requires interactive two-factor authentication.");
+                return;
+            }
+            if (parsed->redirect_url.empty()) {
+                result_callback(false, {}, {}, {}, "Intrade site login returned no redirect.");
+                return;
+            }
+
+            const std::string original_host = challenge.origin.empty()
+                ? (m_api_host.empty() ? auth_data->host : m_api_host)
+                : challenge.origin;
+            const std::string response_cookies = merge_set_cookies(
+                challenge.cookies,
+                response->headers);
+            follow_login_redirect(
+                original_host,
+                parsed->redirect_url,
+                response_cookies,
+                {},
+                std::move(result_callback));
+        };
+        add_http_request_task(std::move(future), std::move(callback));
+    }
+
+    inline void RequestManager::request_login(
+            const MainPageChallenge& challenge,
             std::shared_ptr<AuthData> auth_data,
             std::function<void(
                 bool success,
@@ -673,34 +1147,62 @@ namespace optionx::platforms::intrade_bar {
                 const std::string& user_hash,
                 const std::string& cookies,
                 const std::string& reason)> result_callback) {
-        LOGIT_DEBUG(req_id, req_value, utils::redact_secret_value(cookies));
+        LOGIT_DEBUG(
+            login_page_flow_to_string(challenge.flow),
+            utils::redact_secret_value(challenge.cookies));
 
-        // The broker's current public host is a Nuxt shell. Its login endpoint
-        // returns an opaque /auth/t=... redirect. Follow that chain manually:
-        // legacy terminal origins remain supported, while a successfully
-        // established session on the modern SPA is reported as unsupported.
-        if (req_id.empty() && req_value.empty()) {
-            const std::string legacy_host =
-                m_api_host.empty() ? auth_data->host : m_api_host;
+        // The broker's current public host is a Nuxt shell. Its browser login
+        // uses the same-origin multipart API below. A successful session on
+        // the modern SPA is intentionally reported as unsupported; the
+        // legacy redirect path remains available for older compatible origins.
+        if (challenge.flow == LoginPageFlow::SITE_FORM) {
+            request_site_login(
+                challenge,
+                std::move(auth_data),
+                0,
+                false,
+                std::move(result_callback));
+            return;
+        }
+
+        if (challenge.flow == LoginPageFlow::MODERN_NUXT) {
+            const std::string legacy_host = challenge.origin.empty()
+                ? (m_api_host.empty() ? auth_data->host : m_api_host)
+                : challenge.origin;
+            const std::string cookies = challenge.cookies;
             auto& client = get_http_client();
             client.set_host(legacy_host);
             client.set_origin(legacy_host);
             client.set_referer(legacy_host + "/");
-            const nlohmann::json login_payload = {
-                {"email", auth_data->email},
-                {"password", auth_data->password}
-            };
+            static constexpr char modern_login_boundary[] =
+                "----optionx-intrade-modern-login";
+            const auto password_hash = md5_hex_digest(auth_data->password);
+            if (password_hash.empty()) {
+                result_callback(
+                    false,
+                    std::string(),
+                    std::string(),
+                    std::string(),
+                    "Failed to hash password for modern Intrade login.");
+                return;
+            }
+            const auto login_body = make_multipart_form_body(
+                modern_login_boundary,
+                {
+                    {"email", auth_data->email},
+                    {"password", password_hash}
+                });
             auto future = client.post(
-                "/route/ts_login_user",
+                "/ajax/index/sign-in",
                 kurlyk::QueryParams(),
                 {
                     {"Accept", "application/json, text/plain, */*"},
-                    {"Content-Type", "application/json"},
+                    {"Content-Type", std::string("multipart/form-data; boundary=") + modern_login_boundary},
                     {"Origin", legacy_host},
                     {"Referer", legacy_host + "/"},
                     {"Cookie", cookies}
                 },
-                login_payload.dump(),
+                login_body,
                 get_rate_limit(RateLimitType::ACCOUNT_INFO)
             );
 
@@ -755,6 +1257,26 @@ namespace optionx::platforms::intrade_bar {
                         parsed->error.empty()
                             ? "Broker rejected modern login."
                             : parsed->error);
+                    return;
+                }
+
+                if (is_modern_intrade_origin(legacy_host)) {
+                    restore_legacy_host();
+                    if (!has_cookie(merged_cookies, "PHPSESSID")) {
+                        result_callback(
+                            false,
+                            std::string(),
+                            std::string(),
+                            std::string(),
+                            "Modern login succeeded without an authenticated session cookie.");
+                        return;
+                    }
+                    result_callback(
+                        false,
+                        std::string(),
+                        std::string(),
+                        std::string(),
+                        unsupported_modern_intrade_account_reason());
                     return;
                 }
 
@@ -864,6 +1386,7 @@ namespace optionx::platforms::intrade_bar {
                     client.set_origin(origin);
                     client.set_referer(origin + "/");
                     client.set_follow_location(false);
+                    client.set_valid_statuses({200, 301, 302, 303, 307, 308});
                     auto redirect_future = client.get(
                         path,
                         kurlyk::QueryParams(),
@@ -875,6 +1398,7 @@ namespace optionx::platforms::intrade_bar {
                         get_rate_limit(RateLimitType::ACCOUNT_INFO)
                     );
                     client.set_follow_location(true);
+                    client.set_valid_statuses({200});
 
                     auto redirect_callback = [
                             modern_user_id,
@@ -954,13 +1478,15 @@ namespace optionx::platforms::intrade_bar {
             return;
         }
 
+        const std::string cookies = challenge.cookies;
+
         // Prepare query parameters
         kurlyk::QueryParams query = {
             {"email", auth_data->email},
             {"password", auth_data->password},
         };
-        if (!req_id.empty() && !req_value.empty()) {
-            query.emplace(req_id, req_value);
+        if (!challenge.req_id.empty() && !challenge.req_value.empty()) {
+            query.emplace(challenge.req_id, challenge.req_value);
         }
 
         // Prepare HTTP GET request
@@ -972,14 +1498,14 @@ namespace optionx::platforms::intrade_bar {
                 {"Content-Type", "application/x-www-form-urlencoded"},
                 {"Upgrade-Insecure-Requests", "1"},
                 {"Connection", "keep-alive"},
-                {"Cookie", cookies}
+                {"Cookie", challenge.cookies}
             },
             kurlyk::utils::to_query_string(query),
             get_rate_limit(RateLimitType::ACCOUNT_INFO)
         );
 
         // Define callback for handling HTTP response
-        auto callback = [this, cookies, auth_data, result_callback](
+        auto callback = [this, challenge, auth_data, result_callback](
                 kurlyk::HttpResponsePtr response) {
             if (!validate_response(response, [&result_callback](const std::string& error_text){
                     result_callback(false, std::string(), std::string(), std::string(), error_text);
@@ -1039,14 +1565,19 @@ namespace optionx::platforms::intrade_bar {
                 auto login_result = parse_login(response->content);
                 if (login_result) {
                     const auto [user_id, user_hash] = *login_result;
-                    result_callback(true, user_id, user_hash, cookies, std::string());
+                    result_callback(
+                        true,
+                        user_id,
+                        user_hash,
+                        challenge.cookies,
+                        std::string());
                     return;
                 }
             }
 
             if (redirect_url) {
                 const std::string login_response_cookies = merge_set_cookies(
-                    cookies,
+                    challenge.cookies,
                     response->headers);
                 auto redirect_future = get_http_client().get(
                     redirect_path,
@@ -1098,18 +1629,40 @@ namespace optionx::platforms::intrade_bar {
                 return;
             }
 
-#               ifdef OPTIONX_LOG_UNIQUE_FILE_INDEX
-                const int log_index = OPTIONX_LOG_UNIQUE_FILE_INDEX;
-                LOGIT_STREAM_ERROR_TO(log_index) << response->content;
-                LOGIT_PRINT_ERROR("Failed to parse login; content log was written to file: ", LOGIT_GET_LAST_FILE_NAME(log_index));
-#               else
-                LOGIT_PRINT_ERROR("Failed to parse login.");
-#               endif
+                LOGIT_ERROR(
+                    "Failed to parse legacy login response. status=",
+                    response->status_code,
+                    ", body_bytes=",
+                    response->content.size());
                 result_callback(false, std::string(), std::string(), std::string(), "Failed to parse login.");
         };
 
         // Add the task to handle the HTTP request
         add_http_request_task(std::move(future), std::move(callback));
+    }
+
+    inline void RequestManager::request_login(
+            const std::string& req_id,
+            const std::string& req_value,
+            const std::string& cookies,
+            std::shared_ptr<AuthData> auth_data,
+            std::function<void(
+                bool success,
+                const std::string& user_id,
+                const std::string& user_hash,
+                const std::string& response_cookies,
+                const std::string& reason)> result_callback) {
+        MainPageChallenge challenge;
+        challenge.flow = (req_id.empty() && req_value.empty())
+            ? LoginPageFlow::MODERN_NUXT
+            : LoginPageFlow::LEGACY_FORM;
+        challenge.req_id = req_id;
+        challenge.req_value = req_value;
+        challenge.cookies = cookies;
+        request_login(
+            challenge,
+            std::move(auth_data),
+            std::move(result_callback));
     }
 
     inline void RequestManager::request_auth(
@@ -2251,16 +2804,14 @@ namespace optionx::platforms::intrade_bar {
             std::move(auth_data),
             [callback = std::move(callback)](
                     bool success,
-                    const std::string& req_id,
-                    const std::string& req_value,
-                    const std::string& cookies,
+                    const MainPageChallenge& challenge,
                     const std::string& reason) {
                 if (!callback) return;
                 if (!success) {
                     callback(MainPageChallengeResult::fail(reason));
                     return;
                 }
-                callback(MainPageChallengeResult::ok(MainPageChallenge{req_id, req_value, cookies}));
+                callback(MainPageChallengeResult::ok(challenge));
             });
     }
 
@@ -2280,15 +2831,11 @@ namespace optionx::platforms::intrade_bar {
     }
 
     inline void RequestManager::request_login_result(
-            const std::string& req_id,
-            const std::string& req_value,
-            const std::string& cookies,
+            const MainPageChallenge& challenge,
             std::shared_ptr<AuthData> auth_data,
             std::function<void(LoginCredentialsResult)> result_callback) {
         request_login(
-            req_id,
-            req_value,
-            cookies,
+            challenge,
             std::move(auth_data),
             [result_callback = std::move(result_callback)](
                     bool success,
@@ -2304,6 +2851,25 @@ namespace optionx::platforms::intrade_bar {
                 result_callback(LoginCredentialsResult::ok(
                     LoginCredentials{user_id, user_hash, response_cookies}));
             });
+    }
+
+    inline void RequestManager::request_login_result(
+            const std::string& req_id,
+            const std::string& req_value,
+            const std::string& cookies,
+            std::shared_ptr<AuthData> auth_data,
+            std::function<void(LoginCredentialsResult)> result_callback) {
+        MainPageChallenge challenge;
+        challenge.flow = (req_id.empty() && req_value.empty())
+            ? LoginPageFlow::MODERN_NUXT
+            : LoginPageFlow::LEGACY_FORM;
+        challenge.req_id = req_id;
+        challenge.req_value = req_value;
+        challenge.cookies = cookies;
+        request_login_result(
+            challenge,
+            std::move(auth_data),
+            std::move(result_callback));
     }
 
     inline void RequestManager::request_auth_result(

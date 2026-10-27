@@ -15,6 +15,7 @@ namespace optionx::platforms::intrade_bar {
         TRADE_RESULT,           ///< The limit for trade result requests.
         BALANCE,                ///< The limit for balance requests.
         ACCOUNT_INFO,           ///< The limit for account information requests.
+        AUTHENTICATION,         ///< The limit for challenge-based authentication requests.
         ACCOUNT_SETTINGS,       ///< The limit for account type or currency change requests.
         TICK_DATA,              ///< The limit for tick data requests.
         FX_BAR_HISTORY,         ///< The limit for Intrade FX bar-history requests.
@@ -30,6 +31,9 @@ namespace optionx::platforms::intrade_bar {
 
     /// \brief Minimum interval between trade-result polling requests.
     inline constexpr uint32_t TRADE_RESULT_REQUEST_INTERVAL_MS = 2000;
+
+    /// \brief Minimum broker-required interval between site-auth requests.
+    inline constexpr uint32_t SITE_AUTH_REQUEST_INTERVAL_MS = 2100;
 
     /// \class HttpClientComponent
     /// \brief Handles HTTP requests and manages rate limits for the Intrade Bar platform.
@@ -49,6 +53,10 @@ namespace optionx::platforms::intrade_bar {
                 TRADE_RESULT_REQUEST_INTERVAL_MS);
             set_rate_limit_rps(RateLimitType::BALANCE, 1);
             set_rate_limit_rpm(RateLimitType::ACCOUNT_INFO, 6);
+            set_rate_limit(
+                RateLimitType::AUTHENTICATION,
+                1,
+                SITE_AUTH_REQUEST_INTERVAL_MS);
             set_rate_limit_rpm(RateLimitType::ACCOUNT_SETTINGS, 12);
             set_rate_limit_rps(RateLimitType::TICK_DATA, 1);
             set_rate_limit_rps(

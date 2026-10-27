@@ -15,12 +15,14 @@
 #include <cmath>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <stdexcept>
 #include <utility>
 
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include <optionx_cpp/utils/response_parse_utils.hpp>
 #include "ApiResponses.hpp"
@@ -36,6 +38,225 @@ namespace optionx::platforms::intrade_bar {
         std::string response_type;
         std::string error;
     };
+
+    /// \brief Configuration embedded in the broker site login page.
+    struct SiteLoginConfig {
+        std::string api_path;
+        std::string csrf;
+        std::uint32_t bits = 17;
+    };
+
+    /// \brief Proof-of-work challenge returned by the site API.
+    struct SiteLoginChallengeResponse {
+        std::string challenge;
+        std::uint32_t bits = 17;
+    };
+
+    /// \brief Parsed response from a site login submission.
+    struct SiteLoginResponse {
+        bool ok = false;
+        std::string redirect_url;
+        std::string step;
+        std::string challenge;
+        std::string error;
+    };
+
+    inline constexpr std::uint32_t MAX_SITE_LOGIN_POW_BITS = 20;
+
+    /// \brief Validates a same-origin API path from site configuration.
+    inline bool is_safe_site_login_api_path(const std::string& path) {
+        if (path.empty() || path.front() != '/' ||
+            (path.size() > 1 && path[1] == '/') ||
+            path.find("://") != std::string::npos ||
+            path.find_first_of("\\?#\r\n") != std::string::npos) {
+            return false;
+        }
+        return true;
+    }
+
+    /// \brief Detects a server-rendered site login form by its HTML contract.
+    inline bool is_site_login_page(const std::string& content) {
+        std::size_t search_pos = 0;
+        bool has_login_form = false;
+        bool has_site_config = false;
+        while ((search_pos = content.find('<', search_pos)) != std::string::npos) {
+            const auto tag_end = content.find('>', search_pos);
+            if (tag_end == std::string::npos) break;
+            const auto opening_tag = content.substr(search_pos, tag_end - search_pos + 1);
+            if (opening_tag.compare(0, 5, "<form") == 0 &&
+                utils::extract_html_attr(opening_tag, "data-site-form") ==
+                    std::optional<std::string>("login")) {
+                has_login_form = true;
+            }
+            if (opening_tag.compare(0, 7, "<script") == 0 &&
+                utils::extract_html_attr(opening_tag, "id") ==
+                    std::optional<std::string>("site-config")) {
+                has_site_config = true;
+            }
+            if (has_login_form && has_site_config) return true;
+            search_pos = tag_end + 1;
+        }
+        return false;
+    }
+
+    /// \brief Parses the broker site's embedded login configuration.
+    /// \throws std::runtime_error When the detected configuration is malformed.
+    inline std::optional<SiteLoginConfig> parse_site_login_config(
+            const std::string& content) {
+        std::size_t search_pos = 0;
+        while ((search_pos = content.find("<script", search_pos)) != std::string::npos) {
+            const auto tag_end = content.find('>', search_pos);
+            if (tag_end == std::string::npos) break;
+            const auto opening_tag = content.substr(search_pos, tag_end - search_pos + 1);
+            if (utils::extract_html_attr(opening_tag, "id") !=
+                    std::optional<std::string>("site-config")) {
+                search_pos = tag_end + 1;
+                continue;
+            }
+
+            const auto content_start = tag_end + 1;
+            const auto content_end = content.find("</script>", content_start);
+            if (content_end == std::string::npos) {
+                throw std::runtime_error("Intrade site login config script is incomplete.");
+            }
+
+            try {
+                const auto payload = nlohmann::json::parse(
+                    utils::trim_copy(content.substr(content_start, content_end - content_start)));
+                if (!payload.is_object()) {
+                    throw std::runtime_error("Intrade site login config is not an object.");
+                }
+
+                SiteLoginConfig config;
+                config.api_path = payload.value("api", std::string());
+                config.csrf = payload.value("csrf", std::string());
+                if (payload.contains("bits")) {
+                    if (!payload.at("bits").is_number_unsigned() &&
+                        !payload.at("bits").is_number_integer()) {
+                        throw std::runtime_error("Intrade site login PoW bits are invalid.");
+                    }
+                    const auto bits = payload.at("bits").get<std::int64_t>();
+                    if (bits <= 0 || bits > MAX_SITE_LOGIN_POW_BITS) {
+                        throw std::runtime_error("Intrade site login PoW bits are out of range.");
+                    }
+                    config.bits = static_cast<std::uint32_t>(bits);
+                }
+                if (!is_safe_site_login_api_path(config.api_path) || config.csrf.empty()) {
+                    throw std::runtime_error(
+                        "Intrade site login config is missing safe API or CSRF data.");
+                }
+                return config;
+            } catch (const nlohmann::json::exception& ex) {
+                throw std::runtime_error(
+                    std::string("Failed to parse Intrade site login config: ") + ex.what());
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// \brief Parses a site API challenge response.
+    /// \throws std::runtime_error When the response is not a usable challenge.
+    inline SiteLoginChallengeResponse parse_site_login_challenge_response(
+            const std::string& content,
+            std::uint32_t fallback_bits) {
+        try {
+            const auto payload = nlohmann::json::parse(content);
+            if (!payload.is_object() || !payload.value("ok", false) ||
+                !payload.contains("challenge") ||
+                !payload.at("challenge").is_string()) {
+                throw std::runtime_error("Intrade site login challenge was rejected.");
+            }
+
+            SiteLoginChallengeResponse result;
+            result.challenge = payload.at("challenge").get<std::string>();
+            result.bits = fallback_bits;
+            if (payload.contains("bits")) {
+                if (!payload.at("bits").is_number_unsigned() &&
+                    !payload.at("bits").is_number_integer()) {
+                    throw std::runtime_error("Intrade site login challenge bits are invalid.");
+                }
+                const auto bits = payload.at("bits").get<std::int64_t>();
+                if (bits <= 0 || bits > MAX_SITE_LOGIN_POW_BITS) {
+                    throw std::runtime_error("Intrade site login challenge bits are out of range.");
+                }
+                result.bits = static_cast<std::uint32_t>(bits);
+            }
+            if (result.challenge.empty() || result.challenge.size() > 256 ||
+                result.bits == 0 || result.bits > MAX_SITE_LOGIN_POW_BITS ||
+                !std::all_of(result.challenge.begin(), result.challenge.end(), [](unsigned char ch) {
+                    return ch >= 0x21 && ch <= 0x7e;
+                })) {
+                throw std::runtime_error("Intrade site login challenge is invalid.");
+            }
+            return result;
+        } catch (const nlohmann::json::exception& ex) {
+            throw std::runtime_error(
+                std::string("Failed to parse Intrade site login challenge: ") + ex.what());
+        }
+    }
+
+    /// \brief Solves the browser-compatible SHA-256 proof-of-work challenge.
+    /// \return Decimal nonce, or empty when the bounded search fails.
+    inline std::optional<std::string> solve_site_login_pow(
+            const std::string& challenge,
+            std::uint32_t bits) {
+        if (challenge.empty() || bits == 0 || bits > MAX_SITE_LOGIN_POW_BITS) {
+            return std::nullopt;
+        }
+
+        const std::uint32_t limit =
+            (std::numeric_limits<std::uint32_t>::max)() >> bits;
+        const std::uint64_t max_attempts = std::uint64_t{1} << (bits + 4U);
+        std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
+            EVP_MD_CTX_new(),
+            &EVP_MD_CTX_free);
+        if (!context) return std::nullopt;
+
+        const std::string prefix = challenge + ':';
+        for (std::uint64_t nonce = 0; nonce < max_attempts; ++nonce) {
+            const std::string candidate = prefix + std::to_string(nonce);
+            unsigned char digest[EVP_MAX_MD_SIZE] = {};
+            unsigned int digest_size = 0;
+            if (EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1 ||
+                EVP_DigestUpdate(context.get(), candidate.data(), candidate.size()) != 1 ||
+                EVP_DigestFinal_ex(context.get(), digest, &digest_size) != 1 ||
+                digest_size < 4) {
+                return std::nullopt;
+            }
+
+            const std::uint32_t first_word =
+                (static_cast<std::uint32_t>(digest[0]) << 24U) |
+                (static_cast<std::uint32_t>(digest[1]) << 16U) |
+                (static_cast<std::uint32_t>(digest[2]) << 8U) |
+                static_cast<std::uint32_t>(digest[3]);
+            if (first_word <= limit) return std::to_string(nonce);
+        }
+        return std::nullopt;
+    }
+
+    /// \brief Parses the broker site login JSON response.
+    inline std::optional<SiteLoginResponse> parse_site_login_response(
+            const std::string& content) {
+        try {
+            const auto payload = nlohmann::json::parse(content);
+            if (!payload.is_object()) return std::nullopt;
+
+            SiteLoginResponse result;
+            result.ok = payload.value("ok", false);
+            for (const auto& field : {
+                    std::pair<const char*, std::string*>("redirect", &result.redirect_url),
+                    {"step", &result.step},
+                    {"challenge", &result.challenge},
+                    {"error", &result.error}}) {
+                if (payload.contains(field.first) && payload.at(field.first).is_string()) {
+                    *field.second = payload.at(field.first).get<std::string>();
+                }
+            }
+            return result;
+        } catch (const nlohmann::json::exception&) {
+            return std::nullopt;
+        }
+    }
 
     /// \brief API endpoint and CSRF token exposed by the current trading terminal.
     struct IntradeTerminalConfig {
@@ -138,6 +359,53 @@ namespace optionx::platforms::intrade_bar {
         } catch (...) {
             return std::nullopt;
         }
+    }
+
+    /// \brief Returns a lowercase MD5 digest for the current SPA login contract.
+    /// \param value Plain-text value to hash.
+    /// \return Lowercase hexadecimal digest, or an empty string on an OpenSSL failure.
+    inline std::string md5_hex_digest(const std::string& value) {
+        std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
+            EVP_MD_CTX_new(),
+            &EVP_MD_CTX_free);
+        if (!context ||
+            EVP_DigestInit_ex(context.get(), EVP_md5(), nullptr) != 1 ||
+            EVP_DigestUpdate(context.get(), value.data(), value.size()) != 1) {
+            return {};
+        }
+
+        unsigned char digest[EVP_MAX_MD_SIZE] = {};
+        unsigned int digest_size = 0;
+        if (EVP_DigestFinal_ex(context.get(), digest, &digest_size) != 1) {
+            return {};
+        }
+
+        static constexpr char hex[] = "0123456789abcdef";
+        std::string result;
+        result.reserve(static_cast<std::size_t>(digest_size) * 2U);
+        for (unsigned int i = 0; i < digest_size; ++i) {
+            result.push_back(hex[digest[i] >> 4U]);
+            result.push_back(hex[digest[i] & 0x0fU]);
+        }
+        return result;
+    }
+
+    /// \brief Encodes simple text fields as multipart/form-data.
+    /// \param boundary Multipart boundary selected by the caller.
+    /// \param fields Text form fields to encode.
+    /// \return Multipart request body.
+    inline std::string make_multipart_form_body(
+            const std::string& boundary,
+            std::initializer_list<std::pair<std::string, std::string>> fields) {
+        std::string body;
+        for (const auto& [name, value] : fields) {
+            body += "--" + boundary + "\r\n";
+            body += "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n";
+            body += value;
+            body += "\r\n";
+        }
+        body += "--" + boundary + "--\r\n";
+        return body;
     }
 
     /// \brief Checks whether a named cookie is present in a Cookie header value.
@@ -252,14 +520,25 @@ namespace optionx::platforms::intrade_bar {
         return origin;
     }
 
+    /// \brief Recognizes a numbered legacy Intrade origin.
+    /// \param origin The `scheme://authority` origin to inspect.
+    /// \return True for HTTPS `intrade<N>.bar` origins with any numeric index.
+    inline bool is_numbered_intrade_origin(const std::string& origin) {
+        static const std::regex numbered_origin_regex(
+            R"(^https://intrade[0-9]+\.bar$)",
+            std::regex::icase);
+        return std::regex_match(origin, numbered_origin_regex);
+    }
+
     /// \brief Validates the trusted origin family used by legacy Intrade login.
     /// \param origin The `scheme://authority` origin to validate.
-    /// \return True only for HTTPS `intrade.bar` or `intrade<N>.bar` origins.
+    /// \return True only for HTTPS `intrade.bar` or any numbered `intrade<N>.bar` origin.
     inline bool is_allowed_intrade_redirect_origin(const std::string& origin) {
-        static const std::regex allowed_origin_regex(
-            R"(^https://intrade(?:[0-9]+)?\.bar$)",
+        static const std::regex primary_origin_regex(
+            R"(^https://intrade\.bar$)",
             std::regex::icase);
-        return std::regex_match(origin, allowed_origin_regex);
+        return std::regex_match(origin, primary_origin_regex) ||
+            is_numbered_intrade_origin(origin);
     }
 
     /// \brief Identifies the platform behind an Intrade login origin.
@@ -1578,6 +1857,21 @@ namespace optionx::platforms::intrade_bar {
         }
 
         return cookie_map;
+    }
+
+    /// \brief Returns cookie names without exposing cookie values.
+    inline std::string describe_cookie_names(const std::string& cookies) {
+        std::vector<std::string> names;
+        for (const auto& item : parse_cookie_values(cookies)) {
+            names.push_back(item.first);
+        }
+        std::sort(names.begin(), names.end());
+        std::ostringstream result;
+        for (std::size_t index = 0; index < names.size(); ++index) {
+            if (index != 0) result << ',';
+            result << names[index];
+        }
+        return result.str();
     }
 
     /// \brief Returns one cookie value when present.
