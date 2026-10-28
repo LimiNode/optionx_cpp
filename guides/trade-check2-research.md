@@ -124,6 +124,61 @@ request. `TickHistoryResult::range_complete` is an explicit provider proof,
 not an inference from the number of returned ticks. Intrade implements this
 contract from the `/price_now` archive, not from `trade_check2.php`.
 
+## Legacy `/quotes` Tick-Check Evidence
+
+The older `mega-connector` implementation contains a separate authenticated
+trade-correction flow for the broker's quote-check page. It is not the same
+request as `trade_check2.php` and it is not a generic public history API.
+
+The request is:
+
+```text
+POST /quotes
+Content-Type: application/x-www-form-urlencoded
+
+option=<symbol with a slash, for example EUR/USD>
+date=<day-month-year in the broker's local date format>
+time1=<hour:minute>
+time2=<hour:minute>
+name_method=data_tick_load
+```
+
+The response is HTML. The parser walks repeated table rows using:
+
+```html
+<td class="partner_stat_table_left">date and time</td>
+<td class="">first quote cell</td>
+<td class="">selected quote cell</td>
+```
+
+It converts the row timestamp to a Unix timestamp and subtracts a hard-coded
+`GMT+3` offset. The first quote cell is ignored and the second quote cell is
+used as the selected value. The production caller requests a window beginning at the
+stored trade open time and ending at the stored close time plus one minute. It
+requires exact entries for both the open and close seconds before it compares
+the broker-returned prices and may change a reported loss or standoff to a win
+or standoff.
+
+This establishes that the old quote-check page can expose second-level rows,
+but the implementation does not establish a complete history contract:
+
+- the request has minute-resolution boundaries and sends one date field, so a
+  range crossing local midnight is not represented safely;
+- the client has no server-side maximum-range declaration and no cursor;
+- the parser marks the request successful after parsing any usable rows and
+  does not prove one row per second or reject gaps;
+- the fixed `GMT+3` conversion is an implementation assumption, not a
+  broker-declared timezone contract;
+- the trade-correction caller treats missing open or close rows as failure,
+  but it does not expose a reusable completeness result to market-data users.
+
+Unauthenticated probes of the current primary and numbered legacy domains
+returned an authentication/redirect response, so the server's retention limit
+for `/quotes` and its behaviour for future dates remain unverified. The old
+source code contains no evidence for a one- or two-day limit. These questions
+require a read-only authenticated probe using a closed trade or a dedicated
+quote-check page request; no new trades are needed.
+
 ## Provenance Boundary
 
 | Data | What it can establish | What it cannot establish |
@@ -180,9 +235,30 @@ requests with `limit=300` and `to` set to the oldest loaded candle. A request
 with `limit=5` returned six aggregates in one observation, so `limit` must be
 treated as a broker hint until its exact boundary semantics are established.
 
-The SPA also exposes `/ajax/instrument/history`, which returns a mapping from
-instrument ID to `[timestamp_ms, price]` pairs for asset previews. It is a
-different response contract and is not a tick-history completeness proof.
+The current SPA bundle constructs this request with `to` as an ISO timestamp
+when paging from an epoch-second cursor. In the unauthenticated live probe on
+2026-10-28, a `limit=5` request returned six aggregates. Supplying an old ISO
+`to` value returned five aggregates near that historical cursor plus an extra
+aggregate at the current live edge. Supplying a future `to` within roughly a
+week returned current-edge aggregates, while a farther future cursor returned
+an empty list. This means callers must filter every aggregate to the requested
+inclusive range and must treat future-date results as non-authoritative.
+
+The same bundle calls the separate preview endpoint as:
+
+```text
+GET /ajax/instrument/history
+    instruments=[<numeric instrument id>]
+    wow=<preview mode>
+    period=<preview period>
+    points=<number of points>
+```
+
+Its response is a mapping from instrument ID to sampled
+`[timestamp_ms, price]` pairs. A public probe returned ten points for ten
+requested points, but the endpoint did not expose range or completeness
+metadata. It is therefore not equivalent to either the legacy second-level
+HTML table or the chart-history OHLC endpoint.
 
 The loaded application bundles did not contain a dedicated quote-check or
 trade-history chart endpoint. The chart code fetches candles by instrument and
@@ -195,11 +271,14 @@ Therefore the current evidence supports this narrower conclusion:
 
 - the broker exposes a useful aggregate OHLC history API for the modern SPA;
 - it is not a raw tick source and does not expose a `range_complete` field;
+- the legacy `/quotes` flow is the only inspected path that is shaped like a
+  second-level quote-check table, and its retention/future-date rules are not
+  yet measured;
 - it does not prove that a chart around a trade is a special trade-scoped
   quote-check request;
-- exact retention, maximum range, timezone, missing-candle semantics, and
-  price-source semantics still require authenticated UI replay with a real
-  closed trade.
+- exact `/quotes` retention, `/quotes` future-date semantics, timezone,
+  missing-candle semantics, and price-source semantics still require
+  authenticated UI replay with a real closed trade.
 
 No runtime provider should be implemented from this observation alone. If the
 authenticated replay confirms the same contract, it is a candidate for a
