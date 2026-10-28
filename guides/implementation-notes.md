@@ -148,6 +148,41 @@ overloads. `run()` запускает worker thread, `process()` выполня�
 - Rate limit ids хранятся в `m_rate_limits`; используй enum class
   `RateLimitType` внутри конкретной платформы.
 
+## Platform Owner-Loop HTTP Contract
+
+Platform-owned HTTP state is confined to the platform owner loop.
+
+- `BaseTradingPlatform::run()` schedules the periodic owner-loop task.
+- The owner loop processes the `EventBus`, HTTP futures, and manager callbacks
+  in one serialized `TaskManager` execution context.
+- `RequestManager` and `HttpClient` configuration, request creation, and
+  follow-up requests must run on that owner loop.
+- Concrete platform facade methods that initiate broker HTTP work must enqueue
+  before delegating to a manager. IntradeBar trade-result, trade-history, and
+  bar-history facade methods follow this rule; local read-only snapshots may
+  remain synchronous when their storage is independently synchronized.
+- A `true` result from a facade enqueue means that the owner-loop task was
+  accepted, not that the broker request has completed. Once accepted, a typed
+  operation callback must complete exactly once on success, manager rejection,
+  validation failure, or pre-execution platform-shutdown cancellation. Use the
+  cancellation-aware `BaseTradingPlatform::post_task()` overload for this
+  contract; do not silently drop a callback when a queued task is drained.
+- External threads must enqueue work with `BaseTradingPlatform::post_task()` or
+  use a facade API that performs the enqueue. They must not call
+  `RequestManager` or mutate `HttpClient` configuration directly.
+- HTTP callbacks may create follow-up requests because they are delivered by
+  the owner loop. CPU-heavy helper work must use a dedicated bounded worker and
+  return its result through `post_task()`. Such work needs both a bounded
+  attempt count and a monotonic deadline; admission must be explicitly bounded
+  (currently one site-login PoW CPU calculation), with the slot released when
+  the calculation ends and on every
+  terminal path including cancellation, timeout, scheduler rejection, and
+  shutdown. A queued owner-loop continuation does not hold the CPU admission
+  slot.
+- Shutdown stops the platform loop before component destruction. Dedicated
+  workers must be cancelable and joined, and their completion callbacks must
+  check shutdown and operation-generation state before touching platform data.
+
 ## Broker HTTP Adapter Pattern
 
 Platform `RequestManager` classes should keep broker-specific HTTP and parser

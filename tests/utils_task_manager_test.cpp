@@ -1,5 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
+
 #include <optionx_cpp/utils.hpp>
 
 TEST(LogRedactionTest, RedactsNonEmptySecrets) {
@@ -36,6 +41,42 @@ TEST(TaskManagerTest, RejectsInvalidPeriodicPeriods) {
     EXPECT_FALSE(manager.add_periodic_task("bad-periodic", 0, callback));
     EXPECT_FALSE(manager.add_delayed_periodic_task("bad-delayed-periodic", 1, 0, callback));
     EXPECT_FALSE(manager.add_periodic_on_date_task("bad-periodic-on-date", 1, 0, callback));
+}
+
+TEST(TaskManagerTest, RejectsQueueInsertionAfterShutdownBegins) {
+    optionx::utils::TaskManager manager;
+    std::atomic<bool> task_started{false};
+    std::atomic<bool> release_task{false};
+
+    ASSERT_TRUE(manager.add_single_task(
+        [&task_started, &release_task](std::shared_ptr<optionx::utils::Task>) {
+            task_started.store(true, std::memory_order_release);
+            while (!release_task.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        }));
+    manager.run();
+
+    for (int i = 0; i < 1000 && !task_started.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(task_started.load(std::memory_order_acquire));
+
+    auto shutdown_future = std::async(std::launch::async, [&manager]() {
+        manager.shutdown();
+    });
+
+    bool rejected = false;
+    for (int i = 0; i < 10000 && !rejected; ++i) {
+        rejected = !manager.add_single_task(
+            [](std::shared_ptr<optionx::utils::Task>) {});
+        if (!rejected) std::this_thread::yield();
+    }
+
+    release_task.store(true, std::memory_order_release);
+    ASSERT_EQ(shutdown_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    shutdown_future.get();
+    EXPECT_TRUE(rejected);
 }
 
 TEST(TaskTest, KeepsPreviousPeriodWhenSetPeriodIsInvalid) {

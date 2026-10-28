@@ -17,12 +17,39 @@ namespace optionx::platforms::intrade_bar {
         bool available = false;
     };
 
-    /// \brief Hidden login challenge and cookies parsed from the main page.
+    /// \brief Login protocol detected from the broker page contents.
+    enum class LoginPageFlow {
+        LEGACY_FORM, ///< Retired hidden-input login form.
+        MODERN_NUXT, ///< Nuxt landing page with the current SPA login API.
+        SITE_FORM    ///< Server-rendered site form with challenge proof-of-work.
+    };
+
+    /// \brief Challenge and cookies prepared for the detected login protocol.
     struct MainPageChallenge {
+        LoginPageFlow flow = LoginPageFlow::LEGACY_FORM;
+        std::string origin;
         std::string req_id;
         std::string req_value;
         std::string cookies;
+        std::string site_api_path;
+        std::string site_csrf;
+        std::string site_pow;
+        std::string site_nonce;
+        std::uint32_t site_pow_bits = 0;
     };
+
+    /// \brief Converts a login protocol to a stable diagnostic string.
+    inline const char* login_page_flow_to_string(LoginPageFlow flow) noexcept {
+        switch (flow) {
+        case LoginPageFlow::LEGACY_FORM:
+            return "legacy_form";
+        case LoginPageFlow::MODERN_NUXT:
+            return "modern_nuxt";
+        case LoginPageFlow::SITE_FORM:
+            return "site_form";
+        }
+        return "unknown";
+    }
 
     /// \brief User credentials returned by the login page flow.
     struct LoginCredentials {

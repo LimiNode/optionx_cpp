@@ -26,30 +26,37 @@ Used by `AuthManager` for `AuthMethod::EMAIL_PASSWORD`.
    `PHPSESSID` session.
 3. If saved cookies work:
    `request_profile` -> optional settings switches -> `request_balance`.
-4. If no valid session exists, request `/login` for the legacy challenge. If
-   that endpoint is unavailable or does not contain the retired hidden-input
-   form, probe the root page and recognize the current Nuxt SPA shell.
-5. For the current SPA, `request_login` posts JSON `email/password` to
-   `/route/ts_login_user`, follows the returned opaque `/auth/t=...` redirect
-   chain while checking each `Location`, and stores the complete returned
-   cookie jar. A successful chain ending on a legacy `intrade*.bar` origin is
-   supported. A successful chain ending on `trading.intrade.bar` with a
-   `PHPSESSID` is reported explicitly as an unsupported modern account; the
-   API does not claim that platform's account as connected. Transport errors,
-   malformed responses, and unsuccessful login responses keep their ordinary
-   error paths. Legacy `user_id/user_hash` cookies remain supported; modern
-   sessions may contain only `PHPSESSID`, with the JSON `userID` retained as
-   the account identity hint. Legacy deployments continue through
-   `request_login` -> `request_auth`.
-6. Store the returned session in `ServiceSessionDB` as a versioned envelope
+4. If no valid session exists, request `/login` and classify the response by
+   its page contract, not by a hard-coded domain number:
+   - the server-rendered `data-site-form="login"` plus `site-config` contract
+     is used by the primary and numbered `intrade<N>.bar` deployments;
+   - the retired hidden-input form remains supported;
+   - the current Nuxt SPA shell is the fallback when neither form is present.
+   For a site-form page, the selected page origin is retained for the
+   challenge and credential POST, even if another domain is selected while
+   callbacks are in flight.
+5. For the site-form deployment, `request_login` obtains a broker challenge,
+   solves its bounded SHA-256 proof-of-work, and posts the credentials to the
+   same-origin site API. A successful redirect is then followed with the
+   same origin/cookie checks as the other login flows.
+6. For the current SPA, `request_login` posts multipart `email` and
+   `MD5(password)` fields to `/ajax/index/sign-in`. A successful response
+   establishing a `PHPSESSID` on `trading.intrade.bar` is reported explicitly
+   as an unsupported modern account; the API does not claim that platform's
+   account as connected. Older compatible SPA responses that return an opaque
+   redirect are still followed with origin and cookie checks. Transport
+   errors, malformed responses, and unsuccessful login responses keep their
+   ordinary error paths. Legacy `user_id/user_hash` cookies remain supported,
+   and legacy deployments continue through `request_login` -> `request_auth`.
+7. Store the returned session in `ServiceSessionDB` as a versioned envelope
    containing both the complete cookie jar and the JSON `userID`. Older
    plain-cookie records remain readable for backward compatibility.
-7. Continue with:
+8. Continue with:
    `request_profile` -> optional `request_switch_account_type` ->
    optional `request_switch_currency` -> `request_balance`.
-8. On successful balance fetch, mark the account connected and publish account
+9. On successful balance fetch, mark the account connected and publish account
    updates.
-9. `ActiveTradesSyncManager` reacts to the connected account update and calls
+10. `ActiveTradesSyncManager` reacts to the connected account update and calls
    `request_active_trades_snapshot` to synchronize broker-side active trades
    with the trade queue counter.
 

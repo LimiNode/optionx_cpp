@@ -330,6 +330,7 @@ namespace optionx::platforms::intrade_bar {
             connection_callback_t callback) {
         cancel_pending_connect_callback(reason);
         const std::uint64_t generation = ++m_auth_generation;
+        m_request_manager.invalidate_auth_operations();
         if (callback) {
             m_pending_connect_generation = generation;
             m_pending_connect_callback = std::move(callback);
@@ -344,6 +345,7 @@ namespace optionx::platforms::intrade_bar {
 
     inline void AuthManager::invalidate_auth_generation(const char* reason) {
         const std::uint64_t generation = ++m_auth_generation;
+        m_request_manager.invalidate_auth_operations();
         cancel_pending_connect_callback(reason);
         LOGIT_DEBUG(
             "Intrade Bar auth: generation invalidated. reason=",
@@ -914,7 +916,9 @@ namespace optionx::platforms::intrade_bar {
                 return;
             }
             if (!success) {
-                LOGIT_WARN("Intrade Bar auth: auth endpoint rejected fresh credentials.");
+                LOGIT_WARN(
+                    "Intrade Bar auth: authentication flow failed. reason=",
+                    reason);
                 result_callback(false, reason);
                 return;
             }
@@ -965,9 +969,7 @@ namespace optionx::platforms::intrade_bar {
         // Step 1: Handle main page response
         auto handle_main_page_response = [this, handle_login_response, generation](
                     bool success,
-                    const std::string& req_id,
-                    const std::string& req_value,
-                    const std::string& cookies,
+                    const MainPageChallenge& challenge,
                     const std::string& reason) {
             if (!is_auth_generation_current(generation, "main-page-challenge")) {
                 return;
@@ -979,8 +981,11 @@ namespace optionx::platforms::intrade_bar {
             }
 
             // Proceed to login
-            LOGIT_INFO("Intrade Bar auth: main page challenge succeeded, sending login.");
-            m_request_manager.request_login(req_id, req_value, cookies, m_auth_data,
+            LOGIT_INFO(
+                "Intrade Bar auth: login page recognized as ",
+                login_page_flow_to_string(challenge.flow),
+                ", sending login.");
+            m_request_manager.request_login(challenge, m_auth_data,
                 [handle_login_response](
                         bool success,
                         const std::string& user_id,

@@ -344,7 +344,7 @@ struct ModernLoginServer {
                 headers);
         };
 
-        server.resource["^/route/ts_login_user$"]["POST"] = [this](
+        server.resource["^/ajax/index/sign-in$"]["POST"] = [this](
                 std::shared_ptr<TradeHistoryHttpServer::Response> response,
                 std::shared_ptr<TradeHistoryHttpServer::Request> request) {
             ++login_requests;
@@ -432,6 +432,122 @@ struct ModernLoginServer {
     std::string request_body;
     std::string request_content_type;
     std::string terminal_state_body;
+};
+
+struct SiteLoginServer {
+    ~SiteLoginServer() {
+        stop();
+    }
+
+    bool start() {
+        server.config.address = "127.0.0.1";
+        server.config.port = 0;
+
+        server.resource["^/health$"]["GET"] = [](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            response->write(SimpleWeb::StatusCode::success_ok, "ok");
+        };
+
+        server.resource["^/login$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++login_page_requests;
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                R"HTML(<form data-site-form="login"><input name="email"><input name="password"><input name="website"></form><script id="site-config" type="application/json">{"api":"/site/api.php","csrf":"fixture-csrf","bits":8}</script>)HTML");
+        };
+
+        server.resource["^/site/api\\.php$"]["POST"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request> request) {
+            const auto body = request->content.string();
+            if (body.find("action=challenge") != std::string::npos) {
+                ++challenge_requests;
+                challenge_body = body;
+                response->write(
+                    SimpleWeb::StatusCode::success_ok,
+                    std::string(R"JSON({"ok":true,"challenge":"fixture-challenge","bits":)JSON") +
+                        std::to_string(challenge_bits.load()) + "}");
+                return;
+            }
+
+            ++login_requests;
+            login_body = body;
+            response->write(
+                SimpleWeb::StatusCode::success_ok,
+                R"JSON({"ok":true,"redirect":"/auth/opaque-site-login"})JSON");
+        };
+
+        server.resource["^/auth/opaque-site-login$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++auth_redirect_requests;
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            headers.emplace("Location", "/session");
+            headers.emplace("Set-Cookie", "user_id=866188; Path=/; HttpOnly");
+            headers.emplace("Set-Cookie", "user_hash=fake_user_hash; Path=/; HttpOnly");
+            response->write(SimpleWeb::StatusCode::redirection_found, headers);
+        };
+
+        server.resource["^/session$"]["GET"] = [this](
+                std::shared_ptr<TradeHistoryHttpServer::Response> response,
+                std::shared_ptr<TradeHistoryHttpServer::Request>) {
+            ++session_requests;
+            response->write(SimpleWeb::StatusCode::success_ok, "authenticated");
+        };
+
+        thread = std::thread([this]() {
+            server.start();
+        });
+        if (!wait_until_ready()) {
+            stop();
+            return false;
+        }
+        return true;
+    }
+
+    void stop() {
+        server.stop();
+        if (thread.joinable()) thread.join();
+    }
+
+    std::string host() const {
+        return "http://127.0.0.1:" + std::to_string(server.bound_port());
+    }
+
+    bool wait_until_ready() const {
+        for (int i = 0; i < 100; ++i) {
+            if (server.bound_port() == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            try {
+                kurlyk::HttpClient client(host());
+                client.set_timeout(1);
+                client.set_connect_timeout(1);
+                auto future = client.get("/health", {}, {});
+                if (future.wait_for(std::chrono::seconds(1)) == std::future_status::ready) {
+                    auto response = future.get();
+                    if (response && response->status_code == 200) return true;
+                }
+            } catch (...) {
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    BoundPortHttpServer server;
+    std::thread thread;
+    std::atomic<int> login_page_requests{0};
+    std::atomic<int> challenge_requests{0};
+    std::atomic<int> challenge_bits{8};
+    std::atomic<int> login_requests{0};
+    std::atomic<int> auth_redirect_requests{0};
+    std::atomic<int> session_requests{0};
+    std::string challenge_body;
+    std::string login_body;
 };
 
 struct LocalTradeHistoryServer {
@@ -946,6 +1062,11 @@ TEST(IntradeBarLogin, ParsesModernTradingLoginResponse) {
 
     EXPECT_TRUE(is_modern_intrade_origin("https://trading.intrade.bar"));
     EXPECT_FALSE(is_modern_intrade_origin("https://intrade35.bar"));
+    EXPECT_FALSE(is_numbered_intrade_origin("https://intrade.bar"));
+    EXPECT_TRUE(is_numbered_intrade_origin("https://intrade35.bar"));
+    EXPECT_TRUE(is_numbered_intrade_origin("https://intrade1000.bar"));
+    EXPECT_FALSE(is_numbered_intrade_origin("https://intrade35.bar.evil"));
+    EXPECT_TRUE(is_allowed_intrade_redirect_origin("HTTPS://INTRADE.BAR"));
     EXPECT_EQ(
         classify_intrade_login_origin("https://intrade35.bar"),
         IntradeLoginOrigin::LEGACY);
@@ -979,6 +1100,64 @@ TEST(IntradeBarLogin, ParsesModernTradingLoginResponse) {
     ASSERT_TRUE(failure);
     EXPECT_FALSE(failure->success);
     EXPECT_EQ(failure->error, "Invalid credentials");
+    EXPECT_EQ(
+        md5_hex_digest("fake_password"),
+        "8e30b89c1efc7e8b03e23a44409498f5");
+}
+
+TEST(IntradeBarLogin, ParsesSiteLoginContractByContent) {
+    const std::string page =
+        R"HTML(<form data-site-form="login"></form><script id="site-config" type="application/json">{"api":"/site/api.php","csrf":"fixture-csrf","bits":8}</script>)HTML";
+
+    EXPECT_TRUE(is_site_login_page(page));
+    const auto config = parse_site_login_config(page);
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->api_path, "/site/api.php");
+    EXPECT_EQ(config->csrf, "fixture-csrf");
+    EXPECT_EQ(config->bits, 8u);
+
+    const auto challenge = parse_site_login_challenge_response(
+        R"JSON({"ok":true,"challenge":"fixture-challenge","bits":8})JSON",
+        17);
+    EXPECT_EQ(challenge.challenge, "fixture-challenge");
+    EXPECT_EQ(challenge.bits, 8u);
+    EXPECT_EQ(solve_site_login_pow(challenge.challenge, challenge.bits), "227");
+
+    const auto login = parse_site_login_response(
+        R"JSON({"ok":true,"redirect":"/session"})JSON");
+    ASSERT_TRUE(login);
+    EXPECT_TRUE(login->ok);
+    EXPECT_EQ(login->redirect_url, "/session");
+
+    EXPECT_FALSE(is_site_login_page("<form data-site-form=\"register\"></form>"));
+    EXPECT_THROW(
+        parse_site_login_config(
+            R"HTML(<form data-site-form="login"></form><script id="site-config">{"api":"https://evil.example/api","csrf":"x"}</script>)HTML"),
+        std::runtime_error);
+}
+
+TEST(IntradeBarLogin, BoundsAndCancelsSiteLoginPow) {
+    EXPECT_FALSE(solve_site_login_pow("fixture-challenge", 8, 1));
+
+    std::atomic<int> cancellation_checks{0};
+    const auto cancelled = solve_site_login_pow(
+        "fixture-challenge",
+        8,
+        1000,
+        [&cancellation_checks]() {
+            return ++cancellation_checks > 1;
+        });
+    EXPECT_FALSE(cancelled);
+    EXPECT_GT(cancellation_checks.load(), 1);
+}
+
+TEST(IntradeBarLogin, EnforcesMonotonicSiteLoginPowDeadline) {
+    EXPECT_FALSE(solve_site_login_pow(
+        "fixture-challenge",
+        8,
+        std::numeric_limits<std::uint64_t>::max(),
+        {},
+        std::chrono::steady_clock::now()));
 }
 
 TEST(IntradeBarLogin, AnalyzesLegacyModernAndUnknownRedirectChains) {
@@ -1081,19 +1260,17 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
 
     bool main_callback_received = false;
     bool main_success = false;
+    MainPageChallenge main_challenge;
     std::string main_reason;
     request_manager.request_main_page(
         auth_data,
         [&](bool success,
-            const std::string& req_id,
-            const std::string& req_value,
-            const std::string&,
+            const MainPageChallenge& challenge,
             const std::string& reason) {
             main_callback_received = true;
             main_success = success;
+            main_challenge = challenge;
             main_reason = reason;
-            EXPECT_TRUE(req_id.empty());
-            EXPECT_TRUE(req_value.empty());
         });
 
     for (int i = 0; i < 500 && !main_callback_received; ++i) {
@@ -1102,6 +1279,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     }
     ASSERT_TRUE(main_callback_received);
     ASSERT_TRUE(main_success) << main_reason;
+    EXPECT_EQ(main_challenge.flow, LoginPageFlow::MODERN_NUXT);
 
     bool callback_received = false;
     bool success = false;
@@ -1110,9 +1288,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     std::string cookies;
     std::string reason;
     request_manager.request_login(
-        "",
-        "",
-        "landing=1",
+        main_challenge,
         auth_data,
         [&](bool login_success,
             const std::string& login_user_id,
@@ -1129,6 +1305,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
 
     for (int i = 0; i < 500 && !callback_received; ++i) {
         http_client.process();
+        platform.process();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -1139,10 +1316,11 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     EXPECT_TRUE(has_cookie(cookies, "user_id"));
     EXPECT_TRUE(has_cookie(cookies, "user_hash"));
     EXPECT_TRUE(has_cookie(cookies, "landing"));
-    EXPECT_NE(server.request_content_type.find("application/json"), std::string::npos);
-    const auto request_json = nlohmann::json::parse(server.request_body);
-    EXPECT_EQ(request_json.at("email"), "user@example.test");
-    EXPECT_EQ(request_json.at("password"), "fake_password");
+    EXPECT_NE(server.request_content_type.find("multipart/form-data"), std::string::npos);
+    EXPECT_NE(server.request_body.find("name=\"email\""), std::string::npos);
+    EXPECT_NE(server.request_body.find("user@example.test"), std::string::npos);
+    EXPECT_NE(server.request_body.find("name=\"password\""), std::string::npos);
+    EXPECT_NE(server.request_body.find(md5_hex_digest("fake_password")), std::string::npos);
     EXPECT_EQ(server.login_requests.load(), 1);
     EXPECT_EQ(server.auth_redirect_requests.load(), 1);
 
@@ -1154,9 +1332,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     cookies.clear();
     reason.clear();
     request_manager.request_login(
-        "",
-        "",
-        "landing=1",
+        main_challenge,
         auth_data,
         [&](bool login_success,
             const std::string& login_user_id,
@@ -1173,6 +1349,7 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
 
     for (int i = 0; i < 500 && !callback_received; ++i) {
         http_client.process();
+        platform.process();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -1187,6 +1364,199 @@ TEST(IntradeBarLogin, UsesModernTradingSpaLoginContract) {
     EXPECT_EQ(server.auth_redirect_requests.load(), 2);
 
     platform.shutdown();
+}
+
+TEST(IntradeBarLogin, UsesSiteFormWithoutHostnameSpecialCase) {
+    SiteLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool page_callback_received = false;
+    bool page_success = false;
+    MainPageChallenge challenge;
+    std::string page_reason;
+    request_manager.request_main_page(
+        auth_data,
+        [&](bool success,
+            const MainPageChallenge& parsed_challenge,
+            const std::string& reason) {
+            page_callback_received = true;
+            page_success = success;
+            challenge = parsed_challenge;
+            page_reason = reason;
+        });
+
+    for (int i = 0; i < 1000 && !page_callback_received; ++i) {
+        http_client.process();
+        platform.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(page_callback_received) << page_reason;
+    ASSERT_TRUE(page_success) << page_reason;
+    EXPECT_EQ(challenge.flow, LoginPageFlow::SITE_FORM);
+    EXPECT_EQ(challenge.origin, server.host());
+    EXPECT_EQ(challenge.site_api_path, "/site/api.php");
+    EXPECT_EQ(challenge.site_csrf, "fixture-csrf");
+    EXPECT_EQ(challenge.site_pow, "fixture-challenge");
+    EXPECT_EQ(challenge.site_nonce, "227");
+    EXPECT_TRUE(has_cookie(challenge.cookies, "PHPSESSID") == false);
+
+    // A later auth event may select another broker domain while this challenge
+    // is still being handed to the login stage. The page origin must win.
+    auto changed_auth_data = std::make_shared<AuthData>();
+    changed_auth_data->host = "http://127.0.0.1:1";
+    events::AuthDataEvent changed_auth_event(changed_auth_data);
+    request_manager.on_event(&changed_auth_event);
+
+    bool callback_received = false;
+    bool success = false;
+    std::string user_id;
+    std::string user_hash;
+    std::string cookies;
+    std::string reason;
+    request_manager.request_login(
+        challenge,
+        auth_data,
+        [&](bool login_success,
+            const std::string& login_user_id,
+            const std::string& login_user_hash,
+            const std::string& login_cookies,
+            const std::string& login_reason) {
+            callback_received = true;
+            success = login_success;
+            user_id = login_user_id;
+            user_hash = login_user_hash;
+            cookies = login_cookies;
+            reason = login_reason;
+        });
+
+    for (int i = 0; i < 1000 && !callback_received; ++i) {
+        http_client.process();
+        platform.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(callback_received) << reason;
+    EXPECT_TRUE(success) << reason;
+    EXPECT_EQ(user_id, "866188");
+    EXPECT_EQ(user_hash, "fake_user_hash");
+    EXPECT_TRUE(has_cookie(cookies, "user_id"));
+    EXPECT_TRUE(has_cookie(cookies, "user_hash"));
+    EXPECT_EQ(server.login_page_requests.load(), 1);
+    EXPECT_EQ(server.challenge_requests.load(), 1);
+    EXPECT_EQ(server.login_requests.load(), 1);
+    EXPECT_EQ(server.auth_redirect_requests.load(), 1);
+    EXPECT_EQ(server.session_requests.load(), 1);
+    EXPECT_NE(server.challenge_body.find("action=challenge"), std::string::npos);
+    EXPECT_NE(server.challenge_body.find("for=login"), std::string::npos);
+    EXPECT_NE(server.login_body.find("action=login"), std::string::npos);
+    EXPECT_NE(server.login_body.find("pow=fixture-challenge"), std::string::npos);
+    EXPECT_NE(server.login_body.find("nonce=227"), std::string::npos);
+    EXPECT_NE(server.login_body.find("email=user%40example.test"), std::string::npos);
+    EXPECT_NE(server.login_body.find("password=fake_password"), std::string::npos);
+
+    platform.shutdown();
+}
+
+TEST(IntradeBarLogin, LegacyMainPageOverloadRejectsSiteForm) {
+    SiteLoginServer server;
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    bool callback_received = false;
+    bool success = true;
+    std::string reason;
+    request_manager.request_main_page(
+        auth_data,
+        [&](bool callback_success,
+            const std::string&,
+            const std::string&,
+            const std::string&,
+            const std::string& callback_reason) {
+            callback_received = true;
+            success = callback_success;
+            reason = callback_reason;
+        });
+
+    for (int i = 0; i < 1000 && !callback_received; ++i) {
+        http_client.process();
+        platform.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(callback_received) << reason;
+    EXPECT_FALSE(success);
+    EXPECT_EQ(reason, "Detected login flow requires the typed RequestManager API.");
+    EXPECT_EQ(server.challenge_requests.load(), 1);
+    EXPECT_EQ(server.login_requests.load(), 0);
+    platform.shutdown();
+}
+
+TEST(IntradeBarLogin, ShutsDownWhileSiteLoginPowIsRunning) {
+    SiteLoginServer server;
+    server.challenge_bits.store(20);
+    ASSERT_TRUE(server.start());
+
+    TestPlatform platform;
+    HttpClientComponent http_client(platform);
+    RequestManager request_manager(platform, http_client);
+
+    auto auth_data = std::make_shared<AuthData>();
+    auth_data->host = server.host();
+    auth_data->email = "user@example.test";
+    auth_data->password = "fake_password";
+
+    events::AuthDataEvent auth_event(auth_data);
+    request_manager.on_event(&auth_event);
+    http_client.get_http_client().set_retry_attempts(0, 0);
+
+    std::atomic<bool> callback_received{false};
+    request_manager.request_main_page(
+        auth_data,
+        [&](bool,
+            const MainPageChallenge&,
+            const std::string&) {
+            callback_received.store(true);
+        });
+
+    for (int i = 0; i < 1000 && server.challenge_requests.load() == 0; ++i) {
+        http_client.process();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_EQ(server.challenge_requests.load(), 1);
+
+    // Deliver the challenge response, then cancel the worker before it can
+    // complete a high-difficulty search or post a stale owner-loop callback.
+    http_client.process();
+    platform.shutdown();
+
+    EXPECT_FALSE(callback_received.load());
+    EXPECT_EQ(server.login_requests.load(), 0);
 }
 
 TEST(IntradeBarLogin, CachedModernSessionRoundTripRetainsUserId) {
@@ -3719,6 +4089,7 @@ TEST(IntradeBarApiResponses, PlatformBarHistoryResultPreservesFailureReason) {
             ++callback_count;
         }));
 
+    platform.process();
     platform.shutdown();
 
     ASSERT_EQ(callback_count, 1);
@@ -3740,6 +4111,7 @@ TEST(IntradeBarApiResponses, PlatformBarHistoryRejectsNegativeTimeframe) {
             ++callback_count;
         }));
 
+    platform.process();
     platform.shutdown();
 
     ASSERT_EQ(callback_count, 1);
