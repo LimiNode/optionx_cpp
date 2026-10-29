@@ -130,6 +130,12 @@ The older `mega-connector` implementation contains a separate authenticated
 trade-correction flow for the broker's quote-check page. It is not the same
 request as `trade_check2.php` and it is not a generic public history API.
 
+For this broker, the relevant contract is the execution-second grid: the
+broker fixes trade opening and closing on whole seconds, so one broker value
+per second is the authoritative granularity needed to verify a trade. This is
+not a claim that the chart has no sub-second market updates; those updates are
+outside the trade-settlement contract.
+
 The request is:
 
 ```text
@@ -159,8 +165,8 @@ requires exact entries for both the open and close seconds before it compares
 the broker-returned prices and may change a reported loss or standoff to a win
 or standoff.
 
-This establishes that the old quote-check page can expose second-level rows,
-but the implementation does not establish a complete history contract:
+This establishes the source needed for broker trade verification. It does not
+make the endpoint an unlimited raw-market-event archive:
 
 - the request has minute-resolution boundaries and sends one date field, so a
   range crossing local midnight is not represented safely;
@@ -171,6 +177,12 @@ but the implementation does not establish a complete history contract:
   broker-declared timezone contract;
 - the trade-correction caller treats missing open or close rows as failure,
   but it does not expose a reusable completeness result to market-data users.
+
+The OptionX implementation should therefore model this as a dedicated
+broker-execution quote-check source. It may provide authoritative values for
+known trade open/close seconds, while the generic `TickHistory` contract must
+continue to distinguish it from session-observed `/price_now` data and from
+unbounded raw market micro-events.
 
 Unauthenticated probes of the current primary and numbered legacy domains
 returned an authentication/redirect response, so the server's retention limit
@@ -185,6 +197,7 @@ quote-check page request; no new trades are needed.
 | --- | --- | --- |
 | Broker-observed `/price_now` tick | A symbol/price snapshot with broker time and local receipt time was observed | Complete micro-event history or observations before the session/archive window |
 | Local `/price_now` archive | Retained observed snapshots and, for Intrade, proven one-second archive coverage | A persistent broker archive or coverage outside retained observations |
+| Authenticated `/quotes` quote-check row | The broker's execution-second value for a requested symbol/time row | Sub-second market events, unlimited retention, or coverage outside the returned rows |
 | `trade_check2.php` result | A price/profit response associated with one known broker trade ID | Exact price semantics, independent observation timestamp, range coverage, or absence of other ticks |
 | `TradeRecord` history | Closed-trade lifecycle facts and stored open/close fields | A quote stream, intermediate ticks, or dense coverage |
 | Authoritative historical tick range | Only a provider API that explicitly supplies timestamped observations and completeness semantics | Not provided by the currently observed `trade_check2.php` contract |
@@ -193,7 +206,7 @@ quote-check page request; no new trades are needed.
 
 A read-only inspection of the current `trading.intrade.bar` SPA found a
 separate chart-history API. This is evidence for aggregate market history; it
-does not change the `trade_check2.php` decision above.
+does not replace the broker's `/quotes` execution-second contract.
 
 The main observed request is:
 
@@ -271,19 +284,21 @@ Therefore the current evidence supports this narrower conclusion:
 
 - the broker exposes a useful aggregate OHLC history API for the modern SPA;
 - it is not a raw tick source and does not expose a `range_complete` field;
-- the legacy `/quotes` flow is the only inspected path that is shaped like a
-  second-level quote-check table, and its retention/future-date rules are not
-  yet measured;
+- the legacy `/quotes` flow is the broker-specific authoritative source for
+  execution-second quote checks;
+- `/ajax/instrument/history` is a sampled preview endpoint and does not
+  provide a usable second-level trade-check history;
 - it does not prove that a chart around a trade is a special trade-scoped
   quote-check request;
 - exact `/quotes` retention, `/quotes` future-date semantics, timezone,
   missing-candle semantics, and price-source semantics still require
   authenticated UI replay with a real closed trade.
 
-No runtime provider should be implemented from this observation alone. If the
-authenticated replay confirms the same contract, it is a candidate for a
-separate provider-aligned bar-history adapter, not for `fetch_tick_history()`
-or for replacing `trade_check2.php`.
+The next runtime feature should be a dedicated `/quotes` trade-check adapter
+that returns broker execution-second observations with explicit provenance and
+gap status. It must not be implemented as a replacement for `trade_check2.php`
+or as a claim of complete sub-second market history. The modern
+`chart-history` endpoint remains a separate minute-bar source.
 
 ## Hypothesis Review
 
