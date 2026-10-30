@@ -10,6 +10,14 @@
   задач с изменением файлов.
 - [Project overview](guides/project-overview.md) - назначение библиотеки,
   публичная поверхность, основные домены и поток выполнения.
+- [Trading system architecture](guides/TRADING_SYSTEM_ARCHITECTURE.md) -
+  границы нового домена торговых систем, identity model и adapter boundary.
+- [Trading system reuse audit](guides/TRADING_SYSTEM_REUSE_AUDIT.md) -
+  инвентаризация существующих DTO, платформ, Router и storage перед runtime.
+- [Trading system contracts](guides/TRADING_SYSTEM_CONTRACTS.md) - предложенные
+  минимальные lifecycle, context, branching и risk contracts.
+- [Trading system implementation plan](guides/TRADING_SYSTEM_IMPLEMENTATION_PLAN.md) -
+  последовательность небольших PR и первый synthetic vertical slice.
 - [Platform API guide](guides/platform-api-guide.md) - практический справочник
   по платформам, модулям, событиям, DTO, storage и bridge API.
 - [API and header contracts](guides/api-and-header-contracts.md) - публичный
