@@ -357,6 +357,13 @@ struct ConnectAttempt {
     int64_t elapsed_ms = 0;
 };
 
+struct TickHistoryAttempt {
+    bool accepted = false;
+    bool callback_received = false;
+    optionx::TickHistoryResult result;
+    int64_t elapsed_ms = 0;
+};
+
 struct TradeOpenAttempt {
     bool accepted = false;
     bool callback_received = false;
@@ -518,6 +525,28 @@ public:
 
     std::vector<optionx::SingleTick> latest_ticks() const {
         return m_price_capture.ticks();
+    }
+
+    TickHistoryAttempt fetch_tick_history(
+            optionx::TickHistoryRequest request,
+            int64_t timeout_ms) {
+        TickHistoryAttempt attempt;
+        std::atomic<bool> done{false};
+        const auto started_at = std::chrono::steady_clock::now();
+        attempt.accepted = m_platform.fetch_tick_history(
+            request,
+            [&](optionx::TickHistoryResult result) {
+                attempt.result = std::move(result);
+                attempt.callback_received = true;
+                done.store(true, std::memory_order_release);
+            });
+        pump_until(
+            m_platform,
+            [&] { return done.load(std::memory_order_acquire); },
+            timeout_ms);
+        attempt.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started_at).count();
+        return attempt;
     }
 
     AutoDomainSelection latest_domain_selection() const {

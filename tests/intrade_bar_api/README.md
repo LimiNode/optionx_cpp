@@ -21,6 +21,7 @@ $env:OPTIONX_INTRADE_BAR_CONFIG_FILE="tests\intrade_bar_api\intrade_bar_api.loca
 .\build-codex\intrade_bar_smoke_cli.exe auth-cache
 .\build-codex\intrade_bar_smoke_cli.exe domain-check --domain-min=-1 --domain-max=1000
 .\build-codex\intrade_bar_smoke_cli.exe quotes --symbol=EURUSD
+.\build-codex\intrade_bar_smoke_cli.exe tick-history --symbol=EURUSD --days-ago=0 --seconds=65
 .\build-codex\intrade_bar_smoke_cli.exe market-stream --symbols=BTCUSDT --ticks --bars --transport=WEBSOCKET --seconds=60
 .\build-codex\intrade_bar_smoke_cli.exe history --source=CSV --days=14 --account-type=DEMO
 .\build-codex\intrade_bar_smoke_cli.exe history --source=HTML_CSV --all --account-type=DEMO --comment=account-history-export

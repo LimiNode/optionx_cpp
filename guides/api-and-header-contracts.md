@@ -299,19 +299,22 @@ Contract rules:
   inclusive millisecond range. `range_complete` is an explicit completeness
   assertion; successful observations with `false` must not be used as proof of
   continuity. Equal timestamps are valid, and exact duplicate removal remains
-  provider/consumer policy.
+  provider/consumer policy. `TickHistoryRequest::source` selects one source for
+  the operation; providers must not silently fall back to or merge another
+  source. `TickSequence::source` reports the source that was actually used.
 - `BaseMarketDataProvider::provider_time_ms()` and
   `BaseMarketDataProvider::tick_history_interval_ms()` are optional metadata
   hooks for providers whose history backend has its own clock or sampling grid.
   A zero value means that Router should use its local clock or event-oriented
   range semantics.
 
-### Intrade observed tick history
+### Intrade tick history sources
 
-`platforms::IntradeBarPlatform::fetch_tick_history()` reads a bounded in-memory
-archive populated by the platform's `/price_now` polling path. These are
-observed quote snapshots, not a historical tick endpoint supplied by the
-broker:
+`platforms::IntradeBarPlatform::fetch_tick_history()` supports two explicit,
+isolated sources. `LOCAL_OBSERVED` is the default and reads the bounded
+in-memory archive populated by `/price_now`. `BROKER_HISTORICAL` uses the
+authenticated `/quotes` execution-second history. There is no fallback or
+automatic merge between them.
 
 - `Tick::time_ms` keeps the broker timestamp, whose effective granularity is
   one second.
@@ -324,6 +327,16 @@ broker:
 - `range_complete=true` is returned only for aligned requests where every
   expected one-second sample is retained. Missing, unaligned, or evicted
   samples leave it false while the returned observations remain usable.
+- Broker history returns one neutral `Tick::reference` value per available
+  whole-second timestamp; bid, ask, and last remain unspecified. Its
+  `range_complete=true` means every whole-second timestamp inside the original
+  inclusive request is present, not that every sub-second market event is
+  represented.
+- Broker history uses the authenticated `/quotes` GET contract, limits each
+  broker request to 30 minutes, splits at broker-local midnight, rejects known
+  future-period and login HTML responses returned with HTTP 200, and reports
+  `TickSequence::source=BROKER_HISTORICAL`. The public request is conservatively
+  limited to two broker-local dates.
 - `trade_check2.php` is a trade settlement/result check keyed by deal ID. It
   is not the implementation of `fetch_tick_history()`.
 - `BarSubscriptionRequest::continuity` enables Router-owned bar prefill and

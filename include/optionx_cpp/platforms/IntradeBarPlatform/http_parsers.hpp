@@ -17,6 +17,7 @@
 #include <cmath>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <regex>
@@ -351,6 +352,34 @@ namespace optionx::platforms::intrade_bar {
     inline bool is_modern_intrade_landing_page(const std::string& content) {
         return content.find("Digital options, without the circus") != std::string::npos ||
                content.find("__NUXT__") != std::string::npos;
+    }
+
+    /// \brief Detects a known unauthenticated Intrade login response.
+    inline bool is_intrade_login_page(const std::string& content) {
+        return is_site_login_page(content) ||
+            is_modern_intrade_landing_page(content) ||
+            content.find("name=\"g-rec-res-l\"") != std::string::npos ||
+            content.find("name='g-rec-res-l'") != std::string::npos;
+    }
+
+    /// \brief Detects the current authenticated `/quotes` page scaffold.
+    inline bool is_intrade_quote_check_page(const std::string& content) {
+        return content.find("name=\"symbol\"") != std::string::npos &&
+            content.find("name=\"date\"") != std::string::npos &&
+            content.find("name=\"from\"") != std::string::npos &&
+            content.find("name=\"to\"") != std::string::npos;
+    }
+
+    /// \brief Detects the broker's explicit future-period validation page.
+    inline bool is_intrade_quote_check_future_period_page(
+            const std::string& content) {
+        return content.find("period has not ended yet") != std::string::npos;
+    }
+
+    /// \brief Detects an invalid quote-check time-order response.
+    inline bool is_intrade_quote_check_invalid_period_page(
+            const std::string& content) {
+        return content.find("must be later than") != std::string::npos;
     }
 
     /// \brief Parses the current SPA login JSON response without logging its body.
@@ -1011,7 +1040,9 @@ namespace optionx::platforms::intrade_bar {
             return it == months.end() ? 0 : it->second;
         }
 
-        inline std::optional<int64_t> parse_history_datetime_ms(const std::string& raw) {
+        inline std::optional<int64_t> parse_history_datetime_ms(
+                const std::string& raw,
+                const int64_t broker_offset_sec = 3 * time_shield::SEC_PER_HOUR) {
             std::smatch match;
             int hour = 0;
             int minute = 0;
@@ -1062,9 +1093,144 @@ namespace optionx::platforms::intrade_bar {
                 return std::nullopt;
             }
 
-            constexpr int64_t broker_offset_sec = 3 * time_shield::SEC_PER_HOUR;
             const int64_t timestamp_sec = time_shield::to_timestamp(year, month, day, hour, minute, second) - broker_offset_sec;
             return time_shield::sec_to_ms(timestamp_sec);
+        }
+
+        inline std::optional<int64_t> parse_quote_check_datetime_ms(
+                const std::string& raw,
+                const BrokerQuoteCheckRequest& request) {
+            if (const auto full_timestamp = parse_history_datetime_ms(
+                    raw,
+                    request.broker_utc_offset_sec)) {
+                return full_timestamp;
+            }
+
+            std::smatch match;
+            static const std::regex time_only(
+                R"(^\s*([0-9]{1,2}):([0-9]{2}):([0-9]{2})\s*$)");
+            if (!std::regex_match(raw, match, time_only) || match.size() != 4) {
+                return std::nullopt;
+            }
+
+            const auto hour = utils::parse_int_strict(match[1].str());
+            const auto minute = utils::parse_int_strict(match[2].str());
+            const auto second = utils::parse_int_strict(match[3].str());
+            if (!hour || !minute || !second ||
+                    *hour > 23 || *minute > 59 || *second > 59) {
+                return std::nullopt;
+            }
+
+            const auto local_from_sec = static_cast<std::int64_t>(
+                time_shield::ms_to_sec(request.from_time_ms)) +
+                request.broker_utc_offset_sec;
+            const auto local_date = time_shield::to_date_time<time_shield::DateTimeStruct>(
+                local_from_sec);
+            const auto timestamp_sec = time_shield::to_timestamp(
+                local_date.year,
+                local_date.mon,
+                local_date.day,
+                *hour,
+                *minute,
+                *second) - request.broker_utc_offset_sec;
+            return time_shield::sec_to_ms(timestamp_sec);
+        }
+
+        /// \brief Parses the selected price rows returned by `/quotes`.
+        /// \param content Authenticated broker HTML response.
+        /// \param request Request range and broker timezone offset.
+        /// \return Parsed observations and conservative completeness metadata.
+        inline BrokerQuoteCheck parse_quote_check_html(
+                const std::string& content,
+                const BrokerQuoteCheckRequest& request) {
+            BrokerQuoteCheck result;
+            result.symbol = normalize_symbol_name(request.symbol);
+
+            if (!request.valid()) return result;
+
+            // The current quote-check page has one time cell followed by
+            // Bid, Price, and Ask cells. The middle Price cell is the value
+            // used by the broker's trade-check flow. The legacy response has
+            // the same selected cell but includes a full date in the first
+            // cell, so both timestamp forms remain supported.
+            static const std::regex row_regex(
+                R"(<td\b[^>]*\bclass\s*=\s*["'][^"']*\bpartner_stat_table_left\b[^"']*["'][^>]*>([\s\S]*?)</td>\s*<td\b[^>]*>([\s\S]*?)</td>\s*<td\b[^>]*>([\s\S]*?)</td>)",
+                std::regex_constants::icase);
+            static const std::regex current_row_regex(
+                R"(<tr\b[^>]*>\s*<td\b[^>]*>([\s\S]*?)</td>\s*<td\b[^>]*>([\s\S]*?)</td>\s*<td\b[^>]*>([\s\S]*?)</td>\s*<td\b[^>]*>([\s\S]*?)</td>\s*</tr>)",
+                std::regex_constants::icase);
+
+            const std::string row_marker = "partner_stat_table_left";
+            std::size_t marker_count = 0;
+            for (std::size_t pos = content.find(row_marker);
+                    pos != std::string::npos;
+                    pos = content.find(row_marker, pos + row_marker.size())) {
+                ++marker_count;
+            }
+
+            std::map<std::uint64_t, double> rows;
+            std::size_t matched_legacy_row_count = 0;
+            const auto collect_rows = [&](
+                    const std::regex& regex,
+                    const bool legacy_rows) {
+                for (std::sregex_iterator it(content.begin(), content.end(), regex), end;
+                        it != end;
+                        ++it) {
+                    if (legacy_rows) ++matched_legacy_row_count;
+                    const auto& match = *it;
+                    if (match.size() < 4) {
+                        ++result.malformed_rows;
+                        continue;
+                    }
+
+                    const auto timestamp = parse_quote_check_datetime_ms(
+                        utils::trim_copy(match[1].str()),
+                        request);
+                    auto price_text = utils::trim_copy(match[3].str());
+                    std::replace(price_text.begin(), price_text.end(), ',', '.');
+                    const auto price = utils::parse_double_strict(price_text);
+                    if (!timestamp || !price || *timestamp < 0) {
+                        ++result.malformed_rows;
+                        continue;
+                    }
+
+                    const auto time_ms = static_cast<std::uint64_t>(*timestamp);
+                    if (time_ms < request.from_time_ms || time_ms > request.to_time_ms) {
+                        continue;
+                    }
+                    rows[time_ms] = *price;
+                }
+            };
+
+            collect_rows(row_regex, true);
+            if (marker_count == 0) {
+                collect_rows(current_row_regex, false);
+            }
+
+            if (marker_count > matched_legacy_row_count) {
+                result.malformed_rows += marker_count - matched_legacy_row_count;
+            }
+
+            result.observations.reserve(rows.size());
+            for (const auto& [time_ms, price] : rows) {
+                result.observations.push_back({time_ms, price});
+            }
+
+            const auto expected_count = quote_check_expected_count(request);
+            if (result.malformed_rows == 0 &&
+                expected_count == result.observations.size()) {
+                result.range_complete = true;
+                const auto first_time_ms = first_quote_check_time_ms(request);
+                for (std::size_t index = 0; index < result.observations.size(); ++index) {
+                    const auto expected_time = first_time_ms + index * 1000;
+                    if (result.observations[index].time_ms != expected_time) {
+                        result.range_complete = false;
+                        break;
+                    }
+                }
+            }
+
+            return result;
         }
 
         inline std::optional<HistoryMoney> parse_history_money(std::string raw) {

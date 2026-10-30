@@ -36,6 +36,7 @@ void print_usage(std::ostream& out) {
         << "  intrade_bar_smoke_cli show-account\n"
         << "  intrade_bar_smoke_cli domain-check [--domain-min=-1] [--domain-max=1000]\n"
         << "  intrade_bar_smoke_cli quotes [--symbol=EURUSD]\n"
+        << "  intrade_bar_smoke_cli tick-history [--symbol=EURUSD] [--days-ago=0] [--seconds=65] [--from-ms=...] [--to-ms=...]\n"
         << "  intrade_bar_smoke_cli market-stream [--symbols=BTCUSDT,EURUSD] [--ticks] [--bars] [--transport=WEBSOCKET|POLLING|AUTO|HYBRID] [--seconds=30] [--timeframe=60] [--backfill-minutes=30]\n"
         << "  intrade_bar_smoke_cli history [--source=CSV|HTML|HTML_CSV] [--days=14|--all] [--time-field=CLOSE_DATE] [--comment=...]\n"
         << "  intrade_bar_smoke_cli switch-check --confirm [--account-type=DEMO] [--currency=USD]\n"
@@ -303,6 +304,91 @@ int run_quotes(smoke::IntradeBarSmokeConfig config, const CliOptions& options) {
     }
     runtime.disconnect();
     return 0;
+}
+
+int run_tick_history(
+        smoke::IntradeBarSmokeConfig config,
+        const CliOptions& options) {
+    if (!smoke::require_live_config(config, std::cerr)) return 2;
+
+    const std::string requested_symbol = smoke::option_value_or(
+        options.values,
+        "symbol",
+        config.quote_symbol);
+    const std::string symbol = smoke::normalize_quote_symbol(requested_symbol);
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const bool has_explicit_range =
+        options.values.count("from-ms") != 0 ||
+        options.values.count("to-ms") != 0;
+    std::uint64_t from_ms = 0;
+    std::uint64_t to_ms = 0;
+
+    if (has_explicit_range) {
+        const auto from_value = smoke::option_i64_or(options.values, "from-ms", 0);
+        const auto to_value = smoke::option_i64_or(options.values, "to-ms", 0);
+        if (from_value <= 0 || to_value < from_value) {
+            std::cerr << "Invalid inclusive --from-ms/--to-ms range.\n";
+            return 2;
+        }
+        from_ms = static_cast<std::uint64_t>(from_value);
+        to_ms = static_cast<std::uint64_t>(to_value);
+    } else {
+        const int64_t days_ago = smoke::option_i64_or(
+            options.values,
+            "days-ago",
+            0);
+        const int64_t seconds = smoke::option_i64_or(
+            options.values,
+            "seconds",
+            65);
+        if (days_ago < -3650 || days_ago > 3650 || seconds <= 0 || seconds > 172800) {
+            std::cerr << "Invalid --days-ago or --seconds range.\n";
+            return 2;
+        }
+        const int64_t center_sec = now_ms / 1000 - days_ago * 86400 - 5;
+        if (center_sec <= 0 || center_sec < seconds) {
+            std::cerr << "Requested tick-history range is outside timestamp bounds.\n";
+            return 2;
+        }
+        to_ms = static_cast<std::uint64_t>(center_sec * 1000);
+        from_ms = static_cast<std::uint64_t>((center_sec - seconds + 1) * 1000);
+    }
+
+    smoke::IntradeBarSmokeRuntime runtime(std::move(config));
+    if (!smoke::connect_or_report(runtime, std::cout, std::cerr)) return 1;
+
+    const optionx::TickHistoryRequest request(
+        symbol,
+        from_ms,
+        to_ms,
+        optionx::TickHistorySource::BROKER_HISTORICAL);
+    const auto attempt = runtime.fetch_tick_history(request, 90000);
+    const auto& result = attempt.result;
+    std::cout << "tick-history accepted=" << attempt.accepted
+              << " callback=" << attempt.callback_received
+              << " elapsed_ms=" << attempt.elapsed_ms
+              << " success=" << result.success
+              << " status=" << result.status_code
+              << " range_complete=" << result.range_complete
+              << " symbol=" << result.sequence.symbol
+              << " provider=" << result.sequence.provider
+              << " source=" << result.sequence.source
+              << " observations=" << result.sequence.ticks.size();
+    if (!result.sequence.ticks.empty()) {
+        std::cout << " min_time_ms=" << result.sequence.ticks.front().time_ms
+                  << " max_time_ms=" << result.sequence.ticks.back().time_ms
+                  << " first_reference=" << std::setprecision(12)
+                  << result.sequence.ticks.front().reference
+                  << " last_reference=" << std::setprecision(12)
+                  << result.sequence.ticks.back().reference;
+    }
+    std::cout << '\n';
+    if (!result.success && !result.error_desc.empty()) {
+        std::cerr << "tick-history failed: " << result.error_desc << '\n';
+    }
+    runtime.disconnect();
+    return attempt.accepted && attempt.callback_received && result.success ? 0 : 1;
 }
 
 class CliBarAggregator {
@@ -1378,6 +1464,8 @@ int main(int argc, char** argv) {
         result = run_domain_check(std::move(config), options);
     } else if (options.command == "quotes") {
         result = run_quotes(std::move(config), options);
+    } else if (options.command == "tick-history") {
+        result = run_tick_history(std::move(config), options);
     } else if (options.command == "market-stream") {
         result = run_market_stream(std::move(config), options);
     } else if (options.command == "history") {

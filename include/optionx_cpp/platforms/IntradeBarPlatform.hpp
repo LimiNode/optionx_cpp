@@ -282,16 +282,79 @@ namespace optionx::platforms {
                 });
         }
 
-        /// \brief Returns observed Intrade polling ticks from the in-memory archive.
-        /// \param request Inclusive broker-time range in milliseconds.
+        /// \brief Returns Intrade tick history from the explicitly selected source.
+        /// \param request Inclusive broker-time range and source selection.
         /// \param callback Callback receiving observations or a typed failure.
-        /// \return True when the request was accepted for local processing.
+        /// \details Local observations preserve the existing synchronous archive
+        ///          lookup. Broker history is queued onto the platform owner loop
+        ///          and never falls back to or merges with the local archive.
+        /// \return True when the request was accepted for processing.
         bool fetch_tick_history(
                 const TickHistoryRequest& request,
                 market_data::BaseMarketDataProvider::tick_history_callback_t callback) override {
             if (!callback || !request.valid()) return false;
-            callback(m_tick_history.fetch(request));
-            return true;
+            if (request.source == TickHistorySource::LOCAL_OBSERVED) {
+                callback(m_tick_history.fetch(request));
+                return true;
+            }
+
+            intrade_bar::BrokerQuoteCheckRequest broker_request;
+            broker_request.symbol = request.symbol;
+            broker_request.from_time_ms = request.from_time_ms;
+            broker_request.to_time_ms = request.to_time_ms;
+
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto callback_holder =
+                std::make_shared<market_data::BaseMarketDataProvider::tick_history_callback_t>(
+                    std::move(callback));
+            auto complete = std::make_shared<std::function<void(TickHistoryResult)>>();
+            *complete = [completed, callback_holder](TickHistoryResult result) mutable {
+                if (completed->exchange(true, std::memory_order_acq_rel)) return;
+                auto terminal_callback = std::move(*callback_holder);
+                if (terminal_callback) terminal_callback(std::move(result));
+            };
+            auto fail = [complete](std::string reason) mutable {
+                (*complete)(TickHistoryResult::fail(std::move(reason)));
+            };
+
+            return post_task(
+                [this, broker_request, complete, fail]() mutable {
+                    const bool accepted = m_request_manager.request_quote_check_result(
+                        broker_request,
+                        [complete](intrade_bar::QuoteCheckApiResult result) mutable {
+                            if (!result) {
+                                (*complete)(TickHistoryResult::fail(
+                                    std::move(result.error_message),
+                                    result.status_code));
+                                return;
+                            }
+
+                            TickSequence sequence;
+                            sequence.symbol = std::move(result.value.symbol);
+                            sequence.provider = to_str(PlatformType::INTRADE_BAR);
+                            sequence.source = to_str(TickHistorySource::BROKER_HISTORICAL);
+                            sequence.price_digits = intrade_bar::price_digits_for_symbol(
+                                sequence.symbol);
+                            sequence.volume_digits = 0;
+                            sequence.ticks.reserve(result.value.observations.size());
+                            for (const auto& observation : result.value.observations) {
+                                Tick tick;
+                                tick.reference = observation.price;
+                                tick.time_ms = observation.time_ms;
+                                sequence.ticks.push_back(tick);
+                            }
+                            (*complete)(TickHistoryResult::ok(
+                                std::move(sequence),
+                                result.value.range_complete,
+                                result.status_code));
+                        });
+                    if (!accepted) {
+                        fail("Intrade broker tick-history request was rejected by RequestManager.");
+                    }
+                },
+                [fail]() mutable {
+                    fail("Intrade broker tick-history request was cancelled during platform shutdown.");
+                });
         }
 
         /// \brief Returns the broker-aligned Intrade market-data time estimate.

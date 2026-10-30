@@ -206,7 +206,7 @@ namespace optionx::market_data {
                     }
 
                     if (!result.sequence.symbol.empty() &&
-                        result.sequence.symbol != request.symbol) {
+                        !symbols_match(result.sequence.symbol, request.symbol)) {
                         if (error_callback) {
                             error_callback(TickHistoryResult::fail(
                                 "Historical tick response does not match the requested symbol.",

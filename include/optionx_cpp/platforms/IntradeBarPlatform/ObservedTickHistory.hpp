@@ -106,6 +106,7 @@ namespace optionx::platforms::intrade_bar {
             std::lock_guard<std::mutex> lock(m_mutex);
             TickSequence sequence;
             sequence.symbol = request.symbol;
+            sequence.source = to_str(TickHistorySource::LOCAL_OBSERVED);
 
             const auto symbol_it = m_symbols.find(request.symbol);
             if (symbol_it == m_symbols.end()) {
@@ -195,6 +196,7 @@ namespace optionx::platforms::intrade_bar {
             return lhs.ask == rhs.ask &&
                 lhs.bid == rhs.bid &&
                 lhs.last == rhs.last &&
+                lhs.reference == rhs.reference &&
                 lhs.volume == rhs.volume &&
                 lhs.time_ms == rhs.time_ms;
         }

@@ -19,6 +19,7 @@ namespace optionx::market_data {
             double ask = 0.0;
             double bid = 0.0;
             double last = 0.0;
+            double reference = 0.0;
             double volume = 0.0;
 
             [[nodiscard]] bool operator==(
@@ -27,6 +28,7 @@ namespace optionx::market_data {
                     ask == other.ask &&
                     bid == other.bid &&
                     last == other.last &&
+                    reference == other.reference &&
                     volume == other.volume;
             }
         };
@@ -42,6 +44,7 @@ namespace optionx::market_data {
                 hash = combine(hash, std::hash<double>{}(key.ask));
                 hash = combine(hash, std::hash<double>{}(key.bid));
                 hash = combine(hash, std::hash<double>{}(key.last));
+                hash = combine(hash, std::hash<double>{}(key.reference));
                 hash = combine(hash, std::hash<double>{}(key.volume));
                 return hash;
             }
@@ -2511,6 +2514,7 @@ namespace optionx::market_data {
                 key.ask = tick.ask;
                 key.bid = tick.bid;
                 key.last = tick.last;
+                key.reference = tick.reference;
                 break;
             case MarketDataTickDeduplicationMode::EXACT_OBSERVATION:
             case MarketDataTickDeduplicationMode::PROVIDER_DEFAULT:
@@ -2518,6 +2522,7 @@ namespace optionx::market_data {
                 key.ask = tick.ask;
                 key.bid = tick.bid;
                 key.last = tick.last;
+                key.reference = tick.reference;
                 key.volume = tick.volume;
                 break;
             }

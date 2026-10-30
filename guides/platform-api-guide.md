@@ -132,6 +132,9 @@ Subscription rules:
 - `TickHistoryRequest` and `TickHistoryResult` use inclusive millisecond ranges.
   A successful result may be useful even when `range_complete=false`; that
   flag is the provider's proof that the requested range is fully accounted for.
+  `TickHistoryRequest::source` explicitly selects one history source and
+  `TickSequence::source` reports the source used. Providers do not silently
+  fall back to or merge another source.
 - `BarSubscriptionRequest::continuity` lets `MarketDataRouter` request initial
   bar history before live delivery and optionally recover timestamp gaps. Live
   batches are buffered while history is in flight. Route-scoped progress is
@@ -151,8 +154,13 @@ Subscription rules:
   recovery. Tick routes can use `TickSubscriptionRequest::continuity` with the
   same history-first lifecycle when the provider implements
   `fetch_tick_history()`.
-- Router continuity supports bars and tick routes. Intrade additionally exposes
-  a bounded, session-scoped observed-tick archive populated by `/price_now`.
+- Router continuity supports bars and tick routes. Intrade exposes a bounded,
+  session-scoped `LOCAL_OBSERVED` archive populated by `/price_now` and an
+  explicit `BROKER_HISTORICAL` source backed by the authenticated `/quotes` GET
+  contract. Each broker request is limited to 30 minutes; longer ranges are
+  split by the provider.
+  The local archive remains the default, so Router-generated requests preserve
+  their existing behaviour. The sources are never merged automatically.
   Its timestamps have one-second broker granularity, and `range_complete=true`
   means every expected observed second is present in the retained archive, not
   that every broker micro-event was captured. The archive is non-persistent and
