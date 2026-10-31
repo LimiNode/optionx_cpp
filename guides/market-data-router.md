@@ -634,7 +634,11 @@ live-only routes without treating them as continuity-verified.
 The provider contract now has a separate `fetch_tick_history(...)` operation:
 
 ```cpp
-md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000);
+md::TickHistoryRequest request(
+    "EURUSD",
+    1700000000000,
+    1700000060000,
+    md::TickHistorySource::BROKER_HISTORICAL);
 provider.fetch_tick_history(
     request,
     [](md::TickHistoryResult result) {
@@ -656,6 +660,12 @@ The adapter validates symbol, range, and ordering. Exact duplicate handling
 and any provider sequence identity remain a consumer/provider policy; the
 base `Tick` DTO currently has no universal sequence field.
 
+The source is selected per request. `LOCAL_OBSERVED` is the backward-compatible
+default; `BROKER_HISTORICAL` asks the provider for its broker archive. Providers
+must reject an unsupported source rather than silently falling back or merging
+sources. A successful `TickSequence::source` identifies the source actually
+used, independently from `TickSequence::provider`.
+
 `MarketDataContinuityService::request_tick_history_batch()` is a thin adapter
 for providers that implement the operation. It validates symbol, range, and
 ordering, converts `TickSequence` into a `TickDataBatch`, and marks items as
@@ -674,11 +684,11 @@ service.request_tick_history_batch(
     true); // require_complete_range
 ```
 
-`MarketDataRouter` also applies the history contract to tick routes. The
-Intrade Bar provider implements `fetch_tick_history()` as a bounded,
-session-scoped archive of observed `/price_now` snapshots. This is useful for
-short prefill and reconnect windows, but it is not an authoritative broker tick
-archive:
+`MarketDataRouter` also applies the history contract to tick routes. Its
+generated requests use the backward-compatible `LOCAL_OBSERVED` default. The
+Intrade Bar provider also accepts explicit `BROKER_HISTORICAL` requests backed
+by `/quotes`; those observations are not automatically mixed with the bounded,
+session-scoped `/price_now` archive:
 
 - broker timestamps have one-second granularity;
 - the archive starts empty for a new authenticated session and evicts old data;
@@ -688,6 +698,16 @@ archive:
   snapshots are removed;
 - `trade_check2.php` remains a settlement/trade-result API and is not used for
   range history.
+- `/quotes` supplies one broker-published value on a whole-second grid. That
+  value uses `Tick::reference` because bid/ask/last semantics are not proven;
+  complete coverage means every requested grid timestamp is present, not every
+  sub-second market event. The authenticated request is a GET with
+  `symbol/date/from/to`. The current authenticated page accepted exactly 30
+  minutes (`1,801` rows) and rejected 30 minutes plus one second with its
+  visible maximum-period validation page and no quote rows. Longer ranges are
+  split by the provider at non-overlapping whole-second boundaries and local
+  midnight. Future periods are returned as broker validation failures, not as
+  empty history.
 
 Providers may expose optional history-clock metadata through
 `BaseMarketDataProvider::provider_time_ms()` and

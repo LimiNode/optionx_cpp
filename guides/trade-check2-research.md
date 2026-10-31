@@ -120,9 +120,112 @@ that every broker micro-event was captured.
 ### Generic Tick History Contract
 
 `TickHistoryRequest` is an inclusive `(symbol, from_time_ms, to_time_ms)`
-request. `TickHistoryResult::range_complete` is an explicit provider proof,
-not an inference from the number of returned ticks. Intrade implements this
-contract from the `/price_now` archive, not from `trade_check2.php`.
+request with an explicit source. `LOCAL_OBSERVED` preserves the existing
+`/price_now` archive behaviour and remains the default. `BROKER_HISTORICAL`
+selects the authenticated `/quotes` adapter. There is no automatic fallback or
+merging between the sources. `TickHistoryResult::range_complete` is an explicit
+provider proof, not an inference from the number of returned ticks.
+
+## Legacy `/quotes` Tick-Check Evidence
+
+The older `mega-connector` implementation contains a separate authenticated
+trade-correction flow for the broker's quote-check page. It is not the same
+request as `trade_check2.php` and it is not a generic public history API.
+
+For this broker, the relevant contract is the execution-second grid: the
+broker fixes trade opening and closing on whole seconds, so one broker value
+per second is the authoritative granularity needed to verify a trade. This is
+not a claim that the chart has no sub-second market updates; those updates are
+outside the trade-settlement contract.
+
+The current authenticated browser request is:
+
+```text
+GET /quotes?symbol=EUR%2FUSD&date=2026-10-30&from=22%3A30%3A00&to=22%3A45%3A00
+
+symbol=<symbol with a slash, for example EUR/USD>
+date=<YYYY-MM-DD in the broker's local date format>
+from=<HH:MM:SS>
+to=<HH:MM:SS>
+```
+
+The response is HTML. The current page describes the supported range as one
+price per second for currencies and metals, with a maximum period of 30
+minutes per request. Its table rows have the following shape:
+
+```html
+<tr><td>22:30:00</td><td>bid</td><td>price</td><td>ask</td></tr>
+```
+
+The current response contains only the local time in the first cell; the date
+comes from the request's `date` parameter. Older responses containing a full
+date and time remain accepted for compatibility. OptionX uses the middle
+`Price` cell as the neutral `Tick::reference` value. Timestamps are converted
+from the broker's observed UTC+3 clock to Unix time. The production caller
+requests a window beginning at the stored trade open time and ending at the
+stored close time plus one minute. It requires exact entries for both the open
+and close seconds before it compares the broker-returned prices and may change
+a reported loss or standoff to a win or standoff.
+
+This establishes the source needed for broker trade verification. It does not
+make the endpoint an unlimited raw-market-event archive:
+
+- one request accepts at most 30 minutes and one local date, so longer ranges
+  must be split into consecutive requests and ranges crossing local midnight
+  must use separate dates;
+- future periods are rejected explicitly and must not be interpreted as empty
+  history;
+- the page states that quotes are retained for several days, but does not
+  publish an exact retention boundary or a cursor;
+- the fixed `GMT+3` conversion is an implementation assumption, not a
+  broker-declared timezone contract;
+- the trade-correction caller treats missing open or close rows as failure,
+  but it does not expose a reusable completeness result to market-data users.
+
+OptionX keeps the broker-specific HTML and request quirks in the internal
+`BrokerQuoteCheck` adapter, but exposes the observations through the common
+`IntradeBarPlatform::fetch_tick_history()` operation when the request selects
+`BROKER_HISTORICAL`. The adapter sends the authenticated `/quotes` GET on the
+platform owner loop, limits each request to 30 minutes, splits ranges at
+broker-local midnight, and merges the second-aligned rows. The public request
+is conservatively limited to two broker-local dates until a larger retention
+policy is explicitly needed.
+
+The returned `TickSequence` keeps `provider=INTRADE_BAR` and reports the actual
+source separately as `BROKER_HISTORICAL`. Because the selected quote column has
+not been proven to be bid, ask, or last, its value is stored in the neutral
+`Tick::reference` field. For partial-second requests the adapter returns only
+whole-second timestamps inside the original inclusive range; it does not
+fabricate rounded output timestamps.
+
+For this source, `range_complete=true` means that every broker whole-second
+timestamp inside the requested range was returned without malformed rows. It
+does not prove that every sub-second market event is represented. A valid HTTP
+200 response with no rows is successful but incomplete when the range contains
+an expected second. Known login HTML, unrecognized non-empty HTML, malformed
+rows, transport failures, and DDoS responses are failures rather than empty
+history. No fallback to `LOCAL_OBSERVED` is attempted. This integration does
+not change trade settlement or correction decisions.
+
+An authenticated browser capture and read-only smoke confirmed the current
+contract and its visible range boundary. A completed 15-minute EUR/USD request
+returned 901 rows, and a completed one-hour request returned 3,601 rows via
+two GET requests. A direct request for exactly 30 minutes returned 1,801 rows.
+A request for 30 minutes plus one second returned HTTP 200 HTML with the form
+validation text `Period of no more than 30 minutes: each second is a separate
+row` and no quote rows. This confirms the 30-minute limit at the current
+authenticated `/quotes` interface; it is not an assertion about undocumented
+server behavior for other endpoints.
+
+A future request returned HTTP 200 HTML with `This period has not ended yet.
+Choose a time in the past.` A request crossing midnight returned an explicit
+invalid time-order message because the form accepts only one date. These
+responses are classified as broker validation failures rather than empty
+history. No new trades are needed for this source.
+
+The adapter's two-broker-date guard is a local safety limit, not evidence that
+the broker retains exactly two days. The page only states that quotes are
+retained for several days; the exact retention boundary remains unverified.
 
 ## Provenance Boundary
 
@@ -130,6 +233,7 @@ contract from the `/price_now` archive, not from `trade_check2.php`.
 | --- | --- | --- |
 | Broker-observed `/price_now` tick | A symbol/price snapshot with broker time and local receipt time was observed | Complete micro-event history or observations before the session/archive window |
 | Local `/price_now` archive | Retained observed snapshots and, for Intrade, proven one-second archive coverage | A persistent broker archive or coverage outside retained observations |
+| Authenticated `/quotes` quote-check row | The broker's execution-second value for a requested symbol/time row | Sub-second market events, unlimited retention, or coverage outside the returned rows |
 | `trade_check2.php` result | A price/profit response associated with one known broker trade ID | Exact price semantics, independent observation timestamp, range coverage, or absence of other ticks |
 | `TradeRecord` history | Closed-trade lifecycle facts and stored open/close fields | A quote stream, intermediate ticks, or dense coverage |
 | Authoritative historical tick range | Only a provider API that explicitly supplies timestamped observations and completeness semantics | Not provided by the currently observed `trade_check2.php` contract |
@@ -138,7 +242,7 @@ contract from the `/price_now` archive, not from `trade_check2.php`.
 
 A read-only inspection of the current `trading.intrade.bar` SPA found a
 separate chart-history API. This is evidence for aggregate market history; it
-does not change the `trade_check2.php` decision above.
+does not replace the broker's `/quotes` execution-second contract.
 
 The main observed request is:
 
@@ -180,9 +284,30 @@ requests with `limit=300` and `to` set to the oldest loaded candle. A request
 with `limit=5` returned six aggregates in one observation, so `limit` must be
 treated as a broker hint until its exact boundary semantics are established.
 
-The SPA also exposes `/ajax/instrument/history`, which returns a mapping from
-instrument ID to `[timestamp_ms, price]` pairs for asset previews. It is a
-different response contract and is not a tick-history completeness proof.
+The current SPA bundle constructs this request with `to` as an ISO timestamp
+when paging from an epoch-second cursor. In the unauthenticated live probe on
+2026-10-28, a `limit=5` request returned six aggregates. Supplying an old ISO
+`to` value returned five aggregates near that historical cursor plus an extra
+aggregate at the current live edge. Supplying a future `to` within roughly a
+week returned current-edge aggregates, while a farther future cursor returned
+an empty list. This means callers must filter every aggregate to the requested
+inclusive range and must treat future-date results as non-authoritative.
+
+The same bundle calls the separate preview endpoint as:
+
+```text
+GET /ajax/instrument/history
+    instruments=[<numeric instrument id>]
+    wow=<preview mode>
+    period=<preview period>
+    points=<number of points>
+```
+
+Its response is a mapping from instrument ID to sampled
+`[timestamp_ms, price]` pairs. A public probe returned ten points for ten
+requested points, but the endpoint did not expose range or completeness
+metadata. It is therefore not equivalent to either the legacy second-level
+HTML table or the chart-history OHLC endpoint.
 
 The loaded application bundles did not contain a dedicated quote-check or
 trade-history chart endpoint. The chart code fetches candles by instrument and
@@ -195,16 +320,23 @@ Therefore the current evidence supports this narrower conclusion:
 
 - the broker exposes a useful aggregate OHLC history API for the modern SPA;
 - it is not a raw tick source and does not expose a `range_complete` field;
+- the legacy `/quotes` flow is the broker-specific authoritative source for
+  execution-second quote checks;
+- `/ajax/instrument/history` is a sampled preview endpoint and does not
+  provide a usable second-level trade-check history;
 - it does not prove that a chart around a trade is a special trade-scoped
   quote-check request;
-- exact retention, maximum range, timezone, missing-candle semantics, and
-  price-source semantics still require authenticated UI replay with a real
-  closed trade.
+- exact `/quotes` retention remains unspecified beyond the page's "several
+  days" statement;
+- future periods are explicitly rejected, while missing rows in a completed
+  range still require conservative completeness handling;
+- the current page exposes `Bid`, `Price`, and `Ask`; OptionX uses `Price` as a
+  neutral reference and does not infer settlement-side semantics from it.
 
-No runtime provider should be implemented from this observation alone. If the
-authenticated replay confirms the same contract, it is a candidate for a
-separate provider-aligned bar-history adapter, not for `fetch_tick_history()`
-or for replacing `trade_check2.php`.
+The runtime integration can consume this dedicated `/quotes` adapter for known
+trade open/close verification. It must not replace `trade_check2.php` or claim
+complete sub-second market history. The modern
+`chart-history` endpoint remains a separate minute-bar source.
 
 ## Hypothesis Review
 

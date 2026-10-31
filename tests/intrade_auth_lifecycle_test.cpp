@@ -214,9 +214,11 @@ TEST(IntradeBarPublicRequests, AcceptedRequestsCompleteWhenShutdownCancelsOwnerT
     int history_callbacks = 0;
     int result_callbacks = 0;
     int bar_callbacks = 0;
+    int tick_callbacks = 0;
     optionx::TradeHistoryResult history_result;
     std::unique_ptr<optionx::TradeResult> trade_result;
     optionx::BarHistoryResult bar_result;
+    optionx::TickHistoryResult tick_result;
 
     optionx::TradeHistoryRequest history_request =
         optionx::TradeHistoryRequest::all();
@@ -251,6 +253,18 @@ TEST(IntradeBarPublicRequests, AcceptedRequestsCompleteWhenShutdownCancelsOwnerT
             bar_result = std::move(result);
         }));
 
+    const optionx::TickHistoryRequest tick_request(
+        "EURUSD",
+        1000,
+        2000,
+        optionx::TickHistorySource::BROKER_HISTORICAL);
+    ASSERT_TRUE(platform.fetch_tick_history(
+        tick_request,
+        [&tick_callbacks, &tick_result](optionx::TickHistoryResult result) {
+            ++tick_callbacks;
+            tick_result = std::move(result);
+        }));
+
     platform.shutdown();
 
     EXPECT_EQ(history_callbacks, 1);
@@ -272,6 +286,32 @@ TEST(IntradeBarPublicRequests, AcceptedRequestsCompleteWhenShutdownCancelsOwnerT
     EXPECT_NE(
         bar_result.error_desc.find("cancelled during platform shutdown"),
         std::string::npos);
+
+    EXPECT_EQ(tick_callbacks, 1);
+    EXPECT_FALSE(tick_result.success);
+    EXPECT_NE(
+        tick_result.error_desc.find("cancelled during platform shutdown"),
+        std::string::npos);
+}
+
+TEST(IntradeBarPublicRequests, DefaultTickHistorySourceRemainsLocalObserved) {
+    optionx::platforms::IntradeBarPlatform platform;
+    optionx::TickHistoryResult result;
+    int callback_count = 0;
+
+    ASSERT_TRUE(platform.fetch_tick_history(
+        optionx::TickHistoryRequest("EURUSD", 1000, 2000),
+        [&result, &callback_count](optionx::TickHistoryResult update) {
+            result = std::move(update);
+            ++callback_count;
+        }));
+
+    EXPECT_EQ(callback_count, 1);
+    EXPECT_TRUE(result.success);
+    EXPECT_FALSE(result.range_complete);
+    EXPECT_TRUE(result.sequence.ticks.empty());
+    EXPECT_EQ(result.sequence.source, "LOCAL_OBSERVED");
+    platform.shutdown();
 }
 
 int main(int argc, char** argv) {

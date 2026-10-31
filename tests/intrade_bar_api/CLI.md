@@ -156,6 +156,23 @@ auth callback=1 success=1 elapsed_ms=3639
 EURUSD bid=1.14911 ask=1.14914 mid=1.14913
 ```
 
+Fetch broker execution-second history without opening a trade:
+
+```powershell
+.\build-codex\intrade_bar_smoke_cli.exe tick-history --symbol=EURUSD --days-ago=0 --seconds=65
+.\build-codex\intrade_bar_smoke_cli.exe tick-history --symbol=EURUSD --days-ago=1 --seconds=65
+.\build-codex\intrade_bar_smoke_cli.exe tick-history --symbol=EURUSD --from-ms=... --to-ms=...
+```
+
+This command uses the explicit `BROKER_HISTORICAL` tick-history source and
+the authenticated `/quotes` workflow. It prints only request/result metadata,
+observation count, time bounds, and the first/last neutral reference values.
+It does not open trades or change broker account settings. The broker accepts
+at most 30 minutes per `/quotes` request; the adapter splits longer ranges and
+local-midnight crossings. Future ranges are rejected by the broker and are
+reported as failures, not as empty history. Use a completed range for a live
+smoke.
+
 Smoke live market-data streams:
 
 ```powershell

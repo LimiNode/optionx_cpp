@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstdint>
 #include <iterator>
+#include <limits>
+#include <map>
 
 #include "ApiResponses.hpp"
 #include "BarHistoryUtils.hpp"
@@ -350,6 +352,14 @@ namespace optionx::platforms::intrade_bar {
             int64_t deal_id,
             int retry_attempts,
             std::function<void(TradeCheckResult)> callback_check);
+
+        /// \brief Requests broker execution-second quote rows from `/quotes`.
+        /// \param request Symbol and inclusive UTC range to verify.
+        /// \param callback Callback receiving parsed broker quote rows.
+        /// \return True when the request was accepted by the HTTP scheduler.
+        bool request_quote_check_result(
+            const BrokerQuoteCheckRequest& request,
+            std::function<void(QuoteCheckApiResult)> callback);
 
         /// \brief Sends a trade execution request.
         /// \param request Shared pointer to the trade request.
@@ -3354,6 +3364,234 @@ namespace optionx::platforms::intrade_bar {
                 }
                 callback_check(TradeCheckResult::ok(TradeCheckInfo{price, profit}, status_code));
             });
+    }
+
+    inline bool RequestManager::request_quote_check_result(
+            const BrokerQuoteCheckRequest& request,
+            std::function<void(QuoteCheckApiResult)> callback) {
+        if (!callback) return false;
+        if (!request.valid()) {
+            callback(QuoteCheckApiResult::fail(
+                "Invalid Intrade broker quote-check request."));
+            return false;
+        }
+
+        const auto broker_day_index = [offset_sec = request.broker_utc_offset_sec](
+                std::uint64_t time_ms) noexcept {
+            const auto local_sec = static_cast<std::int64_t>(
+                time_shield::ms_to_sec(time_ms)) + offset_sec;
+            constexpr std::int64_t day_seconds = 24 * 60 * 60;
+            return local_sec >= 0
+                ? local_sec / day_seconds
+                : (local_sec - day_seconds + 1) / day_seconds;
+        };
+        const auto first_day = broker_day_index(request.from_time_ms);
+        const auto last_day = broker_day_index(request.to_time_ms);
+        const auto day_count = last_day >= first_day
+            ? static_cast<std::uint64_t>(last_day - first_day) + 1U
+            : 0U;
+        if (day_count == 0 || day_count > MAX_INTRADE_QUOTE_CHECK_DAYS) {
+            callback(QuoteCheckApiResult::fail(
+                "Intrade broker quote-check request exceeds the two-day limit."));
+            return false;
+        }
+
+        struct QuoteCheckState {
+            BrokerQuoteCheckRequest request;
+            std::map<std::uint64_t, double> observations;
+            bool completed = false;
+            std::function<void(QuoteCheckApiResult)> callback;
+        };
+
+        auto state = std::make_shared<QuoteCheckState>();
+        state->request = request;
+        state->callback = std::move(callback);
+
+        auto finish = [state](QuoteCheckApiResult result) mutable {
+            if (state->completed) return;
+            state->completed = true;
+            auto callback = std::move(state->callback);
+            if (callback) callback(std::move(result));
+        };
+
+        auto run_segment = std::make_shared<
+            std::function<void(std::uint64_t)>>();
+        std::weak_ptr<std::function<void(std::uint64_t)>> weak_run_segment = run_segment;
+
+        *run_segment = [this, state, finish, weak_run_segment](
+                std::uint64_t segment_from_ms) mutable {
+            if (state->completed) return;
+
+            const auto offset_sec = state->request.broker_utc_offset_sec;
+            const auto local_from_sec =
+                time_shield::ms_to_sec(segment_from_ms) + offset_sec;
+            const auto local_date = time_shield::to_date_time<time_shield::DateTimeStruct>(
+                local_from_sec);
+            const auto local_day_start_sec = time_shield::to_timestamp(
+                local_date.year,
+                local_date.mon,
+                local_date.day,
+                0,
+                0,
+                0);
+            const auto next_day_start_utc_ms = time_shield::sec_to_ms(
+                local_day_start_sec + time_shield::SEC_PER_DAY - offset_sec);
+            const auto segment_day_end_ms = static_cast<std::uint64_t>(
+                next_day_start_utc_ms - 1);
+            const auto max_segment_interval_ms = time_shield::sec_to_ms(
+                MAX_INTRADE_QUOTE_CHECK_INTERVAL_SEC);
+            const auto max_segment_to_ms = segment_from_ms >
+                    (std::numeric_limits<std::uint64_t>::max)() -
+                        max_segment_interval_ms
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : segment_from_ms + max_segment_interval_ms;
+            const auto segment_to_ms = std::min(
+                state->request.to_time_ms,
+                std::min(segment_day_end_ms, max_segment_to_ms));
+
+            BrokerQuoteCheckRequest segment_request = state->request;
+            segment_request.from_time_ms = segment_from_ms;
+            segment_request.to_time_ms = segment_to_ms;
+
+            const auto normalized_symbol = normalize_symbol_name(segment_request.symbol);
+            const auto broker_symbol = normalized_symbol.size() == 6
+                ? normalized_symbol.substr(0, 3) + "/" + normalized_symbol.substr(3, 3)
+                : normalized_symbol;
+            const auto local_to_sec =
+                time_shield::ms_to_sec(segment_to_ms) + offset_sec;
+            const kurlyk::QueryParams query = {
+                {"symbol", broker_symbol},
+                {"date", time_shield::to_string("%Y-%m-%d", local_from_sec)},
+                {"from", time_shield::to_string("%hh:%mm:%ss", local_from_sec)},
+                {"to", time_shield::to_string("%hh:%mm:%ss", local_to_sec)}
+            };
+
+            auto future = get_http_client().get(
+                "/quotes",
+                query,
+                {
+                    {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                    {"Upgrade-Insecure-Requests", "1"},
+                    {"Referer", m_api_host + "/quotes"},
+                    {"Cookie", m_cookies}
+                },
+                get_rate_limit(RateLimitType::TRADE_RESULT));
+
+            auto strong_run_segment = weak_run_segment.lock();
+            auto response_callback = [state, finish, segment_request, strong_run_segment](
+                    kurlyk::HttpResponsePtr response) mutable {
+                const bool valid_status = response &&
+                    ::optionx::utils::validate_status(response);
+                const bool valid_ddos = response &&
+                    ::optionx::utils::validate_ddos_protection(response);
+                if (!valid_status || !valid_ddos) {
+                    const std::string error_message = !response
+                        ? "No response received from Intrade broker quote-check."
+                        : !valid_status
+                            ? ::optionx::utils::describe_response_error(
+                                response,
+                                "Intrade broker quote-check HTTP response failed validation.")
+                            : "DDoS protection detected during Intrade broker quote-check.";
+                    finish(QuoteCheckApiResult::fail(
+                        error_message,
+                        response
+                            ? response->status_code
+                            : QuoteCheckApiResult::NO_RESPONSE_STATUS));
+                    return;
+                }
+
+                if (is_intrade_login_page(response->content)) {
+                    finish(QuoteCheckApiResult::fail(
+                        "Intrade broker quote-check authentication expired.",
+                        response->status_code));
+                    return;
+                }
+
+                if (is_intrade_quote_check_future_period_page(response->content)) {
+                    finish(QuoteCheckApiResult::fail(
+                        "Intrade broker quote-check period has not ended yet.",
+                        response->status_code));
+                    return;
+                }
+
+                if (is_intrade_quote_check_invalid_period_page(response->content)) {
+                    finish(QuoteCheckApiResult::fail(
+                        "Intrade broker quote-check period is invalid: end time must be later than start time.",
+                        response->status_code));
+                    return;
+                }
+
+                const auto trimmed_content = utils::trim_copy(response->content);
+                if (!trimmed_content.empty() &&
+                    trimmed_content.find("partner_stat_table_left") == std::string::npos &&
+                    !is_intrade_quote_check_page(response->content)) {
+                    finish(QuoteCheckApiResult::fail(
+                        "Intrade broker quote-check response format was not recognized.",
+                        response->status_code));
+                    return;
+                }
+
+                auto segment_result = detail::parse_quote_check_html(
+                    response->content,
+                    segment_request);
+                if (segment_result.malformed_rows > 0) {
+                    finish(QuoteCheckApiResult::fail(
+                        "Intrade broker quote-check response contained malformed rows.",
+                        response->status_code));
+                    return;
+                }
+
+                for (const auto& observation : segment_result.observations) {
+                    state->observations[observation.time_ms] = observation.price;
+                }
+
+                if (segment_request.to_time_ms < state->request.to_time_ms) {
+                    if (!strong_run_segment) {
+                        finish(QuoteCheckApiResult::fail(
+                            "Intrade broker quote-check continuation was lost.",
+                            response->status_code));
+                        return;
+                    }
+                    const auto segment_end_second =
+                        segment_request.to_time_ms -
+                        segment_request.to_time_ms % 1000U;
+                    const auto next_segment_from_ms = segment_end_second >
+                            (std::numeric_limits<std::uint64_t>::max)() - 1000U
+                        ? (std::numeric_limits<std::uint64_t>::max)()
+                        : segment_end_second + 1000U;
+                    (*strong_run_segment)(next_segment_from_ms);
+                    return;
+                }
+
+                BrokerQuoteCheck result;
+                result.symbol = normalize_symbol_name(state->request.symbol);
+                result.source = INTRADE_QUOTE_CHECK_SOURCE;
+                result.observations.reserve(state->observations.size());
+                for (const auto& [time_ms, price] : state->observations) {
+                    result.observations.push_back({time_ms, price});
+                }
+
+                const auto expected_count = quote_check_expected_count(state->request);
+                if (result.observations.size() == expected_count) {
+                    result.range_complete = true;
+                    const auto first_time_ms = first_quote_check_time_ms(state->request);
+                    for (std::size_t index = 0; index < result.observations.size(); ++index) {
+                        if (result.observations[index].time_ms !=
+                                first_time_ms + index * 1000) {
+                            result.range_complete = false;
+                            break;
+                        }
+                    }
+                }
+
+                finish(QuoteCheckApiResult::ok(std::move(result), response->status_code));
+            };
+
+            add_http_request_task(std::move(future), std::move(response_callback));
+        };
+
+        (*run_segment)(request.from_time_ms);
+        return true;
     }
 
     inline void RequestManager::request_execute_trade_result(

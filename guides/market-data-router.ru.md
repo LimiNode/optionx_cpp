@@ -785,7 +785,11 @@ if (state && state->enabled) {
 В provider contract появилась отдельная операция `fetch_tick_history(...)`:
 
 ```cpp
-md::TickHistoryRequest request("EURUSD", 1700000000000, 1700000060000);
+md::TickHistoryRequest request(
+    "EURUSD",
+    1700000000000,
+    1700000060000,
+    md::TickHistorySource::BROKER_HISTORICAL);
 provider.fetch_tick_history(
     request,
     [](md::TickHistoryResult result) {
@@ -808,6 +812,13 @@ timestamps разрешены: поток тиков событийный, а н
 конкретного provider/consumer; у базового `Tick` сейчас нет универсального
 sequence field.
 
+Источник выбирается для каждого запроса отдельно. `LOCAL_OBSERVED` является
+обратно совместимым значением по умолчанию, а `BROKER_HISTORICAL` запрашивает
+архив брокера. Provider обязан отклонить неподдерживаемый источник, а не делать
+скрытый fallback или объединять источники. В успешном результате
+`TickSequence::source` указывает фактически использованный источник независимо
+от `TickSequence::provider`.
+
 `MarketDataContinuityService::request_tick_history_batch()` — тонкий adapter
 для provider, который реализует операцию. Он проверяет symbol, range и order,
 превращает `TickSequence` в `TickDataBatch` и помечает items как `HISTORICAL`
@@ -826,11 +837,11 @@ service.request_tick_history_batch(
     true); // require_complete_range
 ```
 
-`MarketDataRouter` теперь также применяет history contract к tick routes.
-Intrade Bar реализует `fetch_tick_history(...)` через ограниченный
-session-scoped архив наблюдаемых snapshots из `/price_now`. Это полезно для
-короткого prefill и reconnect recovery, но не является authoritative broker
-tick archive:
+`MarketDataRouter` также применяет history contract к tick routes. Создаваемые
+им запросы используют обратно совместимый источник `LOCAL_OBSERVED`. Intrade
+Bar дополнительно принимает явный `BROKER_HISTORICAL`, основанный на `/quotes`;
+эти наблюдения автоматически не объединяются с ограниченным session-scoped
+архивом `/price_now`:
 
 - broker timestamps имеют гранулярность в одну секунду;
 - архив пуст для новой authenticated session и вытесняет старые данные;
@@ -840,6 +851,16 @@ tick archive:
   snapshots удаляются;
 - `trade_check2.php` остаётся settlement/trade-result API и не используется
   для range history.
+- `/quotes` возвращает одно опубликованное брокером значение на секундной
+  сетке. Оно хранится в `Tick::reference`, поскольку семантика bid/ask/last не
+  подтверждена; полное покрытие означает наличие каждой запрошенной секундной
+  отметки, а не каждого внутрисекундного события рынка. Аутентифицированный
+  запрос использует GET-параметры `symbol/date/from/to`. Текущая
+  аутентифицированная страница приняла ровно 30 минут (`1 801` строку) и
+  отклонила 30 минут плюс одну секунду страницей проверки максимального
+  периода без строк котировок. Более длинные диапазоны провайдер разбивает по
+  неперекрывающимся целым секундам и локальной полуночи. Будущий период
+  возвращается как ошибка валидации брокера, а не как пустая история.
 
 Провайдер может дополнительно реализовать метаданные времени через
 `BaseMarketDataProvider::provider_time_ms()` и

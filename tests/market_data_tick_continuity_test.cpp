@@ -815,6 +815,39 @@ TEST(MarketDataTickContinuity, SupportsRouteTimeAndPricesIdentityOverride) {
     EXPECT_DOUBLE_EQ(subscriber->ticks.front().items[1].bid, 1.1);
 }
 
+TEST(MarketDataTickContinuity, PreservesDistinctReferencePricesAcrossIdentityModes) {
+    const MarketDataTickDeduplicationMode modes[] = {
+        MarketDataTickDeduplicationMode::EXACT_OBSERVATION,
+        MarketDataTickDeduplicationMode::TIME_AND_PRICES};
+
+    for (const auto mode : modes) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        ScopedTestClock clock(3000);
+        FakeTickHistoryProvider provider;
+        provider.deduplication_mode = mode;
+        auto subscriber = std::make_shared<RecordingSubscriber>();
+        MarketDataRouter router;
+
+        auto route = router.subscribe_ticks(
+            provider,
+            subscriber,
+            continuity_request(MarketDataContinuityMode::PREFILL, 2000));
+        ASSERT_TRUE(route.valid());
+
+        Tick first;
+        first.time_ms = 1000;
+        first.reference = 1.20000;
+        Tick second = first;
+        second.reference = 1.20010;
+        provider.complete_history(make_history({first, second}));
+
+        ASSERT_EQ(subscriber->ticks.size(), 1U);
+        ASSERT_EQ(subscriber->ticks.front().items.size(), 2U);
+        EXPECT_DOUBLE_EQ(subscriber->ticks.front().items[0].reference, 1.20000);
+        EXPECT_DOUBLE_EQ(subscriber->ticks.front().items[1].reference, 1.20010);
+    }
+}
+
 TEST(MarketDataTickContinuity, UsesBoundedGapRequests) {
     ScopedTestClock clock(10000);
     FakeTickHistoryProvider provider;

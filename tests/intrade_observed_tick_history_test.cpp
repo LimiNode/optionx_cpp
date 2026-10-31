@@ -67,6 +67,7 @@ TEST(IntradeObservedTickHistory, ReturnsSortedInclusiveObservations) {
     EXPECT_EQ(result.sequence.ticks[3].time_ms, 3000U);
     EXPECT_EQ(result.sequence.symbol, "EURUSD");
     EXPECT_EQ(result.sequence.provider, "INTRADE_BAR");
+    EXPECT_EQ(result.sequence.source, "LOCAL_OBSERVED");
 }
 
 TEST(IntradeObservedTickHistory, DeduplicatesOnlyIdenticalMarketObservations) {

@@ -5,6 +5,8 @@
 /// \file ApiResponses.hpp
 /// \brief Typed response payloads for Intrade Bar HTTP workflows.
 
+#include "QuoteCheck.hpp"
+
 namespace optionx::platforms::intrade_bar {
 
     /// \brief Result of selecting an available Intrade Bar domain.
@@ -183,6 +185,7 @@ namespace optionx::platforms::intrade_bar {
     using TradeOpenResult = ApiResult<TradeOpenInfo>;
     using TradeCheckResult = ApiResult<TradeCheckInfo>;
     using TradeHistoryApiResult = ApiResult<TradeHistory>;
+    using QuoteCheckApiResult = ApiResult<BrokerQuoteCheck>;
 
     /// \brief Converts a settings-switch failure reason to a stable log string.
     /// \param reason Failure reason.

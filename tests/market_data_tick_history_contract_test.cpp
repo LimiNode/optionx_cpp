@@ -48,10 +48,25 @@ TickSequence make_ticks(std::initializer_list<std::uint64_t> times) {
 }
 
 TEST(MarketDataTickHistoryContract, ValidatesInclusiveMillisecondRange) {
-    EXPECT_TRUE(TickHistoryRequest("EURUSD", 1000, 2000).valid());
+    const TickHistoryRequest default_request("EURUSD", 1000, 2000);
+    EXPECT_TRUE(default_request.valid());
+    EXPECT_EQ(default_request.source, TickHistorySource::LOCAL_OBSERVED);
+    EXPECT_EQ(to_str(TickHistorySource::BROKER_HISTORICAL),
+        std::string("BROKER_HISTORICAL"));
     EXPECT_FALSE(TickHistoryRequest("", 1000, 2000).valid());
     EXPECT_FALSE(TickHistoryRequest("EURUSD", 0, 2000).valid());
     EXPECT_FALSE(TickHistoryRequest("EURUSD", 2000, 1000).valid());
+}
+
+TEST(MarketDataTickHistoryContract, NeutralReferencePriceDoesNotClaimAQuoteSide) {
+    Tick tick;
+    tick.reference = 1.23456;
+
+    EXPECT_DOUBLE_EQ(tick.mid_price(), 1.23456);
+    EXPECT_DOUBLE_EQ(tick.ask, 0.0);
+    EXPECT_DOUBLE_EQ(tick.bid, 0.0);
+    EXPECT_DOUBLE_EQ(tick.last, 0.0);
+    EXPECT_EQ(market_price_type(tick.flags), MarketPriceType::UNKNOWN);
 }
 
 TEST(MarketDataTickHistoryContract, ProviderHookReturnsTypedResult) {
@@ -206,6 +221,29 @@ TEST(MarketDataTickHistoryContract, ServiceRejectsForeignSymbol) {
     EXPECT_FALSE(failure.success);
     EXPECT_EQ(failure.status_code, 422);
     EXPECT_NE(failure.error_desc.find("symbol"), std::string::npos);
+}
+
+TEST(MarketDataTickHistoryContract, ServiceAcceptsEquivalentNormalizedSymbol) {
+    FakeTickHistoryProvider provider;
+    provider.next_sequence = make_ticks({1000, 2000});
+    provider.next_sequence.symbol = "EUR/USD";
+    MarketDataContinuityService service(provider);
+    std::unique_ptr<TickDataBatch> batch;
+    TickHistoryResult failure;
+
+    ASSERT_TRUE(service.request_tick_history_batch(
+        TickHistoryRequest("eurusd", 1000, 2000),
+        {},
+        [&batch](std::unique_ptr<TickDataBatch> update) {
+            batch = std::move(update);
+        },
+        [&failure](TickHistoryResult result) {
+            failure = std::move(result);
+        }));
+
+    ASSERT_TRUE(batch);
+    EXPECT_TRUE(failure.error_desc.empty());
+    EXPECT_EQ(batch->symbol, "EUR/USD");
 }
 
 TEST(MarketDataTickHistoryContract, ServiceRejectsUnorderedOrOutOfRangeTicks) {
