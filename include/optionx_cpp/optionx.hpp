@@ -8,6 +8,7 @@
 #include "utils.hpp"
 #include "lifecycle.hpp"
 #include "data.hpp"
+#include "trading_system.hpp"
 #include "market_data.hpp"
 #include "storages.hpp"
 #include "components.hpp"
