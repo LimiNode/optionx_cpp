@@ -1112,6 +1112,7 @@ if(OPTIONX_BUILD_TESTS)
         market_data_tick_history_contract_test
         market_data_tick_continuity_test
         intrade_observed_tick_history_test
+        trading_system_batch1_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
