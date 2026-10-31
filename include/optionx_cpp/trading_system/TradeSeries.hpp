@@ -8,6 +8,7 @@
 #include "Identity.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <nlohmann/json.hpp>
 
 namespace optionx::trading_system {
@@ -31,8 +32,15 @@ struct TradeSeries {
         return state_revision == expected_revision;
     }
 
+    /// \brief Advances the local revision after an expected revision check.
+    ///
+    /// This is a sequential guard for one state owner. It is not thread-safe
+    /// and does not provide a persistent compare-and-swap operation. Callers
+    /// must serialize access to this DTO; durable state transitions belong to
+    /// the owning runtime or persistence adapter.
     bool advance_revision(std::uint64_t expected_revision) noexcept {
         if (!revision_matches(expected_revision)) return false;
+        if (state_revision == (std::numeric_limits<std::uint64_t>::max)()) return false;
         ++state_revision;
         return true;
     }
