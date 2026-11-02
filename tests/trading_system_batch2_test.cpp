@@ -102,6 +102,71 @@ TEST(TradingSystemBatch2, TradingWindowFilterHandlesWeekdaysAndOvernightWindows)
     EXPECT_EQ(overnight.evaluate(early).kind, PolicyDecisionKind::ALLOW);
 }
 
+TEST(TradingSystemBatch2, OvernightWeekdayBelongsToWindowStartDay) {
+    const optionx::trading_system::TradingWindowFilter filter(
+        {{22 * 3600, 2 * 3600}}, {}, {time_shield::MON});
+    auto context = make_context();
+
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 2, 23, 0, 0) * 1000;
+    EXPECT_EQ(filter.evaluate(context).kind, PolicyDecisionKind::ALLOW);
+
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 3, 1, 0, 0) * 1000;
+    EXPECT_EQ(filter.evaluate(context).kind, PolicyDecisionKind::ALLOW);
+
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 3, 3, 0, 0) * 1000;
+    EXPECT_EQ(filter.evaluate(context).reason, PolicyReason::TIME_NOT_ALLOWED);
+
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 2, 1, 0, 0) * 1000;
+    EXPECT_EQ(filter.evaluate(context).kind, PolicyDecisionKind::REJECT);
+    EXPECT_EQ(filter.evaluate(context).reason, PolicyReason::WEEKDAY_NOT_ALLOWED);
+}
+
+TEST(TradingSystemBatch2, TradingWindowBoundariesAreHalfOpenAndAllowMidnightEnd) {
+    const TradingTimeWindow until_midnight{22 * 3600, 0};
+    EXPECT_TRUE(until_midnight.valid());
+    EXPECT_TRUE(until_midnight.contains(22 * 3600));
+    EXPECT_TRUE(until_midnight.contains(86400 - 1));
+    EXPECT_FALSE(until_midnight.contains(0));
+    EXPECT_FALSE((TradingTimeWindow{0, 0}.valid()));
+
+    const optionx::trading_system::TradingWindowFilter until_midnight_filter(
+        {until_midnight}, {}, {time_shield::MON});
+    auto midnight_context = make_context();
+    midnight_context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 2, 23, 59, 59) * 1000;
+    EXPECT_EQ(
+        until_midnight_filter.evaluate(midnight_context).kind,
+        PolicyDecisionKind::ALLOW);
+    midnight_context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 3, 0, 0, 0) * 1000;
+    EXPECT_EQ(
+        until_midnight_filter.evaluate(midnight_context).reason,
+        PolicyReason::TIME_NOT_ALLOWED);
+
+    const optionx::trading_system::TradingWindowFilter overnight(
+        {{22 * 3600, 2 * 3600}},
+        {{30 * 60, 45 * 60}},
+        {time_shield::MON});
+    auto context = make_context();
+
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 2, 22, 0, 0) * 1000;
+    EXPECT_EQ(overnight.evaluate(context).kind, PolicyDecisionKind::ALLOW);
+
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 3, 0, 30, 0) * 1000;
+    EXPECT_EQ(overnight.evaluate(context).kind, PolicyDecisionKind::REJECT);
+    EXPECT_EQ(overnight.evaluate(context).reason, PolicyReason::TIME_DENIED);
+
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2026, 11, 3, 2, 0, 0) * 1000;
+    EXPECT_EQ(overnight.evaluate(context).reason, PolicyReason::TIME_NOT_ALLOWED);
+}
+
 TEST(TradingSystemBatch2, TradingWindowFilterUsesContextTimezoneAndRejectsMissingTime) {
     const optionx::trading_system::TradingWindowFilter filter(
         {{0, 1 * 3600}}, {}, {time_shield::THU});
@@ -130,6 +195,38 @@ TEST(TradingSystemBatch2, TradingWindowFilterUsesNamedZoneDstRules) {
         time_shield::to_timestamp(2024, 3, 31, 1, 30, 0) * 1000;
     EXPECT_EQ(filter.evaluate(context).kind, PolicyDecisionKind::REJECT);
     EXPECT_EQ(filter.evaluate(context).reason, PolicyReason::TIME_NOT_ALLOWED);
+
+    const optionx::trading_system::TradingWindowFilter repeated_time_filter(
+        {{2 * 3600, 3 * 3600}}, {}, {time_shield::SUN});
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2024, 10, 27, 0, 30, 0) * 1000;
+    EXPECT_EQ(
+        repeated_time_filter.evaluate(context).kind,
+        PolicyDecisionKind::ALLOW);
+    context.evaluation_time_ms =
+        time_shield::to_timestamp(2024, 10, 27, 1, 30, 0) * 1000;
+    EXPECT_EQ(
+        repeated_time_filter.evaluate(context).kind,
+        PolicyDecisionKind::ALLOW);
+}
+
+TEST(TradingSystemBatch2, TradingWindowFilterFailsClosedForUnsupportedNamedZone) {
+    const optionx::trading_system::TradingWindowFilter filter({{0, 86400}});
+    auto context = make_context();
+    context.time_zone = optionx::TradeTimeZone::named(time_shield::UNKNOWN);
+
+    const auto result = filter.evaluate(context);
+    EXPECT_EQ(result.kind, PolicyDecisionKind::UNAVAILABLE);
+    EXPECT_EQ(result.reason, PolicyReason::INVALID_CONFIGURATION);
+    EXPECT_EQ(
+        context.time_zone.to_local_ms(*context.evaluation_time_ms),
+        *context.evaluation_time_ms);
+
+    context.time_zone = optionx::TradeTimeZone::named(
+        static_cast<time_shield::TimeZone>(999));
+    const auto out_of_range = filter.evaluate(context);
+    EXPECT_EQ(out_of_range.kind, PolicyDecisionKind::UNAVAILABLE);
+    EXPECT_EQ(out_of_range.reason, PolicyReason::INVALID_CONFIGURATION);
 }
 
 TEST(TradingSystemBatch2, InvalidWindowConfigurationIsUnavailable) {

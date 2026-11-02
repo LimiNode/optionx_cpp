@@ -20,15 +20,15 @@ namespace optionx::trading_system {
 /// \brief Half-open local-time interval in seconds from midnight.
 ///
 /// `start_second` is inclusive and `end_second` is exclusive. An interval may
-/// cross midnight when start is greater than end. `0..86400` represents a full
-/// day; equal endpoints are rejected to avoid an ambiguous empty/full meaning.
+/// cross midnight when start is greater than end. `{0, 86400}` represents a
+/// full day, and a nonzero start may use `0` as its midnight endpoint. Equal
+/// endpoints are rejected to avoid an ambiguous empty/full meaning.
 struct TradingTimeWindow {
     std::uint32_t start_second = 0;
     std::uint32_t end_second = 0;
 
     bool valid() const noexcept {
         return start_second < 86400 &&
-               end_second > 0 &&
                end_second <= 86400 &&
                start_second != end_second;
     }
@@ -170,6 +170,11 @@ private:
 };
 
 /// \brief Filters local time and weekday using the timezone in the context.
+///
+/// Allowed weekdays belong to the day on which an allowed window starts, so
+/// the after-midnight tail of an overnight window keeps the previous weekday.
+/// Without allowed windows, weekday checks use the current local calendar day.
+/// Denied windows take precedence over allowed windows and weekdays.
 class TradingWindowFilter {
 public:
     TradingWindowFilter(
@@ -196,24 +201,48 @@ public:
             return PolicyDecision::unavailable(PolicyReason::MISSING_EVALUATION_TIME);
         }
 
-        const auto local_ms = context.time_zone.to_local_ms(*context.evaluation_time_ms);
+        std::int64_t local_ms = 0;
+        if (!context.time_zone.try_to_local_ms(
+                *context.evaluation_time_ms,
+                local_ms)) {
+            return PolicyDecision::unavailable(PolicyReason::INVALID_CONFIGURATION);
+        }
         const auto local_sec = time_shield::ms_to_sec<time_shield::ts_t>(local_ms);
         const auto second_of_day = static_cast<std::uint32_t>(
             time_shield::sec_of_day(local_sec));
         const auto weekday = time_shield::weekday_of_ts(local_sec);
 
-        if (!m_allowed_weekdays.empty() &&
-            !contains(m_allowed_weekdays, weekday)) {
-            return PolicyDecision::reject(PolicyReason::WEEKDAY_NOT_ALLOWED);
-        }
-        if (!m_allowed_windows.empty() &&
-            !contains(m_allowed_windows, second_of_day)) {
-            return PolicyDecision::reject(PolicyReason::TIME_NOT_ALLOWED);
-        }
         if (contains(m_denied_windows, second_of_day)) {
             return PolicyDecision::reject(PolicyReason::TIME_DENIED);
         }
-        return PolicyDecision::allow();
+
+        if (m_allowed_windows.empty()) {
+            if (!m_allowed_weekdays.empty() &&
+                !contains(m_allowed_weekdays, weekday)) {
+                return PolicyDecision::reject(PolicyReason::WEEKDAY_NOT_ALLOWED);
+            }
+            return PolicyDecision::allow();
+        }
+
+        bool matches_time = false;
+        for (const auto& window : m_allowed_windows) {
+            if (!window.contains(second_of_day)) continue;
+            matches_time = true;
+
+            auto window_weekday = weekday;
+            if (window.start_second > window.end_second &&
+                second_of_day < window.end_second) {
+                window_weekday = previous_weekday(weekday);
+            }
+            if (m_allowed_weekdays.empty() ||
+                contains(m_allowed_weekdays, window_weekday)) {
+                return PolicyDecision::allow();
+            }
+        }
+        return PolicyDecision::reject(
+            matches_time
+                ? PolicyReason::WEEKDAY_NOT_ALLOWED
+                : PolicyReason::TIME_NOT_ALLOWED);
     }
 
 private:
@@ -231,6 +260,14 @@ private:
         const std::vector<time_shield::Weekday>& weekdays,
         time_shield::Weekday weekday) noexcept {
         return std::find(weekdays.begin(), weekdays.end(), weekday) != weekdays.end();
+    }
+
+    static time_shield::Weekday previous_weekday(
+        time_shield::Weekday weekday) noexcept {
+        return weekday == time_shield::SUN
+                   ? time_shield::SAT
+                   : static_cast<time_shield::Weekday>(
+                         static_cast<int>(weekday) - 1);
     }
 
     std::vector<TradingTimeWindow> m_allowed_windows;

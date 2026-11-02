@@ -13,8 +13,11 @@ the system clock. Build the context once and pass it as a `const` value.
 
 `TradeTimeZone` delegates named-zone and DST behavior to `time-shield`. Fixed
 offset mode is available when the caller has an explicit broker offset. The
-existing `TradeTimeZone` fallback behavior applies: an unsupported named-zone
-conversion falls back to UTC/identity semantics.
+general `TradeTimeZone` conversion helpers retain their UTC/identity fallback
+for compatibility. `TradingWindowFilter` uses the checked conversion API and
+returns `UNAVAILABLE / INVALID_CONFIGURATION` when a requested named zone
+cannot be resolved; it never evaluates a trading window against a silent UTC
+fallback.
 
 ## Filter Decisions
 
@@ -33,10 +36,13 @@ symbol set. Unknown symbols in that explicit set are `UNAVAILABLE`, while an
 explicitly disallowed known symbol is `REJECT`.
 
 `TradingTimeWindow` uses half-open intervals `[start, end)`. An interval may
-cross midnight, for example `{22 * 3600, 2 * 3600}`. `TradingWindowFilter`
-evaluates the local time and weekday after applying the timezone from the
-context. An empty allowlist means that no allow-window restriction is applied;
-denied windows still take precedence over an allowed match.
+cross midnight, for example `{22 * 3600, 2 * 3600}`. Midnight is a valid end
+point, so `{22 * 3600, 0}` means 22:00 through 00:00 while `{0, 0}` remains
+invalid. Weekday restrictions identify the day on which an allowed window
+starts: the after-midnight part of a Monday 22:00-02:00 window still belongs to
+Monday. With no allowed windows, weekdays retain calendar-day semantics. The
+filter evaluates local time after applying the timezone from the context, and
+denied windows always take precedence over an allowed match.
 
 ## Fixed-Point Sizing
 

@@ -51,10 +51,13 @@ namespace optionx {
         }
 
         /// \brief Creates named-zone context.
-        /// \param value time-shield zone value. UNKNOWN falls back to UTC.
+        /// \param value time-shield zone value. UNKNOWN keeps UTC conversion
+        ///        fallback but remains detectable as an unsupported configuration.
         static TradeTimeZone named(time_shield::TimeZone value) noexcept {
             if (value == time_shield::UNKNOWN) {
-                return utc();
+                auto result = utc();
+                result.m_named_zone_supported = false;
+                return result;
             }
 
             TradeTimeZone result;
@@ -103,9 +106,37 @@ namespace optionx {
                     : 0;
         }
 
+        /// \brief Tries to convert UTC milliseconds to local civil milliseconds.
+        /// \param utc_ms UTC timestamp in milliseconds.
+        /// \param local_ms Receives the converted local timestamp on success.
+        /// \return False when a requested named zone cannot be resolved.
+        bool try_to_local_ms(
+            std::int64_t utc_ms,
+            std::int64_t& local_ms) const noexcept {
+            if (!m_named_zone_supported) {
+                return false;
+            }
+            if (!is_named_zone()) {
+                local_ms = utc_ms + m_offset_sec * time_shield::MS_PER_SEC;
+                return true;
+            }
+
+            time_shield::tz_t resolved = 0;
+            if (!time_shield::zone_offset_at_utc_ms(
+                    static_cast<time_shield::ts_ms_t>(utc_ms),
+                    m_zone,
+                    resolved)) {
+                return false;
+            }
+            local_ms = utc_ms +
+                       static_cast<std::int64_t>(resolved) * time_shield::MS_PER_SEC;
+            return true;
+        }
+
         /// \brief Converts UTC milliseconds to this context's local civil milliseconds.
         std::int64_t to_local_ms(std::int64_t utc_ms) const noexcept {
-            return utc_ms + offset_at_utc_ms(utc_ms) * time_shield::MS_PER_SEC;
+            std::int64_t local_ms = utc_ms;
+            return try_to_local_ms(utc_ms, local_ms) ? local_ms : utc_ms;
         }
 
         /// \brief Converts local civil milliseconds in this context back to UTC.
@@ -151,6 +182,7 @@ namespace optionx {
         TradeTimeZoneMode m_mode = TradeTimeZoneMode::FIXED_OFFSET;
         std::int64_t m_offset_sec = 0;
         time_shield::TimeZone m_zone = time_shield::UTC;
+        bool m_named_zone_supported = true;
     };
 
 } // namespace optionx
