@@ -35,6 +35,7 @@ node lifecycles. See [English](lifecycle-stack.md) or
 | `optionx_cpp/utils.hpp` | Pub-sub, tasks, crypto, strings, time, ids | Для инфраструктурного кода и новых components |
 | `optionx_cpp/lifecycle.hpp` | `ILifecycleModule`, `LifecycleStack` | Для необязательной общей обработки и staged shutdown модулей |
 | `optionx_cpp/data.hpp` | DTO, events, enums, account/symbol/tick/bar/trading data | Для API boundary и сообщений |
+| `optionx_cpp/trading_system.hpp` | Trading-system identity, decision context, filters and sizing policies | Для broker-independent admission decisions before execution |
 | `optionx_cpp/components.hpp` | `BaseComponent`, HTTP и trade execution base classes | Для нового manager/component |
 | `optionx_cpp/market_data.hpp` | Provider role, subscription DTOs, Router, subscriber base and continuity | Для live tick/bar subscriptions, history prefill and routed delivery |
 | `optionx_cpp/platforms.hpp` | Base platform и Intrade Bar platform | Для клиентского кода платформ |
@@ -51,6 +52,7 @@ node lifecycles. See [English](lifecycle-stack.md) or
 | Platform facade | `optionx::platforms`, `include/optionx_cpp/platforms` | Публичный API платформы: connect, auth, trades, account info |
 | Components/managers | `optionx::components`, platform subnamespaces | Lifecycle-компоненты, которые получают events и выполняют работу |
 | Trading data | `optionx`, `include/optionx_cpp/data/trading` | `TradeRequest`, `TradeResult`, enums, signals |
+| Trading system | `optionx::trading_system`, `include/optionx_cpp/trading_system` | Intent/series identity, pure policy decisions and fixed-point sizing |
 | Market data | `optionx::market_data`, `include/optionx_cpp/market_data`, `data/bars`, `data/ticks`, `data/symbol` | Provider subscriptions, routed delivery, history prefill/recovery, ticks, bars and symbols |
 | Events | `optionx::events`, `include/optionx_cpp/data/events` | Pub-sub контракты между components |
 | Infrastructure | `optionx::utils` | EventBus, tasks, crypto, ids, HTTP helpers |

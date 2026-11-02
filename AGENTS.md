@@ -36,6 +36,8 @@
   локальные проверки, примеры и generated output.
 - [Implementation notes](guides/implementation-notes.md) - lifecycle, pub-sub,
   task scheduling, HTTP/WebSocket, trade queue, session DB и ограничения.
+- [Trading system Batch 2](guides/trading-system-batch2.md) - pure filters,
+  decision snapshots and fixed-point sizing policies.
 - [Trade check API research](guides/trade-check2-research.md) - границы
   доказанного контракта `trade_check2.php` и решение не использовать его как
   authoritative tick-history API.

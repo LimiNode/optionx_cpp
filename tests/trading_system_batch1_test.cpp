@@ -2,6 +2,11 @@
 
 #include <optionx_cpp/trading_system.hpp>
 
+#include <array>
+#include <limits>
+#include <stdexcept>
+#include <string>
+
 namespace {
 
 optionx::trading_system::TradeIntent make_intent() {
@@ -88,6 +93,21 @@ TEST(TradingSystemBatch1, RevisionMustMatchBeforeAdvance) {
     EXPECT_FALSE(series.advance_revision(0));
 }
 
+TEST(TradingSystemBatch1, RevisionOverflowIsRejected) {
+    auto intent = make_intent();
+    intent.state_revision = (std::numeric_limits<std::uint64_t>::max)();
+
+    EXPECT_TRUE(intent.revision_matches(intent.state_revision));
+    EXPECT_FALSE(intent.advance_revision(intent.state_revision));
+    EXPECT_EQ(intent.state_revision, (std::numeric_limits<std::uint64_t>::max)());
+
+    optionx::trading_system::TradeSeries series;
+    series.series_id = 3;
+    series.state_revision = (std::numeric_limits<std::uint64_t>::max)();
+    EXPECT_FALSE(series.advance_revision(series.state_revision));
+    EXPECT_EQ(series.state_revision, (std::numeric_limits<std::uint64_t>::max)());
+}
+
 TEST(TradingSystemBatch1, CardinalityPoliciesValidateIdentityInvariants) {
     using optionx::trading_system::ExecutionCardinality;
     using optionx::trading_system::ExecutionGroupIdentity;
@@ -125,6 +145,60 @@ TEST(TradingSystemBatch1, ExistingRequestJsonContractRemainsAvailable) {
     EXPECT_EQ(encoded.at("symbol"), "EURUSD");
     EXPECT_EQ(encoded.at("signal_id"), 7);
     EXPECT_DOUBLE_EQ(encoded.at("amount").get<double>(), 10.0);
+}
+
+TEST(TradingSystemBatch1, EnumConversionsRoundTripThroughStableNames) {
+    using optionx::trading_system::ExecutionCardinality;
+    using optionx::trading_system::IntentStatus;
+
+    const std::array<std::pair<IntentStatus, const char*>, 8> statuses{{
+        {IntentStatus::PROPOSED, "PROPOSED"},
+        {IntentStatus::REJECTED, "REJECTED"},
+        {IntentStatus::ADMITTED, "ADMITTED"},
+        {IntentStatus::SUBMITTING, "SUBMITTING"},
+        {IntentStatus::EXECUTION_UNKNOWN, "EXECUTION_UNKNOWN"},
+        {IntentStatus::EXECUTED, "EXECUTED"},
+        {IntentStatus::SETTLED, "SETTLED"},
+        {IntentStatus::CANCELLED, "CANCELLED"}
+    }};
+    for (const auto& entry : statuses) {
+        EXPECT_STREQ(optionx::trading_system::to_string(entry.first), entry.second);
+        EXPECT_EQ(
+            optionx::trading_system::intent_status_from_string(std::string(entry.second)),
+            entry.first);
+    }
+
+    const std::array<std::pair<ExecutionCardinality, const char*>, 4> cardinalities{{
+        {ExecutionCardinality::ZERO_OR_ONE, "ZERO_OR_ONE"},
+        {ExecutionCardinality::EXACTLY_ONE, "EXACTLY_ONE"},
+        {ExecutionCardinality::MULTIPLE, "MULTIPLE"},
+        {ExecutionCardinality::SPLIT_GROUP, "SPLIT_GROUP"}
+    }};
+    for (const auto& entry : cardinalities) {
+        EXPECT_STREQ(optionx::trading_system::to_string(entry.first), entry.second);
+        EXPECT_EQ(
+            optionx::trading_system::execution_cardinality_from_string(
+                std::string(entry.second)),
+            entry.first);
+    }
+}
+
+TEST(TradingSystemBatch1, EnumConversionsPreserveUnknownValueBehavior) {
+    using optionx::trading_system::ExecutionCardinality;
+    using optionx::trading_system::IntentStatus;
+
+    EXPECT_STREQ(
+        optionx::trading_system::to_string(static_cast<IntentStatus>(255)),
+        "UNKNOWN");
+    EXPECT_STREQ(
+        optionx::trading_system::to_string(static_cast<ExecutionCardinality>(255)),
+        "UNKNOWN");
+    EXPECT_THROW(
+        optionx::trading_system::intent_status_from_string("NOT_A_STATUS"),
+        std::invalid_argument);
+    EXPECT_THROW(
+        optionx::trading_system::execution_cardinality_from_string("NOT_A_POLICY"),
+        std::invalid_argument);
 }
 
 } // namespace

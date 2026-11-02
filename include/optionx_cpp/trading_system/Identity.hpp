@@ -5,10 +5,13 @@
 /// \file Identity.hpp
 /// \brief Defines stable identities and cardinality policies for trading-system contracts.
 
+#include <array>
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace optionx::trading_system {
 
@@ -35,47 +38,79 @@ enum class ExecutionCardinality {
     SPLIT_GROUP
 };
 
-inline const char* to_string(IntentStatus value) noexcept {
-    switch (value) {
-        case IntentStatus::PROPOSED: return "PROPOSED";
-        case IntentStatus::REJECTED: return "REJECTED";
-        case IntentStatus::ADMITTED: return "ADMITTED";
-        case IntentStatus::SUBMITTING: return "SUBMITTING";
-        case IntentStatus::EXECUTION_UNKNOWN: return "EXECUTION_UNKNOWN";
-        case IntentStatus::EXECUTED: return "EXECUTED";
-        case IntentStatus::SETTLED: return "SETTLED";
-        case IntentStatus::CANCELLED: return "CANCELLED";
+namespace detail {
+
+template <class E, std::size_t N>
+using EnumTable = std::array<std::pair<E, std::string_view>, N>;
+
+inline constexpr EnumTable<IntentStatus, 8> intent_status_table{{
+    {IntentStatus::PROPOSED, "PROPOSED"},
+    {IntentStatus::REJECTED, "REJECTED"},
+    {IntentStatus::ADMITTED, "ADMITTED"},
+    {IntentStatus::SUBMITTING, "SUBMITTING"},
+    {IntentStatus::EXECUTION_UNKNOWN, "EXECUTION_UNKNOWN"},
+    {IntentStatus::EXECUTED, "EXECUTED"},
+    {IntentStatus::SETTLED, "SETTLED"},
+    {IntentStatus::CANCELLED, "CANCELLED"}
+}};
+
+inline constexpr EnumTable<ExecutionCardinality, 4> execution_cardinality_table{{
+    {ExecutionCardinality::ZERO_OR_ONE, "ZERO_OR_ONE"},
+    {ExecutionCardinality::EXACTLY_ONE, "EXACTLY_ONE"},
+    {ExecutionCardinality::MULTIPLE, "MULTIPLE"},
+    {ExecutionCardinality::SPLIT_GROUP, "SPLIT_GROUP"}
+}};
+
+template <class E, std::size_t N>
+constexpr std::string_view enum_to_string(
+    E value,
+    const EnumTable<E, N>& table) noexcept {
+    for (const auto& entry : table) {
+        if (entry.first == value) return entry.second;
     }
     return "UNKNOWN";
+}
+
+template <class E, std::size_t N>
+bool enum_from_string(
+    std::string_view text,
+    const EnumTable<E, N>& table,
+    E& result) noexcept {
+    for (const auto& entry : table) {
+        if (entry.second == text) {
+            result = entry.first;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace detail
+
+inline const char* to_string(IntentStatus value) noexcept {
+    return detail::enum_to_string(value, detail::intent_status_table).data();
 }
 
 inline const char* to_string(ExecutionCardinality value) noexcept {
-    switch (value) {
-        case ExecutionCardinality::ZERO_OR_ONE: return "ZERO_OR_ONE";
-        case ExecutionCardinality::EXACTLY_ONE: return "EXACTLY_ONE";
-        case ExecutionCardinality::MULTIPLE: return "MULTIPLE";
-        case ExecutionCardinality::SPLIT_GROUP: return "SPLIT_GROUP";
-    }
-    return "UNKNOWN";
+    return detail::enum_to_string(value, detail::execution_cardinality_table).data();
 }
 
 inline IntentStatus intent_status_from_string(const std::string& value) {
-    if (value == "PROPOSED") return IntentStatus::PROPOSED;
-    if (value == "REJECTED") return IntentStatus::REJECTED;
-    if (value == "ADMITTED") return IntentStatus::ADMITTED;
-    if (value == "SUBMITTING") return IntentStatus::SUBMITTING;
-    if (value == "EXECUTION_UNKNOWN") return IntentStatus::EXECUTION_UNKNOWN;
-    if (value == "EXECUTED") return IntentStatus::EXECUTED;
-    if (value == "SETTLED") return IntentStatus::SETTLED;
-    if (value == "CANCELLED") return IntentStatus::CANCELLED;
+    IntentStatus result{};
+    if (detail::enum_from_string(
+            std::string_view(value), detail::intent_status_table, result)) {
+        return result;
+    }
     throw std::invalid_argument("Unknown trading-system intent status: " + value);
 }
 
-inline ExecutionCardinality execution_cardinality_from_string(const std::string& value) {
-    if (value == "ZERO_OR_ONE") return ExecutionCardinality::ZERO_OR_ONE;
-    if (value == "EXACTLY_ONE") return ExecutionCardinality::EXACTLY_ONE;
-    if (value == "MULTIPLE") return ExecutionCardinality::MULTIPLE;
-    if (value == "SPLIT_GROUP") return ExecutionCardinality::SPLIT_GROUP;
+inline ExecutionCardinality execution_cardinality_from_string(
+    const std::string& value) {
+    ExecutionCardinality result{};
+    if (detail::enum_from_string(
+            std::string_view(value), detail::execution_cardinality_table, result)) {
+        return result;
+    }
     throw std::invalid_argument("Unknown trading-system execution cardinality: " + value);
 }
 
@@ -101,6 +136,13 @@ struct ExecutionGroupIdentity {
     std::uint32_t expected_members = 0;
 
     /// \brief Checks whether this identity is compatible with a cardinality policy.
+    ///
+    /// Batch 1 only validates the fixed identity shape. `MULTIPLE` means that
+    /// several independent physical executions are allowed, while
+    /// `SPLIT_GROUP` means that several physical executions share one logical
+    /// group and remain pending until the group policy settles them. The
+    /// execution-group runtime must define dynamic fan-out and final member
+    /// accounting before either policy is used for admission.
     bool valid_for(ExecutionCardinality cardinality) const noexcept {
         switch (cardinality) {
             case ExecutionCardinality::ZERO_OR_ONE:

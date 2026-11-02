@@ -15,6 +15,7 @@
 ```cpp
 #include <optionx_cpp/optionx.hpp>
 #include <optionx_cpp/data.hpp>
+#include <optionx_cpp/trading_system.hpp>
 #include <optionx_cpp/market_data.hpp>
 #include <optionx_cpp/platforms.hpp>
 #include <optionx_cpp/platforms/IntradeBarPlatform.hpp>
@@ -41,9 +42,9 @@
   angle brackets и установленный префикс `<optionx_cpp/...>`.
 - Не полагайся на `include/optionx_cpp` как на дополнительный include-root:
   consumer contract должен работать только с корнем `include`.
-- Public aggregate headers (`optionx.hpp`, `data.hpp`, `market_data.hpp`,
-  `platforms.hpp`, `storages.hpp`, `components.hpp`, `utils.hpp`,
-  `bridges.hpp`) задают публичные точки подключения.
+- Public aggregate headers (`optionx.hpp`, `data.hpp`, `trading_system.hpp`,
+  `market_data.hpp`, `platforms.hpp`, `storages.hpp`, `components.hpp`,
+  `utils.hpp`, `bridges.hpp`) задают публичные точки подключения.
 - Bridge families are public only through `bridges.hpp` or the family umbrella
   headers: `bridges/metatrader_file.hpp`, `bridges/legacy_trading.hpp`,
   `bridges/named_pipe.hpp` and `bridges/trading_view.hpp`.
