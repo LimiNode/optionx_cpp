@@ -40,6 +40,82 @@ TradingDecisionContext make_context() {
     return context;
 }
 
+TEST(TradeTimeZoneHardening, FixedOffsetRejectsForwardOverflow) {
+    const auto max_value = (std::numeric_limits<std::int64_t>::max)();
+    const auto min_value = (std::numeric_limits<std::int64_t>::min)();
+    const auto positive_offset = optionx::TradeTimeZone::fixed_offset(1);
+    const auto negative_offset = optionx::TradeTimeZone::fixed_offset(-1);
+
+    std::int64_t local_ms = 0;
+    EXPECT_FALSE(positive_offset.try_to_local_ms(max_value, local_ms));
+    EXPECT_EQ(positive_offset.to_local_ms(max_value), max_value);
+    EXPECT_FALSE(negative_offset.try_to_local_ms(min_value, local_ms));
+    EXPECT_EQ(negative_offset.to_local_ms(min_value), min_value);
+}
+
+TEST(TradeTimeZoneHardening, FixedOffsetRejectsOffsetScalingOverflow) {
+    const auto max_value = (std::numeric_limits<std::int64_t>::max)();
+    const auto min_value = (std::numeric_limits<std::int64_t>::min)();
+    const auto timezone = optionx::TradeTimeZone::fixed_offset(max_value);
+    const auto negative_timezone = optionx::TradeTimeZone::fixed_offset(min_value);
+    std::int64_t local_ms = 0;
+
+    EXPECT_FALSE(timezone.try_to_local_ms(0, local_ms));
+    EXPECT_EQ(timezone.to_local_ms(0), 0);
+    EXPECT_EQ(timezone.to_utc_ms(0), 0);
+    EXPECT_FALSE(negative_timezone.try_to_local_ms(0, local_ms));
+    EXPECT_EQ(negative_timezone.to_local_ms(0), 0);
+    EXPECT_EQ(negative_timezone.to_utc_ms(0), 0);
+}
+
+TEST(TradeTimeZoneHardening, ReverseConversionPreservesFallbackOnOverflow) {
+    const auto min_value = (std::numeric_limits<std::int64_t>::min)();
+    const auto timezone = optionx::TradeTimeZone::fixed_offset(1);
+
+    EXPECT_EQ(timezone.to_utc_ms(min_value), min_value);
+    EXPECT_EQ(
+        timezone.to_local_ms(1000),
+        1000 + time_shield::MS_PER_SEC);
+    EXPECT_EQ(
+        timezone.to_utc_ms(1000 + time_shield::MS_PER_SEC),
+        1000);
+}
+
+TEST(TradeTimeZoneHardening, NamedZoneAndPeriodHelpersRemainValid) {
+    const auto timezone = optionx::TradeTimeZone::named(time_shield::CET);
+    const auto utc_ms = time_shield::to_timestamp_ms(2026, 7, 1, 12, 34, 56);
+
+    EXPECT_EQ(
+        timezone.to_local_ms(utc_ms),
+        time_shield::to_timestamp_ms(2026, 7, 1, 14, 34, 56));
+    EXPECT_EQ(
+        timezone.to_utc_ms(time_shield::to_timestamp_ms(2026, 7, 1, 14, 34, 56)),
+        utc_ms);
+    EXPECT_EQ(
+        timezone.start_of_local_hour_utc_ms(utc_ms),
+        time_shield::to_timestamp_ms(2026, 7, 1, 12, 0, 0));
+}
+
+TEST(TradeTimeZoneHardening, UnsupportedNamedZoneKeepsLegacyFallback) {
+    const auto timezone = optionx::TradeTimeZone::named(time_shield::UNKNOWN);
+    const auto timestamp_ms = time_shield::to_timestamp_ms(2026, 7, 1, 12, 0, 0);
+    std::int64_t local_ms = 0;
+
+    EXPECT_FALSE(timezone.try_to_local_ms(timestamp_ms, local_ms));
+    EXPECT_EQ(timezone.to_local_ms(timestamp_ms), timestamp_ms);
+    EXPECT_EQ(timezone.to_utc_ms(timestamp_ms), timestamp_ms);
+}
+
+TEST(TradeTimeZoneHardening, PeriodHelpersAvoidBoundaryOverflow) {
+    const auto min_value = (std::numeric_limits<std::int64_t>::min)();
+    const auto max_value = (std::numeric_limits<std::int64_t>::max)();
+    const auto timezone = optionx::TradeTimeZone::utc();
+
+    EXPECT_EQ(timezone.start_of_local_day_utc_ms(min_value), min_value);
+    EXPECT_EQ(timezone.next_local_day_start_utc_ms(max_value), max_value);
+    EXPECT_EQ(timezone.start_of_local_hour_utc_ms(min_value), min_value);
+}
+
 TEST(TradingSystemBatch2, SymbolFilterNormalizesAliasesAndRejectsUnknowns) {
     const optionx::trading_system::SymbolFilter filter(
         {"eurusd"}, {}, {"EURUSD", "EURGBP"});
