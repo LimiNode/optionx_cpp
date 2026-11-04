@@ -16,7 +16,7 @@
 
 namespace optionx {
 
-    namespace detail {
+    namespace trade_time_zone_detail {
 
         inline bool checked_add_int64(
             std::int64_t lhs,
@@ -103,7 +103,7 @@ namespace optionx {
                 period_start_ms);
         }
 
-    } // namespace detail
+    } // namespace trade_time_zone_detail
 
     /// \enum TradeTimeZoneMode
     /// \brief Selects whether local-time calculations use a fixed offset or a named zone.
@@ -199,8 +199,8 @@ namespace optionx {
             }
             if (!is_named_zone()) {
                 std::int64_t offset_ms = 0;
-                return detail::checked_seconds_to_ms(m_offset_sec, offset_ms) &&
-                       detail::checked_add_int64(utc_ms, offset_ms, local_ms);
+                return trade_time_zone_detail::checked_seconds_to_ms(m_offset_sec, offset_ms) &&
+                       trade_time_zone_detail::checked_add_int64(utc_ms, offset_ms, local_ms);
             }
 
             std::int64_t resolved = 0;
@@ -209,10 +209,10 @@ namespace optionx {
             }
 
             std::int64_t offset_ms = 0;
-            return detail::checked_seconds_to_ms(
+            return trade_time_zone_detail::checked_seconds_to_ms(
                        resolved,
                        offset_ms) &&
-                   detail::checked_add_int64(utc_ms, offset_ms, local_ms);
+                   trade_time_zone_detail::checked_add_int64(utc_ms, offset_ms, local_ms);
         }
 
         /// \brief Converts UTC milliseconds to this context's local civil milliseconds.
@@ -229,8 +229,8 @@ namespace optionx {
             if (!is_named_zone()) {
                 std::int64_t offset_ms = 0;
                 std::int64_t utc_ms = local_ms;
-                return detail::checked_seconds_to_ms(m_offset_sec, offset_ms) &&
-                               detail::checked_subtract_int64(
+                return trade_time_zone_detail::checked_seconds_to_ms(m_offset_sec, offset_ms) &&
+                               trade_time_zone_detail::checked_subtract_int64(
                                    local_ms,
                                    offset_ms,
                                    utc_ms)
@@ -238,7 +238,7 @@ namespace optionx {
                            : local_ms;
             }
 
-            if (!detail::is_time_shield_timestamp(local_ms)) {
+            if (!trade_time_zone_detail::is_time_shield_timestamp(local_ms)) {
                 return local_ms;
             }
 
@@ -257,7 +257,7 @@ namespace optionx {
         std::int64_t start_of_local_day_utc_ms(std::int64_t utc_ms) const noexcept {
             const auto local_ms = to_local_ms(utc_ms);
             std::int64_t day_start_local_ms = local_ms;
-            if (!detail::checked_start_of_period_ms(
+            if (!trade_time_zone_detail::checked_start_of_period_ms(
                     local_ms,
                     time_shield::MS_PER_DAY,
                     day_start_local_ms)) {
@@ -270,7 +270,7 @@ namespace optionx {
         std::int64_t next_local_day_start_utc_ms(std::int64_t utc_ms) const noexcept {
             const auto local_ms = to_local_ms(utc_ms);
             std::int64_t day_start_local_ms = local_ms;
-            if (!detail::checked_start_of_period_ms(
+            if (!trade_time_zone_detail::checked_start_of_period_ms(
                     local_ms,
                     time_shield::MS_PER_DAY,
                     day_start_local_ms)) {
@@ -278,7 +278,7 @@ namespace optionx {
             }
 
             std::int64_t next_day_start_local_ms = day_start_local_ms;
-            if (!detail::checked_add_int64(
+            if (!trade_time_zone_detail::checked_add_int64(
                     day_start_local_ms,
                     time_shield::MS_PER_DAY,
                     next_day_start_local_ms)) {
@@ -295,17 +295,17 @@ namespace optionx {
             }
 
             std::int64_t offset_ms = 0;
-            if (!detail::checked_seconds_to_ms(offset_sec, offset_ms)) {
+            if (!trade_time_zone_detail::checked_seconds_to_ms(offset_sec, offset_ms)) {
                 return utc_ms;
             }
 
             std::int64_t local_ms = utc_ms;
-            if (!detail::checked_add_int64(utc_ms, offset_ms, local_ms)) {
+            if (!trade_time_zone_detail::checked_add_int64(utc_ms, offset_ms, local_ms)) {
                 return utc_ms;
             }
 
             std::int64_t local_hour_start_ms = local_ms;
-            if (!detail::checked_start_of_period_ms(
+            if (!trade_time_zone_detail::checked_start_of_period_ms(
                     local_ms,
                     time_shield::MS_PER_HOUR,
                     local_hour_start_ms)) {
@@ -313,7 +313,7 @@ namespace optionx {
             }
 
             std::int64_t utc_hour_start_ms = local_hour_start_ms;
-            if (!detail::checked_subtract_int64(
+            if (!trade_time_zone_detail::checked_subtract_int64(
                     local_hour_start_ms,
                     offset_ms,
                     utc_hour_start_ms)) {
@@ -331,7 +331,7 @@ namespace optionx {
                 return true;
             }
 
-            if (!detail::is_time_shield_timestamp(utc_ms)) {
+            if (!trade_time_zone_detail::is_time_shield_timestamp(utc_ms)) {
                 return false;
             }
 
