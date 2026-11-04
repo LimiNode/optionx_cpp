@@ -6,6 +6,12 @@ These are proposed C++17 contracts for review. They are intentionally small
 and header-only in spirit. Names and field types may change in the first
 implementation PR; the invariants are the important part.
 
+The original sketches below are not the runtime API. See
+[Batch 2](trading-system-batch2.md) for implemented decision/sizing contracts and
+[Batch 3](trading-system-batch3.md) for fixed-point outcomes, series transitions
+and settlement idempotency. The Batch 3 owner is in-memory only, not the durable
+state/recovery adapter proposed here.
+
 ## Stable IDs and States
 
 ```cpp
