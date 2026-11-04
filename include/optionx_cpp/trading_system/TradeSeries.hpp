@@ -14,10 +14,10 @@
 namespace optionx::trading_system {
 
 /// \class TradeSeries
-/// \brief Pure identity state for a future series progression component.
+/// \brief Pure identity state owned by SeriesProgression or a host adapter.
 ///
-/// This type deliberately does not implement progression, settlement, risk,
-/// or broker calls. Those concerns belong to later trading-system batches.
+/// This DTO deliberately does not own settlement receipts or runtime state.
+/// SeriesProgression adds the in-memory lifecycle without changing its JSON.
 struct TradeSeries {
     SeriesId series_id = 0;
     SignalId origin_signal_id = 0;

@@ -47,6 +47,9 @@ implementations are not copied into broker managers.
 
 ## Batch 3: Series and Idempotent Progression
 
+The in-memory implementation and its terminality, replay and partial-submission
+rules are described in [Trading System Batch 3](trading-system-batch3.md).
+
 Implement a minimal `TradeSeries` state machine and progression policy. The
 first scenario must prove:
 

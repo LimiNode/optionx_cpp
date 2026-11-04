@@ -1114,6 +1114,8 @@ if(OPTIONX_BUILD_TESTS)
         intrade_observed_tick_history_test
         trading_system_batch1_test
         trading_system_batch2_test
+        trading_system_batch3_test
+        trading_system_batch3_consumer_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
@@ -1188,6 +1190,10 @@ if(OPTIONX_BUILD_TESTS)
 
         add_executable(${test_name} ${test_src})
         target_compile_features(${test_name} PRIVATE cxx_std_17)
+        if(test_name STREQUAL "trading_system_batch3_consumer_test")
+            set_target_properties(${test_name} PROPERTIES
+                CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+        endif()
 
         target_include_directories(${test_name} PRIVATE
             ${PROJECT_INCLUDE_DIRS}

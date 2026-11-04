@@ -220,7 +220,8 @@ jobs:
       - name: Build trading system batch tests
         run: >
           cmake --build build-linux --target
-          trading_system_batch1_test trading_system_batch2_test -j
+          trading_system_batch1_test trading_system_batch2_test
+          trading_system_batch3_test trading_system_batch3_consumer_test -j
 
       - name: Run market data tick continuity and observed history tests
         run: |
@@ -231,6 +232,8 @@ jobs:
         run: |
           ./build-linux/trading_system_batch1_test --gtest_brief=1
           ./build-linux/trading_system_batch2_test --gtest_brief=1
+          ./build-linux/trading_system_batch3_test --gtest_brief=1
+          ./build-linux/trading_system_batch3_consumer_test
 
       - name: Build market_data_subscriber_base_test and example
         run: cmake --build build-linux --target market_data_subscriber_base_test market_data_subscriber_base_example -j
