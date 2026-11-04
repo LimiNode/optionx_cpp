@@ -10,8 +10,13 @@
 #include "ExecutionGroupAggregator.hpp"
 
 #include <set>
+#include <string>
 
 namespace optionx::trading_system {
+
+/// \brief Shared counter ceiling; begin reserves room for one possible advance.
+inline constexpr std::uint32_t max_series_step =
+    static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)());
 
 /// \class SeriesSnapshot
 /// \brief An owned read snapshot, not a persistence or runtime checkpoint.
@@ -44,6 +49,7 @@ public:
         const auto check = check_revision(expected_revision);
         if (check != ProgressionResult::APPLIED) return check;
         if (m_state.status != SeriesStatus::ACTIVE) return ProgressionResult::INVALID_STATE;
+        if (m_state.series.next_step == max_series_step) return ProgressionResult::STEP_LIMIT_REACHED;
         if (!intent.valid() || intent.series_id != m_state.series.series_id ||
             intent.origin_signal_id != m_state.series.origin_signal_id ||
             intent.series_step < 0 ||
@@ -57,6 +63,9 @@ public:
             return ProgressionResult::UNSUPPORTED_CARDINALITY;
         }
         if (m_used_intents.count(intent.intent_id)) return ProgressionResult::INTENT_ALREADY_USED;
+        if (m_used_intent_keys.count(intent.idempotency_key)) {
+            return ProgressionResult::IDEMPOTENCY_KEY_ALREADY_USED;
+        }
         auto group = intent.execution_group;
         // ZERO_OR_ONE may omit a physical count in Batch 1. A reserved slot
         // still needs a terminal no-execution event when it is never submitted.
@@ -68,6 +77,7 @@ public:
         candidate.m_group = std::move(aggregator);
         candidate.m_has_group = true;
         candidate.m_used_intents.insert(intent.intent_id);
+        candidate.m_used_intent_keys.insert(intent.idempotency_key);
         candidate.m_state.status = SeriesStatus::WAITING_OUTCOME;
         candidate.m_state.current_intent_id = intent.intent_id;
         candidate.m_state.current_group_id = group.group_id;
@@ -88,7 +98,8 @@ public:
         const auto check = check_revision(expected_revision);
         if (check != ProgressionResult::APPLIED) return check;
         if (!m_has_group || (m_state.status != SeriesStatus::WAITING_OUTCOME &&
-                         m_state.status != SeriesStatus::UNRESOLVED)) {
+                            m_state.status != SeriesStatus::UNRESOLVED &&
+                            m_state.status != SeriesStatus::BLOCKED_ERROR)) {
             return ProgressionResult::INVALID_STATE;
         }
 
@@ -97,12 +108,11 @@ public:
         if (result != ProgressionResult::APPLIED) return result;
         const auto outcome = candidate.m_group.outcome();
         candidate.m_state.outcome = outcome;
-        if (outcome.final) {
+        if (outcome.all_members_terminal &&
+            outcome.aggregation_status == AggregationStatus::NUMERIC_OVERFLOW) {
+            candidate.m_state.status = SeriesStatus::BLOCKED_ERROR;
+        } else if (outcome.final) {
             if (outcome.net_profit) {
-                if (candidate.m_state.series.next_step ==
-                    (std::numeric_limits<std::uint32_t>::max)()) {
-                    return ProgressionResult::NUMERIC_OVERFLOW;
-                }
                 ++candidate.m_state.series.next_step;
             }
             candidate.m_state.status = SeriesStatus::ACTIVE;
@@ -138,6 +148,7 @@ private:
         if (expected_revision == (std::numeric_limits<std::uint64_t>::max)()) {
             return ProgressionResult::REVISION_OVERFLOW;
         }
+        if (m_state.series.next_step > max_series_step) return ProgressionResult::STEP_LIMIT_REACHED;
         return ProgressionResult::APPLIED;
     }
 
@@ -148,6 +159,7 @@ private:
         swap(m_has_group, other.m_has_group);
         m_receipts.swap(other.m_receipts);
         m_used_intents.swap(other.m_used_intents);
+        m_used_intent_keys.swap(other.m_used_intent_keys);
     }
 
     SeriesSnapshot m_state;
@@ -155,6 +167,7 @@ private:
     bool m_has_group = false;
     std::map<SettlementId, TradeSettlement> m_receipts;
     std::set<IntentId> m_used_intents;
+    std::set<std::string> m_used_intent_keys;
 };
 
 } // namespace optionx::trading_system

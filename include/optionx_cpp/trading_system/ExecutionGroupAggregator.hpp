@@ -71,8 +71,7 @@ public:
 
         auto candidate = *this;
         candidate.m_members.at(event.trade_id) = event;
-        const auto result = candidate.aggregate();
-        if (result != ProgressionResult::APPLIED) return result;
+        candidate.aggregate();
         candidate.m_receipts.emplace(event.settlement_id, event);
         swap(candidate);
         return ProgressionResult::APPLIED;
@@ -90,9 +89,64 @@ public:
     }
 
 private:
-    ProgressionResult aggregate() noexcept {
+    // At most UINT32_MAX members contribute signed 64-bit values, so each
+    // sign's magnitude needs at most 95 bits. Two portable limbs suffice.
+    struct Magnitude {
+        std::uint64_t low = 0;
+        std::uint64_t high = 0;
+
+        void add(std::uint64_t units) noexcept {
+            const auto previous = low;
+            low += units;
+            if (low < previous) ++high;
+        }
+
+        bool less_than(const Magnitude& other) const noexcept {
+            return high < other.high || (high == other.high && low < other.low);
+        }
+
+        Magnitude subtract(const Magnitude& other) const noexcept {
+            return {low - other.low, high - other.high - (low < other.low ? 1U : 0U)};
+        }
+    };
+
+    class NetAccumulator {
+    public:
+        void add(std::int64_t units) noexcept {
+            if (units < 0) {
+                m_negative.add(static_cast<std::uint64_t>(-(units + 1)) + 1);
+            } else {
+                m_positive.add(static_cast<std::uint64_t>(units));
+            }
+        }
+
+        bool to_units(std::int64_t& units) const noexcept {
+            const bool negative = m_positive.less_than(m_negative);
+            const auto magnitude = negative ? m_negative.subtract(m_positive)
+                                            : m_positive.subtract(m_negative);
+            const auto maximum = static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)());
+            if (magnitude.high != 0 || magnitude.low > maximum + (negative ? 1U : 0U)) {
+                return false;
+            }
+            if (negative && magnitude.low == maximum + 1) {
+                units = (std::numeric_limits<std::int64_t>::min)();
+            } else {
+                const auto value = static_cast<std::int64_t>(magnitude.low);
+                units = negative ? -value : value;
+            }
+            return true;
+        }
+
+    private:
+        Magnitude m_positive;
+        Magnitude m_negative;
+    };
+
+    void aggregate() noexcept {
         GroupOutcome result;
         auto sum = m_zero;
+        NetAccumulator accumulator;
         bool has_execution = false;
         bool has_rejection = false;
         for (const auto& member : m_members) {
@@ -106,37 +160,18 @@ private:
             has_rejection = has_rejection || event.kind == OutcomeKind::REJECTED;
             if (!event.net_profit) continue;
             has_execution = true;
+            accumulator.add(event.net_profit->units);
         }
-
-        // Cancel opposite signs first so a representable total cannot fail
-        // merely because the roster orders two large wins before a loss.
-        auto positive = m_members.cbegin();
-        auto negative = m_members.cbegin();
-        const auto take = [&](auto& iterator, bool want_positive) -> std::optional<std::int64_t> {
-            while (iterator != m_members.cend()) {
-                const auto& event = (iterator++)->second;
-                if (!event || !event->net_profit) continue;
-                const auto units = event->net_profit->units;
-                if (want_positive ? units > 0 : units < 0) return units;
-            }
-            return std::nullopt;
-        };
-        auto plus = take(positive, true);
-        auto minus = take(negative, false);
-        while (plus || minus) {
-            const bool use_minus = minus && (sum.units >= 0 || !plus);
-            const auto units = use_minus ? *minus : *plus;
-            if ((units > 0 && sum.units > (std::numeric_limits<std::int64_t>::max)() - units) ||
-                (units < 0 && sum.units < (std::numeric_limits<std::int64_t>::min)() - units)) {
-                return ProgressionResult::NUMERIC_OVERFLOW;
-            }
-            sum.units += units;
-            if (use_minus) minus = take(negative, false);
-            else plus = take(positive, true);
+        result.all_members_terminal = result.completed_members == m_group.expected_members;
+        if (has_execution && !accumulator.to_units(sum.units)) {
+            result.aggregation_status = AggregationStatus::NUMERIC_OVERFLOW;
+            m_outcome = result;
+            return;
         }
         if (has_execution) result.net_profit = sum;
-        result.final = result.completed_members == m_group.expected_members;
+        result.final = result.all_members_terminal;
         if (result.final) {
+            result.aggregation_status = AggregationStatus::READY;
             if (has_execution) {
                 result.kind = sum.units > 0 ? OutcomeKind::WIN :
                               sum.units < 0 ? OutcomeKind::LOSS : OutcomeKind::DRAW;
@@ -145,7 +180,6 @@ private:
             }
         }
         m_outcome = result;
-        return ProgressionResult::APPLIED;
     }
 
     IntentId m_intent_id = 0;

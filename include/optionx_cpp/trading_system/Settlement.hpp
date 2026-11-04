@@ -14,7 +14,8 @@ namespace optionx::trading_system {
 
 enum class OutcomeKind { WIN, LOSS, DRAW, REJECTED, CANCELLED, UNKNOWN };
 enum class ExecutionEvidence { NOT_SUBMITTED, MAY_HAVE_EXECUTED, EXECUTED };
-enum class SeriesStatus { ACTIVE, WAITING_OUTCOME, UNRESOLVED, COMPLETED };
+enum class SeriesStatus { ACTIVE, WAITING_OUTCOME, UNRESOLVED, COMPLETED, BLOCKED_ERROR };
+enum class AggregationStatus { PENDING, READY, NUMERIC_OVERFLOW };
 
 enum class ProgressionResult {
     APPLIED,
@@ -33,7 +34,9 @@ enum class ProgressionResult {
     INVALID_OUTCOME,
     CURRENCY_MISMATCH,
     PRECISION_MISMATCH,
-    NUMERIC_OVERFLOW
+    NUMERIC_OVERFLOW,
+    STEP_LIMIT_REACHED,
+    IDEMPOTENCY_KEY_ALREADY_USED
 };
 
 /// \class TradeSettlement
@@ -90,8 +93,10 @@ inline bool operator==(const TradeSettlement& lhs, const TradeSettlement& rhs) n
 struct GroupOutcome {
     bool final = false;
     bool unresolved = false;
+    bool all_members_terminal = false;
     std::uint32_t completed_members = 0;
-    OutcomeKind kind = OutcomeKind::UNKNOWN;
+    AggregationStatus aggregation_status = AggregationStatus::PENDING;
+    std::optional<OutcomeKind> kind;
     std::optional<MoneyAmount> net_profit;
 };
 
