@@ -139,6 +139,11 @@ mechanism.
 
 Risk admission is the final gate immediately before submission:
 
+The concrete Batch 4 in-memory owner and its typed lifecycle are documented in
+[Trading System Batch 4](trading-system-batch4.md). The interface below is the
+architectural boundary; it does not provide freshness, idempotency, or
+concurrency semantics by itself.
+
 ```cpp
 struct RiskReservation {
     std::uint64_t reservation_id = 0;

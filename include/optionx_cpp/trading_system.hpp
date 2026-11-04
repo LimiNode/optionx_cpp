@@ -3,7 +3,7 @@
 #define OPTIONX_HEADER_TRADING_SYSTEM_HPP_INCLUDED
 
 /// \file trading_system.hpp
-/// \brief Public aggregate for trading-system identities, policies and progression.
+/// \brief Public aggregate for trading-system identities, policies, progression and risk admission.
 
 #include <optionx_cpp/data/trading.hpp>
 
@@ -17,5 +17,6 @@
 #include "trading_system/Settlement.hpp"
 #include "trading_system/ExecutionGroupAggregator.hpp"
 #include "trading_system/SeriesProgression.hpp"
+#include "trading_system/RiskAdmission.hpp"
 
 #endif // OPTIONX_HEADER_TRADING_SYSTEM_HPP_INCLUDED

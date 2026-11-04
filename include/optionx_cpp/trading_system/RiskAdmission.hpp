@@ -1,0 +1,434 @@
+#pragma once
+#ifndef OPTIONX_HEADER_TRADING_SYSTEM_RISK_ADMISSION_HPP_INCLUDED
+#define OPTIONX_HEADER_TRADING_SYSTEM_RISK_ADMISSION_HPP_INCLUDED
+
+/// \file RiskAdmission.hpp
+/// \brief Defines the broker-independent, single-scope risk reservation owner.
+
+#include "TradeIntent.hpp"
+#include "PolicyTypes.hpp"
+
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <utility>
+
+namespace optionx::trading_system {
+
+enum class RiskScopeKind { ACCOUNT, STRATEGY, GROUP };
+
+struct RiskScope {
+    RiskScopeKind kind = RiskScopeKind::ACCOUNT;
+    std::uint64_t scope_id = 0;
+
+    bool valid() const noexcept { return scope_id != 0; }
+};
+
+enum class RiskAvailability {
+    SUPPORTED,
+    UNAVAILABLE,
+    STALE
+};
+
+/// \brief Provider-owned account facts used by the admission owner.
+struct RiskAccountSnapshot {
+    RiskAvailability availability = RiskAvailability::UNAVAILABLE;
+    MoneyAmount available_balance;
+    std::int64_t captured_at_ms = 0;
+    std::uint64_t revision = 0;
+
+    bool valid() const noexcept {
+        return availability == RiskAvailability::SUPPORTED &&
+               available_balance.valid_metadata() && available_balance.units >= 0;
+    }
+};
+
+/// \brief Limits fixed for one RiskAdmission owner.
+struct RiskAdmissionConfig {
+    RiskScope scope;
+    std::int64_t max_snapshot_age_ms = 30'000;
+    std::optional<MoneyAmount> max_reserved_risk;
+
+    bool valid() const noexcept {
+        return scope.valid() && max_snapshot_age_ms >= 0 &&
+               (!max_reserved_risk ||
+                (max_reserved_risk->valid_metadata() && max_reserved_risk->units > 0));
+    }
+};
+
+/// \brief One logical reservation; potential_risk covers the complete group.
+struct RiskRequest {
+    IntentId intent_id = 0;
+    ExecutionGroupIdentity execution_group;
+    ExecutionCardinality cardinality = ExecutionCardinality::ZERO_OR_ONE;
+    IntentStatus intent_status = IntentStatus::PROPOSED;
+    std::string idempotency_key;
+    MoneyAmount stake;
+    MoneyAmount potential_risk;
+
+    static RiskRequest from_intent(
+        const TradeIntent& intent,
+        const MoneyAmount& stake,
+        const MoneyAmount& potential_risk) {
+        RiskRequest result;
+        result.intent_id = intent.intent_id;
+        result.execution_group = intent.execution_group;
+        result.cardinality = intent.cardinality;
+        result.intent_status = intent.status;
+        result.idempotency_key = intent.idempotency_key;
+        result.stake = stake;
+        result.potential_risk = potential_risk;
+        return result;
+    }
+
+    bool valid_identity() const noexcept {
+        return intent_id != 0 && !idempotency_key.empty() &&
+               execution_group.valid_for(cardinality) &&
+               (intent_status == IntentStatus::PROPOSED ||
+                intent_status == IntentStatus::ADMITTED);
+    }
+};
+
+enum class RiskReservationState {
+    RESERVED,
+    SUBMITTED,
+    EXECUTION_UNKNOWN,
+    RELEASED,
+    SETTLED
+};
+
+enum class RiskAdmissionKind {
+    ADMITTED,
+    APPLIED,
+    DUPLICATE,
+    REJECTED,
+    UNAVAILABLE,
+    CONFLICT,
+    INVALID_STATE
+};
+
+enum class RiskAdmissionReason {
+    NONE,
+    RESERVED,
+    COMMITTED,
+    RELEASED,
+    EXECUTION_UNKNOWN,
+    SETTLED,
+    INVALID_CONFIGURATION,
+    INVALID_REQUEST,
+    INVALID_RISK,
+    CURRENCY_MISMATCH,
+    PRECISION_MISMATCH,
+    SNAPSHOT_UNAVAILABLE,
+    SNAPSHOT_STALE,
+    BALANCE_LIMIT_EXCEEDED,
+    RISK_LIMIT_EXCEEDED,
+    NUMERIC_OVERFLOW,
+    UNKNOWN_RESERVATION,
+    INVALID_TRANSITION,
+    PAYLOAD_CONFLICT,
+    REVISION_CONFLICT
+};
+
+struct RiskReservation {
+    std::uint64_t reservation_id = 0;
+    RiskScope scope;
+    IntentId intent_id = 0;
+    ExecutionGroupIdentity execution_group;
+    ExecutionCardinality cardinality = ExecutionCardinality::ZERO_OR_ONE;
+    std::string idempotency_key;
+    MoneyAmount stake;
+    MoneyAmount potential_risk;
+    RiskReservationState state = RiskReservationState::RELEASED;
+    std::uint64_t account_revision = 0;
+
+    bool valid() const noexcept {
+        return reservation_id != 0 && scope.valid() && intent_id != 0 &&
+               !idempotency_key.empty() && stake.valid_metadata() &&
+               potential_risk.valid_metadata();
+    }
+};
+
+struct RiskAdmissionResult {
+    RiskAdmissionKind kind = RiskAdmissionKind::INVALID_STATE;
+    RiskAdmissionReason reason = RiskAdmissionReason::INVALID_CONFIGURATION;
+    std::optional<RiskReservation> reservation;
+
+    static RiskAdmissionResult applied(
+        RiskAdmissionReason reason, const RiskReservation& reservation) {
+        return {RiskAdmissionKind::APPLIED, reason, reservation};
+    }
+
+    static RiskAdmissionResult admitted(const RiskReservation& reservation) {
+        return {RiskAdmissionKind::ADMITTED, RiskAdmissionReason::RESERVED, reservation};
+    }
+
+    static RiskAdmissionResult duplicate(const RiskReservation& reservation) {
+        return {RiskAdmissionKind::DUPLICATE, RiskAdmissionReason::NONE, reservation};
+    }
+
+    static RiskAdmissionResult rejected(RiskAdmissionReason reason) noexcept {
+        return {RiskAdmissionKind::REJECTED, reason, std::nullopt};
+    }
+
+    static RiskAdmissionResult unavailable(RiskAdmissionReason reason) noexcept {
+        return {RiskAdmissionKind::UNAVAILABLE, reason, std::nullopt};
+    }
+
+    static RiskAdmissionResult conflict(RiskAdmissionReason reason) noexcept {
+        return {RiskAdmissionKind::CONFLICT, reason, std::nullopt};
+    }
+
+    static RiskAdmissionResult invalid_state(RiskAdmissionReason reason) noexcept {
+        return {RiskAdmissionKind::INVALID_STATE, reason, std::nullopt};
+    }
+
+    bool succeeded() const noexcept {
+        return kind == RiskAdmissionKind::ADMITTED || kind == RiskAdmissionKind::APPLIED ||
+               kind == RiskAdmissionKind::DUPLICATE;
+    }
+};
+
+/// \class RiskAdmission
+/// \brief Atomically owns reservations for one account, strategy, or group scope.
+/// \details Calls are safe from concurrent clients of this owner. Separate
+/// owners do not coordinate; the host must create one owner per risk scope.
+class RiskAdmission {
+public:
+    explicit RiskAdmission(RiskAdmissionConfig config) : m_config(std::move(config)) {}
+
+    bool valid() const noexcept { return m_config.valid(); }
+
+    RiskAdmissionResult update_snapshot(const RiskAccountSnapshot& snapshot) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!valid() || !snapshot.valid()) {
+            return RiskAdmissionResult::unavailable(
+                snapshot.availability == RiskAvailability::STALE
+                    ? RiskAdmissionReason::SNAPSHOT_STALE
+                    : RiskAdmissionReason::SNAPSHOT_UNAVAILABLE);
+        }
+        if (m_snapshot && snapshot.revision < m_snapshot->revision) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::REVISION_CONFLICT);
+        }
+        if (m_snapshot && snapshot.revision == m_snapshot->revision) {
+            return same_snapshot(*m_snapshot, snapshot)
+                ? duplicate_snapshot()
+                : RiskAdmissionResult::conflict(RiskAdmissionReason::REVISION_CONFLICT);
+        }
+        if (m_snapshot && !same_currency(m_snapshot->available_balance, snapshot.available_balance)) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::CURRENCY_MISMATCH);
+        }
+        m_snapshot = snapshot;
+        return {RiskAdmissionKind::APPLIED, RiskAdmissionReason::NONE, std::nullopt};
+    }
+
+    RiskAdmissionResult reserve(const RiskRequest& request, std::int64_t now_ms) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!valid()) return RiskAdmissionResult::rejected(RiskAdmissionReason::INVALID_CONFIGURATION);
+        if (!request.valid_identity()) return RiskAdmissionResult::rejected(RiskAdmissionReason::INVALID_REQUEST);
+
+        const auto existing = m_by_key.find(request.idempotency_key);
+        if (existing != m_by_key.end()) {
+            if (same_request(existing->second, request)) return RiskAdmissionResult::duplicate(existing->second);
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        const auto by_intent = m_by_intent.find(request.intent_id);
+        if (by_intent != m_by_intent.end()) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        if (!valid_money(request.stake) || !valid_money(request.potential_risk)) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::INVALID_RISK);
+        }
+        if (!same_currency(request.stake, request.potential_risk)) {
+            return RiskAdmissionResult::rejected(
+                request.stake.currency != request.potential_risk.currency
+                    ? RiskAdmissionReason::CURRENCY_MISMATCH
+                    : RiskAdmissionReason::PRECISION_MISMATCH);
+        }
+        if (request.stake.units <= 0 || request.potential_risk.units <= 0) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::INVALID_RISK);
+        }
+        if (!m_snapshot || m_snapshot->availability != RiskAvailability::SUPPORTED) {
+            return RiskAdmissionResult::unavailable(RiskAdmissionReason::SNAPSHOT_UNAVAILABLE);
+        }
+        if (!same_currency(m_snapshot->available_balance, request.potential_risk)) {
+            return RiskAdmissionResult::rejected(
+                m_snapshot->available_balance.currency != request.potential_risk.currency
+                    ? RiskAdmissionReason::CURRENCY_MISMATCH
+                    : RiskAdmissionReason::PRECISION_MISMATCH);
+        }
+        if (now_ms < m_snapshot->captured_at_ms ||
+            static_cast<std::uint64_t>(now_ms) -
+                    static_cast<std::uint64_t>(m_snapshot->captured_at_ms) >
+                static_cast<std::uint64_t>(m_config.max_snapshot_age_ms)) {
+            return RiskAdmissionResult::unavailable(RiskAdmissionReason::SNAPSHOT_STALE);
+        }
+        const auto reserved = active_risk_units();
+        if (!can_add(reserved, request.potential_risk.units)) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::NUMERIC_OVERFLOW);
+        }
+        const auto next_reserved = reserved + request.potential_risk.units;
+        if (next_reserved > m_snapshot->available_balance.units) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::BALANCE_LIMIT_EXCEEDED);
+        }
+        if (m_config.max_reserved_risk) {
+            if (m_config.max_reserved_risk->currency != request.potential_risk.currency) {
+                return RiskAdmissionResult::rejected(RiskAdmissionReason::CURRENCY_MISMATCH);
+            }
+            if (m_config.max_reserved_risk->precision != request.potential_risk.precision) {
+                return RiskAdmissionResult::rejected(RiskAdmissionReason::PRECISION_MISMATCH);
+            }
+            if (next_reserved > m_config.max_reserved_risk->units) {
+                return RiskAdmissionResult::rejected(RiskAdmissionReason::RISK_LIMIT_EXCEEDED);
+            }
+        }
+
+        RiskReservation reservation;
+        reservation.reservation_id = m_next_reservation_id++;
+        reservation.scope = m_config.scope;
+        reservation.intent_id = request.intent_id;
+        reservation.execution_group = request.execution_group;
+        reservation.cardinality = request.cardinality;
+        reservation.idempotency_key = request.idempotency_key;
+        reservation.stake = request.stake;
+        reservation.potential_risk = request.potential_risk;
+        reservation.state = RiskReservationState::RESERVED;
+        reservation.account_revision = m_snapshot->revision;
+        m_by_key.emplace(reservation.idempotency_key, reservation);
+        m_by_intent.emplace(reservation.intent_id, reservation.idempotency_key);
+        return RiskAdmissionResult::admitted(reservation);
+    }
+
+    RiskAdmissionResult commit(const RiskReservation& token) {
+        return transition(token, RiskReservationState::SUBMITTED,
+                          RiskAdmissionReason::COMMITTED,
+                          [](RiskReservationState state) { return state == RiskReservationState::RESERVED; });
+    }
+
+    RiskAdmissionResult release(const RiskReservation& token) {
+        return transition(token, RiskReservationState::RELEASED,
+                          RiskAdmissionReason::RELEASED,
+                          [](RiskReservationState state) { return state == RiskReservationState::RESERVED; });
+    }
+
+    RiskAdmissionResult mark_unknown(const RiskReservation& token) {
+        return transition(token, RiskReservationState::EXECUTION_UNKNOWN,
+                          RiskAdmissionReason::EXECUTION_UNKNOWN,
+                          [](RiskReservationState state) {
+                              return state == RiskReservationState::RESERVED ||
+                                     state == RiskReservationState::SUBMITTED;
+                          });
+    }
+
+    RiskAdmissionResult settle(const RiskReservation& token) {
+        return transition(token, RiskReservationState::SETTLED,
+                          RiskAdmissionReason::SETTLED,
+                          [](RiskReservationState state) {
+                              return state == RiskReservationState::SUBMITTED ||
+                                     state == RiskReservationState::EXECUTION_UNKNOWN;
+                          });
+    }
+
+    std::int64_t reserved_risk_units() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return active_risk_units();
+    }
+
+    std::optional<RiskAccountSnapshot> account_snapshot() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_snapshot;
+    }
+
+private:
+    static RiskAdmissionResult duplicate_snapshot() noexcept {
+        return {RiskAdmissionKind::DUPLICATE, RiskAdmissionReason::NONE, std::nullopt};
+    }
+
+    static bool same_currency(const MoneyAmount& lhs, const MoneyAmount& rhs) noexcept {
+        return lhs.currency == rhs.currency && lhs.precision == rhs.precision;
+    }
+
+    static bool valid_money(const MoneyAmount& value) noexcept {
+        return value.valid_metadata();
+    }
+
+    static bool same_snapshot(const RiskAccountSnapshot& lhs, const RiskAccountSnapshot& rhs) noexcept {
+        return lhs.availability == rhs.availability && lhs.available_balance.units == rhs.available_balance.units &&
+               same_currency(lhs.available_balance, rhs.available_balance) &&
+               lhs.captured_at_ms == rhs.captured_at_ms;
+    }
+
+    static bool same_request(const RiskReservation& stored, const RiskRequest& request) noexcept {
+        return stored.intent_id == request.intent_id &&
+               stored.execution_group.group_id == request.execution_group.group_id &&
+               stored.execution_group.expected_members == request.execution_group.expected_members &&
+               stored.cardinality == request.cardinality &&
+               stored.stake.units == request.stake.units &&
+               same_currency(stored.stake, request.stake) &&
+               stored.potential_risk.units == request.potential_risk.units &&
+               same_currency(stored.potential_risk, request.potential_risk);
+    }
+
+    static bool can_add(std::int64_t lhs, std::int64_t rhs) noexcept {
+        return rhs >= 0 && lhs <= (std::numeric_limits<std::int64_t>::max)() - rhs;
+    }
+
+    std::int64_t active_risk_units() const noexcept {
+        std::int64_t total = 0;
+        for (const auto& entry : m_by_key) {
+            const auto& reservation = entry.second;
+            if (reservation.state == RiskReservationState::RELEASED ||
+                reservation.state == RiskReservationState::SETTLED) continue;
+            if (can_add(total, reservation.potential_risk.units)) {
+                total += reservation.potential_risk.units;
+            } else {
+                return (std::numeric_limits<std::int64_t>::max)();
+            }
+        }
+        return total;
+    }
+
+    static bool matches(const RiskReservation& stored, const RiskReservation& token) noexcept {
+        return stored.reservation_id == token.reservation_id && stored.scope.kind == token.scope.kind &&
+               stored.scope.scope_id == token.scope.scope_id && stored.intent_id == token.intent_id &&
+               stored.idempotency_key == token.idempotency_key &&
+               stored.execution_group.group_id == token.execution_group.group_id &&
+               stored.execution_group.expected_members == token.execution_group.expected_members &&
+               stored.cardinality == token.cardinality &&
+               stored.stake.units == token.stake.units &&
+               same_currency(stored.stake, token.stake) &&
+               stored.potential_risk.units == token.potential_risk.units &&
+               same_currency(stored.potential_risk, token.potential_risk);
+    }
+
+    template <class Allowed>
+    RiskAdmissionResult transition(
+        const RiskReservation& token,
+        RiskReservationState target,
+        RiskAdmissionReason reason,
+        Allowed allowed) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto found = m_by_key.find(token.idempotency_key);
+        if (found == m_by_key.end()) return RiskAdmissionResult::invalid_state(RiskAdmissionReason::UNKNOWN_RESERVATION);
+        auto& stored = found->second;
+        if (!matches(stored, token)) return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        if (stored.state == target) return RiskAdmissionResult::duplicate(stored);
+        if (!allowed(stored.state)) return RiskAdmissionResult::invalid_state(RiskAdmissionReason::INVALID_TRANSITION);
+        stored.state = target;
+        return RiskAdmissionResult::applied(reason, stored);
+    }
+
+    RiskAdmissionConfig m_config;
+    mutable std::mutex m_mutex;
+    std::optional<RiskAccountSnapshot> m_snapshot;
+    std::uint64_t m_next_reservation_id = 1;
+    std::map<std::string, RiskReservation> m_by_key;
+    std::map<IntentId, std::string> m_by_intent;
+};
+
+} // namespace optionx::trading_system
+
+#endif // OPTIONX_HEADER_TRADING_SYSTEM_RISK_ADMISSION_HPP_INCLUDED
