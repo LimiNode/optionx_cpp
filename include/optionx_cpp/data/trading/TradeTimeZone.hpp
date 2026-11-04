@@ -6,6 +6,7 @@
 /// \brief Defines a local-time context for trade queries and statistics.
 
 #include <cstdint>
+#include <limits>
 
 #include <time_shield/core/constants.hpp>
 #include <time_shield/conversions/date_time_conversions.hpp>
@@ -14,6 +15,95 @@
 #include <time_shield/core/types.hpp>
 
 namespace optionx {
+
+    namespace trade_time_zone_detail {
+
+        inline bool checked_add_int64(
+            std::int64_t lhs,
+            std::int64_t rhs,
+            std::int64_t& result) noexcept {
+            const auto max_value = (std::numeric_limits<std::int64_t>::max)();
+            const auto min_value = (std::numeric_limits<std::int64_t>::min)();
+
+            if (rhs > 0) {
+                if (lhs > max_value - rhs) {
+                    return false;
+                }
+            } else if (rhs < 0) {
+                if (rhs == min_value) {
+                    if (lhs < 0) {
+                        return false;
+                    }
+                } else if (lhs < min_value - rhs) {
+                    return false;
+                }
+            }
+
+            result = lhs + rhs;
+            return true;
+        }
+
+        inline bool checked_subtract_int64(
+            std::int64_t lhs,
+            std::int64_t rhs,
+            std::int64_t& result) noexcept {
+            const auto max_value = (std::numeric_limits<std::int64_t>::max)();
+            const auto min_value = (std::numeric_limits<std::int64_t>::min)();
+
+            if (rhs > 0) {
+                if (lhs < min_value + rhs) {
+                    return false;
+                }
+            } else if (rhs < 0) {
+                if (rhs == min_value) {
+                    if (lhs >= 0) {
+                        return false;
+                    }
+                } else if (lhs > max_value + rhs) {
+                    return false;
+                }
+            }
+
+            result = lhs - rhs;
+            return true;
+        }
+
+        inline bool checked_seconds_to_ms(
+            std::int64_t seconds,
+            std::int64_t& milliseconds) noexcept {
+            constexpr auto multiplier = time_shield::MS_PER_SEC;
+            const auto max_value = (std::numeric_limits<std::int64_t>::max)();
+            const auto min_value = (std::numeric_limits<std::int64_t>::min)();
+
+            if (seconds > max_value / multiplier ||
+                seconds < min_value / multiplier) {
+                return false;
+            }
+
+            milliseconds = seconds * multiplier;
+            return true;
+        }
+
+        inline bool is_time_shield_timestamp(std::int64_t timestamp_ms) noexcept {
+            return timestamp_ms >= time_shield::MIN_TIMESTAMP_MS &&
+                   timestamp_ms <= time_shield::MAX_TIMESTAMP_MS;
+        }
+
+        inline bool checked_start_of_period_ms(
+            std::int64_t timestamp_ms,
+            std::int64_t period_ms,
+            std::int64_t& period_start_ms) noexcept {
+            auto remainder_ms = timestamp_ms % period_ms;
+            if (remainder_ms < 0) {
+                remainder_ms += period_ms;
+            }
+            return checked_subtract_int64(
+                timestamp_ms,
+                remainder_ms,
+                period_start_ms);
+        }
+
+    } // namespace trade_time_zone_detail
 
     /// \enum TradeTimeZoneMode
     /// \brief Selects whether local-time calculations use a fixed offset or a named zone.
@@ -93,17 +183,8 @@ namespace optionx {
         /// \return Resolved offset in seconds. Unsupported named-zone resolution
         ///         falls back to zero, i.e. UTC.
         std::int64_t offset_at_utc_ms(std::int64_t utc_ms) const noexcept {
-            if (!is_named_zone()) {
-                return m_offset_sec;
-            }
-
-            time_shield::tz_t resolved = 0;
-            return time_shield::zone_offset_at_utc_ms(
-                static_cast<time_shield::ts_ms_t>(utc_ms),
-                m_zone,
-                resolved)
-                    ? static_cast<std::int64_t>(resolved)
-                    : 0;
+            std::int64_t resolved = 0;
+            return try_offset_at_utc_ms(utc_ms, resolved) ? resolved : 0;
         }
 
         /// \brief Tries to convert UTC milliseconds to local civil milliseconds.
@@ -117,20 +198,21 @@ namespace optionx {
                 return false;
             }
             if (!is_named_zone()) {
-                local_ms = utc_ms + m_offset_sec * time_shield::MS_PER_SEC;
-                return true;
+                std::int64_t offset_ms = 0;
+                return trade_time_zone_detail::checked_seconds_to_ms(m_offset_sec, offset_ms) &&
+                       trade_time_zone_detail::checked_add_int64(utc_ms, offset_ms, local_ms);
             }
 
-            time_shield::tz_t resolved = 0;
-            if (!time_shield::zone_offset_at_utc_ms(
-                    static_cast<time_shield::ts_ms_t>(utc_ms),
-                    m_zone,
-                    resolved)) {
+            std::int64_t resolved = 0;
+            if (!try_offset_at_utc_ms(utc_ms, resolved)) {
                 return false;
             }
-            local_ms = utc_ms +
-                       static_cast<std::int64_t>(resolved) * time_shield::MS_PER_SEC;
-            return true;
+
+            std::int64_t offset_ms = 0;
+            return trade_time_zone_detail::checked_seconds_to_ms(
+                       resolved,
+                       offset_ms) &&
+                   trade_time_zone_detail::checked_add_int64(utc_ms, offset_ms, local_ms);
         }
 
         /// \brief Converts UTC milliseconds to this context's local civil milliseconds.
@@ -140,11 +222,24 @@ namespace optionx {
         }
 
         /// \brief Converts local civil milliseconds in this context back to UTC.
-        /// \details Unsupported named-zone conversions fall back to treating the
-        ///          supplied civil timestamp as UTC.
+        /// \details Unsupported named-zone conversions and checked-arithmetic
+        ///          failures fall back to treating the supplied civil timestamp
+        ///          as UTC.
         std::int64_t to_utc_ms(std::int64_t local_ms) const noexcept {
             if (!is_named_zone()) {
-                return local_ms - m_offset_sec * time_shield::MS_PER_SEC;
+                std::int64_t offset_ms = 0;
+                std::int64_t utc_ms = local_ms;
+                return trade_time_zone_detail::checked_seconds_to_ms(m_offset_sec, offset_ms) &&
+                               trade_time_zone_detail::checked_subtract_int64(
+                                   local_ms,
+                                   offset_ms,
+                                   utc_ms)
+                           ? utc_ms
+                           : local_ms;
+            }
+
+            if (!trade_time_zone_detail::is_time_shield_timestamp(local_ms)) {
+                return local_ms;
             }
 
             const auto utc_ms = time_shield::zone_to_gmt_ms(
@@ -161,24 +256,97 @@ namespace optionx {
         /// \brief Returns UTC timestamp for local day start containing utc_ms.
         std::int64_t start_of_local_day_utc_ms(std::int64_t utc_ms) const noexcept {
             const auto local_ms = to_local_ms(utc_ms);
-            return to_utc_ms(time_shield::start_of_day_ms(local_ms));
+            std::int64_t day_start_local_ms = local_ms;
+            if (!trade_time_zone_detail::checked_start_of_period_ms(
+                    local_ms,
+                    time_shield::MS_PER_DAY,
+                    day_start_local_ms)) {
+                return utc_ms;
+            }
+            return to_utc_ms(day_start_local_ms);
         }
 
         /// \brief Returns UTC timestamp for next local day start after the day containing utc_ms.
         std::int64_t next_local_day_start_utc_ms(std::int64_t utc_ms) const noexcept {
             const auto local_ms = to_local_ms(utc_ms);
-            const auto day_start_local = time_shield::start_of_day_ms(local_ms);
-            return to_utc_ms(day_start_local + time_shield::MS_PER_DAY);
+            std::int64_t day_start_local_ms = local_ms;
+            if (!trade_time_zone_detail::checked_start_of_period_ms(
+                    local_ms,
+                    time_shield::MS_PER_DAY,
+                    day_start_local_ms)) {
+                return utc_ms;
+            }
+
+            std::int64_t next_day_start_local_ms = day_start_local_ms;
+            if (!trade_time_zone_detail::checked_add_int64(
+                    day_start_local_ms,
+                    time_shield::MS_PER_DAY,
+                    next_day_start_local_ms)) {
+                return utc_ms;
+            }
+            return to_utc_ms(next_day_start_local_ms);
         }
 
         /// \brief Returns UTC timestamp for local hour start containing utc_ms.
         std::int64_t start_of_local_hour_utc_ms(std::int64_t utc_ms) const noexcept {
-            const auto offset_ms = offset_at_utc_ms(utc_ms) * time_shield::MS_PER_SEC;
-            const auto local_ms = utc_ms + offset_ms;
-            return time_shield::start_of_hour_ms(local_ms) - offset_ms;
+            std::int64_t offset_sec = 0;
+            if (!try_offset_at_utc_ms(utc_ms, offset_sec)) {
+                return utc_ms;
+            }
+
+            std::int64_t offset_ms = 0;
+            if (!trade_time_zone_detail::checked_seconds_to_ms(offset_sec, offset_ms)) {
+                return utc_ms;
+            }
+
+            std::int64_t local_ms = utc_ms;
+            if (!trade_time_zone_detail::checked_add_int64(utc_ms, offset_ms, local_ms)) {
+                return utc_ms;
+            }
+
+            std::int64_t local_hour_start_ms = local_ms;
+            if (!trade_time_zone_detail::checked_start_of_period_ms(
+                    local_ms,
+                    time_shield::MS_PER_HOUR,
+                    local_hour_start_ms)) {
+                return utc_ms;
+            }
+
+            std::int64_t utc_hour_start_ms = local_hour_start_ms;
+            if (!trade_time_zone_detail::checked_subtract_int64(
+                    local_hour_start_ms,
+                    offset_ms,
+                    utc_hour_start_ms)) {
+                return utc_ms;
+            }
+            return utc_hour_start_ms;
         }
 
     private:
+        bool try_offset_at_utc_ms(
+            std::int64_t utc_ms,
+            std::int64_t& offset_sec) const noexcept {
+            if (!is_named_zone()) {
+                offset_sec = m_offset_sec;
+                return true;
+            }
+
+            if (!trade_time_zone_detail::is_time_shield_timestamp(utc_ms)) {
+                return false;
+            }
+
+            time_shield::tz_t resolved = 0;
+            if (!time_shield::zone_offset_at_utc_ms(
+                    static_cast<time_shield::ts_ms_t>(utc_ms),
+                    m_zone,
+                    resolved)) {
+                return false;
+            }
+
+            offset_sec = static_cast<std::int64_t>(resolved);
+            return true;
+        }
+
         TradeTimeZoneMode m_mode = TradeTimeZoneMode::FIXED_OFFSET;
         std::int64_t m_offset_sec = 0;
         time_shield::TimeZone m_zone = time_shield::UTC;
