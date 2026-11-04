@@ -8,6 +8,7 @@
 #include "TradeIntent.hpp"
 #include "PolicyTypes.hpp"
 #include "Settlement.hpp"
+#include "ExecutionGroupAggregator.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -180,7 +181,6 @@ struct RiskSettlementEvidence {
         }
         std::set<SettlementId> settlement_ids;
         std::set<std::uint64_t> trade_ids;
-        bool has_execution = false;
         for (const auto& settlement : settlements) {
             if (!settlement.valid() || !settlement.terminal() ||
                 settlement.intent_id != intent_id ||
@@ -189,20 +189,42 @@ struct RiskSettlementEvidence {
                 !trade_ids.insert(settlement.trade_id).second) {
                 return false;
             }
-            has_execution = has_execution || settlement.is_trading_result();
         }
-        if (has_execution) {
-            if (!outcome.net_profit ||
-                (*outcome.kind != OutcomeKind::WIN &&
-                 *outcome.kind != OutcomeKind::LOSS &&
-                 *outcome.kind != OutcomeKind::DRAW)) {
-                return false;
-            }
-        } else if (*outcome.kind != OutcomeKind::REJECTED &&
-                   *outcome.kind != OutcomeKind::CANCELLED) {
+        std::vector<std::uint64_t> roster(trade_ids.begin(), trade_ids.end());
+        ExecutionGroupAggregator aggregator(
+            reservation.intent_id,
+            reservation.execution_group,
+            roster,
+            reservation.potential_risk.currency,
+            reservation.potential_risk.precision);
+        if (!aggregator.valid()) {
             return false;
         }
-        return true;
+        for (const auto& settlement : settlements) {
+            if (aggregator.apply(settlement) != ProgressionResult::APPLIED) {
+                return false;
+            }
+        }
+        const auto actual = aggregator.outcome();
+        if (actual.aggregation_status != AggregationStatus::READY) {
+            return false;
+        }
+        return same_outcome(actual, outcome);
+    }
+
+private:
+    static bool same_outcome(const GroupOutcome& lhs, const GroupOutcome& rhs) noexcept {
+        if (lhs.final != rhs.final || lhs.unresolved != rhs.unresolved ||
+            lhs.all_members_terminal != rhs.all_members_terminal ||
+            lhs.completed_members != rhs.completed_members ||
+            lhs.aggregation_status != rhs.aggregation_status || lhs.kind != rhs.kind ||
+            lhs.net_profit.has_value() != rhs.net_profit.has_value()) {
+            return false;
+        }
+        if (!lhs.net_profit) return true;
+        return lhs.net_profit->units == rhs.net_profit->units &&
+               lhs.net_profit->precision == rhs.net_profit->precision &&
+               lhs.net_profit->currency == rhs.net_profit->currency;
     }
 };
 

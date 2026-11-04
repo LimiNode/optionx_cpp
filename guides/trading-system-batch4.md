@@ -45,9 +45,12 @@ idempotent after release. `mark_unknown()` preserves the full reservation for
 an ambiguous submission; it is not a release operation. `settle()` requires a
 `RiskSettlementEvidence` containing the matching reservation/intent/group,
 `READY` Batch 3 aggregation, and one terminal `TradeSettlement` per required
-member. Partial, `UNKNOWN`, pending, and `BLOCKED_ERROR` evidence cannot release
-the group risk. Repeated transitions return `DUPLICATE`; invalid transitions
-leave state unchanged.
+member. The evidence validator replays those settlements through the existing
+`ExecutionGroupAggregator` and compares terminality, exact fixed-point net P&L,
+currency/precision, and `OutcomeKind`; partial, `UNKNOWN`, pending,
+`BLOCKED_ERROR`, inconsistent, or overflowing evidence cannot release the group
+risk. Repeated transitions return `DUPLICATE`; invalid transitions leave state
+unchanged.
 
 ## Identity And Snapshot Scopes
 
@@ -66,6 +69,13 @@ revision with different balance facts is a conflict. Snapshot revision is
 provider/account state, not a reservation revision. Account-wide uniqueness
 across processes, restart-safe deduplication, and journal recovery belong to
 the future host/admission and persistence layers.
+
+Evidence consistency is not evidence provenance. Batch 4 can validate the
+provided terminal facts and their exact aggregation, but it does not know the
+physical roster that was originally admitted. The Batch 3 progression owner
+must supply the authoritative roster and settlement set; Batch 5 will persist
+that binding across restart. Matching only the expected member count is an
+explicit remaining trust boundary.
 
 ## Non-Goals
 

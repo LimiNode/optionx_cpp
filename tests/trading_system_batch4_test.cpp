@@ -197,6 +197,92 @@ TEST(TradingSystemBatch4, PartialOrBlockedEvidenceCannotReleaseUnknownGroup) {
     EXPECT_EQ(owner.reserved_risk_units(), 0);
 }
 
+TEST(TradingSystemBatch4, SettlementEvidenceMustMatchAggregatorOutcome) {
+    ts::RiskAdmission owner(config());
+    ASSERT_EQ(owner.update_snapshot(snapshot()).kind, ts::RiskAdmissionKind::APPLIED);
+    auto split = request(1, "consistent", 10, 40);
+    split.cardinality = ts::ExecutionCardinality::SPLIT_GROUP;
+    split.execution_group = {81, 2};
+    const auto reserved = owner.reserve(split, 1000);
+    ASSERT_EQ(reserved.kind, ts::RiskAdmissionKind::ADMITTED);
+    const auto token = *reserved.reservation;
+    ASSERT_EQ(owner.commit(token).kind, ts::RiskAdmissionKind::APPLIED);
+    ASSERT_EQ(owner.mark_unknown(token).kind, ts::RiskAdmissionKind::APPLIED);
+
+    auto evidence = terminal_evidence(token, 2);
+    evidence.settlements[0].kind = ts::OutcomeKind::WIN;
+    evidence.settlements[0].net_profit = money(100);
+    evidence.settlements[1].kind = ts::OutcomeKind::WIN;
+    evidence.settlements[1].net_profit = money(200);
+    evidence.outcome.kind = ts::OutcomeKind::DRAW;
+    evidence.outcome.net_profit = money(0);
+    EXPECT_EQ(owner.settle(token, evidence).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+    EXPECT_EQ(owner.reserved_risk_units(), 40);
+
+    evidence.outcome.kind = ts::OutcomeKind::LOSS;
+    evidence.outcome.net_profit = money(300);
+    EXPECT_EQ(owner.settle(token, evidence).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+
+    evidence.outcome.kind = ts::OutcomeKind::WIN;
+    EXPECT_EQ(owner.settle(token, evidence).kind, ts::RiskAdmissionKind::APPLIED);
+    EXPECT_EQ(owner.reserved_risk_units(), 0);
+
+    ts::RiskAdmission no_execution_owner(config());
+    ASSERT_EQ(no_execution_owner.update_snapshot(snapshot()).kind, ts::RiskAdmissionKind::APPLIED);
+    const auto no_execution = no_execution_owner.reserve(request(2, "cancelled"), 1000);
+    ASSERT_EQ(no_execution.kind, ts::RiskAdmissionKind::ADMITTED);
+    const auto no_execution_token = *no_execution.reservation;
+    ASSERT_EQ(no_execution_owner.commit(no_execution_token).kind, ts::RiskAdmissionKind::APPLIED);
+    auto cancelled = terminal_evidence(no_execution_token);
+    cancelled.settlements[0].kind = ts::OutcomeKind::CANCELLED;
+    cancelled.settlements[0].evidence = ts::ExecutionEvidence::NOT_SUBMITTED;
+    cancelled.settlements[0].net_profit.reset();
+    cancelled.outcome.kind = ts::OutcomeKind::CANCELLED;
+    cancelled.outcome.net_profit = money(0);
+    EXPECT_EQ(no_execution_owner.settle(no_execution_token, cancelled).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+    cancelled.outcome.net_profit.reset();
+    EXPECT_EQ(no_execution_owner.settle(no_execution_token, cancelled).kind,
+              ts::RiskAdmissionKind::APPLIED);
+}
+
+TEST(TradingSystemBatch4, EvidenceRejectsMoneyMismatchAndAggregateOverflow) {
+    ts::RiskAdmission owner(config());
+    ASSERT_EQ(owner.update_snapshot(snapshot()).kind, ts::RiskAdmissionKind::APPLIED);
+    const auto reserved = owner.reserve(request(1, "money"), 1000);
+    ASSERT_EQ(reserved.kind, ts::RiskAdmissionKind::ADMITTED);
+    const auto token = *reserved.reservation;
+    ASSERT_EQ(owner.commit(token).kind, ts::RiskAdmissionKind::APPLIED);
+    auto evidence = terminal_evidence(token);
+    evidence.settlements[0].net_profit->currency = CurrencyType::EUR;
+    EXPECT_EQ(owner.settle(token, evidence).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+    EXPECT_EQ(owner.reserved_risk_units(), 10);
+
+    ts::RiskAdmission overflow_owner(config());
+    ASSERT_EQ(overflow_owner.update_snapshot(snapshot((std::numeric_limits<std::int64_t>::max)())).kind,
+              ts::RiskAdmissionKind::APPLIED);
+    auto overflow_request = request(2, "overflow", 10, (std::numeric_limits<std::int64_t>::max)());
+    overflow_request.cardinality = ts::ExecutionCardinality::SPLIT_GROUP;
+    overflow_request.execution_group = {82, 2};
+    const auto overflow = overflow_owner.reserve(overflow_request, 1000);
+    ASSERT_EQ(overflow.kind, ts::RiskAdmissionKind::ADMITTED);
+    const auto overflow_token = *overflow.reservation;
+    ASSERT_EQ(overflow_owner.commit(overflow_token).kind, ts::RiskAdmissionKind::APPLIED);
+    auto overflow_evidence = terminal_evidence(overflow_token, 2);
+    overflow_evidence.settlements[0].kind = ts::OutcomeKind::WIN;
+    overflow_evidence.settlements[0].net_profit = money((std::numeric_limits<std::int64_t>::max)());
+    overflow_evidence.settlements[1].kind = ts::OutcomeKind::WIN;
+    overflow_evidence.settlements[1].net_profit = money(1);
+    overflow_evidence.outcome.kind = ts::OutcomeKind::WIN;
+    overflow_evidence.outcome.net_profit = money((std::numeric_limits<std::int64_t>::max)());
+    EXPECT_EQ(overflow_owner.settle(overflow_token, overflow_evidence).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+    EXPECT_EQ(overflow_owner.reserved_risk_units(), (std::numeric_limits<std::int64_t>::max)());
+}
+
 TEST(TradingSystemBatch4, ReservationIdsDoNotWrapAtUint64Maximum) {
     ts::RiskAdmission owner(config(), (std::numeric_limits<std::uint64_t>::max)());
     ASSERT_EQ(owner.update_snapshot(snapshot()).kind, ts::RiskAdmissionKind::APPLIED);
