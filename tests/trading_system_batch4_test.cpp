@@ -51,6 +51,33 @@ ts::RiskRequest request(
     return ts::RiskRequest::from_intent(intent(id, key), money(stake), money(risk));
 }
 
+ts::RiskSettlementEvidence terminal_evidence(
+    const ts::RiskReservation& reservation,
+    std::uint32_t members = 1) {
+    ts::RiskSettlementEvidence evidence;
+    evidence.reservation_id = reservation.reservation_id;
+    evidence.intent_id = reservation.intent_id;
+    evidence.execution_group = reservation.execution_group;
+    evidence.outcome.final = true;
+    evidence.outcome.all_members_terminal = true;
+    evidence.outcome.completed_members = members;
+    evidence.outcome.aggregation_status = ts::AggregationStatus::READY;
+    evidence.outcome.kind = ts::OutcomeKind::DRAW;
+    evidence.outcome.net_profit = money(0);
+    for (std::uint32_t i = 0; i < members; ++i) {
+        ts::TradeSettlement settlement;
+        settlement.settlement_id = 100 + i;
+        settlement.intent_id = reservation.intent_id;
+        settlement.execution_group_id = reservation.execution_group.group_id;
+        settlement.trade_id = 1 + i;
+        settlement.kind = ts::OutcomeKind::DRAW;
+        settlement.evidence = ts::ExecutionEvidence::EXECUTED;
+        settlement.net_profit = money(0);
+        evidence.settlements.push_back(std::move(settlement));
+    }
+    return evidence;
+}
+
 TEST(TradingSystemBatch4, RequiresSupportedFreshSnapshot) {
     ts::RiskAdmission owner(config());
     EXPECT_TRUE(owner.valid());
@@ -88,6 +115,7 @@ TEST(TradingSystemBatch4, ReserveIsIdempotentAndPayloadBound) {
     const auto duplicate = owner.reserve(request(1, "one"), 1000);
     EXPECT_EQ(duplicate.kind, ts::RiskAdmissionKind::DUPLICATE);
     EXPECT_EQ(duplicate.reservation->reservation_id, first.reservation->reservation_id);
+    EXPECT_TRUE(duplicate.is_submission_admission());
 
     EXPECT_EQ(owner.reserve(request(1, "one", 11), 1000).kind,
               ts::RiskAdmissionKind::CONFLICT);
@@ -110,9 +138,15 @@ TEST(TradingSystemBatch4, LifecycleRetainsUnknownRiskUntilSettlement) {
     EXPECT_EQ(owner.mark_unknown(token).kind, ts::RiskAdmissionKind::APPLIED);
     EXPECT_EQ(owner.reserved_risk_units(), 40);
     EXPECT_EQ(owner.release(token).reason, ts::RiskAdmissionReason::INVALID_TRANSITION);
-    EXPECT_EQ(owner.settle(token).kind, ts::RiskAdmissionKind::APPLIED);
+    const auto evidence = terminal_evidence(token);
+    EXPECT_EQ(owner.settle(token, evidence).kind, ts::RiskAdmissionKind::APPLIED);
     EXPECT_EQ(owner.reserved_risk_units(), 0);
-    EXPECT_EQ(owner.settle(token).kind, ts::RiskAdmissionKind::DUPLICATE);
+    const auto historical = owner.reserve(request(1, "one", 10, 40), 1000);
+    EXPECT_EQ(historical.kind, ts::RiskAdmissionKind::DUPLICATE);
+    EXPECT_FALSE(historical.succeeded());
+    EXPECT_FALSE(historical.is_submission_admission());
+    EXPECT_FALSE(historical.retains_risk());
+    EXPECT_EQ(owner.settle(token, evidence).kind, ts::RiskAdmissionKind::DUPLICATE);
 }
 
 TEST(TradingSystemBatch4, RejectedBeforeSubmitReleasesExactlyOnce) {
@@ -125,6 +159,73 @@ TEST(TradingSystemBatch4, RejectedBeforeSubmitReleasesExactlyOnce) {
     EXPECT_EQ(owner.release(*reserved.reservation).kind, ts::RiskAdmissionKind::DUPLICATE);
     EXPECT_EQ(owner.mark_unknown(*reserved.reservation).reason,
               ts::RiskAdmissionReason::INVALID_TRANSITION);
+    const auto historical = owner.reserve(request(1, "one", 10, 40), 1000);
+    EXPECT_EQ(historical.kind, ts::RiskAdmissionKind::DUPLICATE);
+    EXPECT_FALSE(historical.succeeded());
+}
+
+TEST(TradingSystemBatch4, PartialOrBlockedEvidenceCannotReleaseUnknownGroup) {
+    ts::RiskAdmission owner(config());
+    ASSERT_EQ(owner.update_snapshot(snapshot()).kind, ts::RiskAdmissionKind::APPLIED);
+    auto split = request(1, "split", 10, 40);
+    split.cardinality = ts::ExecutionCardinality::SPLIT_GROUP;
+    split.execution_group = {80, 2};
+    const auto reserved = owner.reserve(split, 1000);
+    ASSERT_EQ(reserved.kind, ts::RiskAdmissionKind::ADMITTED);
+    const auto token = *reserved.reservation;
+    ASSERT_EQ(owner.commit(token).kind, ts::RiskAdmissionKind::APPLIED);
+    ASSERT_EQ(owner.mark_unknown(token).kind, ts::RiskAdmissionKind::APPLIED);
+
+    auto partial = terminal_evidence(token, 1);
+    EXPECT_EQ(owner.settle(token, partial).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+    EXPECT_EQ(owner.reserved_risk_units(), 40);
+
+    auto blocked = terminal_evidence(token, 2);
+    blocked.outcome.aggregation_status = ts::AggregationStatus::NUMERIC_OVERFLOW;
+    EXPECT_EQ(owner.settle(token, blocked).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+    EXPECT_EQ(owner.reserved_risk_units(), 40);
+
+    auto stale = terminal_evidence(token, 2);
+    ++stale.reservation_id;
+    EXPECT_EQ(owner.settle(token, stale).reason,
+              ts::RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+
+    const auto complete = terminal_evidence(token, 2);
+    EXPECT_EQ(owner.settle(token, complete).kind, ts::RiskAdmissionKind::APPLIED);
+    EXPECT_EQ(owner.reserved_risk_units(), 0);
+}
+
+TEST(TradingSystemBatch4, ReservationIdsDoNotWrapAtUint64Maximum) {
+    ts::RiskAdmission owner(config(), (std::numeric_limits<std::uint64_t>::max)());
+    ASSERT_EQ(owner.update_snapshot(snapshot()).kind, ts::RiskAdmissionKind::APPLIED);
+    const auto last = owner.reserve(request(1, "last"), 1000);
+    ASSERT_EQ(last.kind, ts::RiskAdmissionKind::ADMITTED);
+    EXPECT_EQ(last.reservation->reservation_id,
+              (std::numeric_limits<std::uint64_t>::max)());
+    EXPECT_EQ(owner.reserve(request(2, "exhausted"), 1000).reason,
+              ts::RiskAdmissionReason::NUMERIC_OVERFLOW);
+    EXPECT_EQ(owner.reserved_risk_units(), 10);
+}
+
+TEST(TradingSystemBatch4, ReleaseAndSettlementRaceHasOneTerminalWinner) {
+    ts::RiskAdmission owner(config());
+    ASSERT_EQ(owner.update_snapshot(snapshot()).kind, ts::RiskAdmissionKind::APPLIED);
+    const auto reserved = owner.reserve(request(1, "race", 10, 40), 1000);
+    ASSERT_EQ(reserved.kind, ts::RiskAdmissionKind::ADMITTED);
+    const auto token = *reserved.reservation;
+    ASSERT_EQ(owner.commit(token).kind, ts::RiskAdmissionKind::APPLIED);
+    const auto evidence = terminal_evidence(token);
+    ts::RiskAdmissionResult release_result;
+    ts::RiskAdmissionResult settle_result;
+    std::thread release_thread([&] { release_result = owner.release(token); });
+    std::thread settle_thread([&] { settle_result = owner.settle(token, evidence); });
+    release_thread.join();
+    settle_thread.join();
+    EXPECT_EQ(release_result.kind, ts::RiskAdmissionKind::INVALID_STATE);
+    EXPECT_EQ(settle_result.kind, ts::RiskAdmissionKind::APPLIED);
+    EXPECT_EQ(owner.reserved_risk_units(), 0);
 }
 
 TEST(TradingSystemBatch4, SnapshotRevisionAndCurrencyAreGuarded) {

@@ -7,14 +7,17 @@
 
 #include "TradeIntent.hpp"
 #include "PolicyTypes.hpp"
+#include "Settlement.hpp"
 
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace optionx::trading_system {
 
@@ -130,7 +133,8 @@ enum class RiskAdmissionReason {
     UNKNOWN_RESERVATION,
     INVALID_TRANSITION,
     PAYLOAD_CONFLICT,
-    REVISION_CONFLICT
+    REVISION_CONFLICT,
+    INVALID_SETTLEMENT_EVIDENCE
 };
 
 struct RiskReservation {
@@ -149,6 +153,56 @@ struct RiskReservation {
         return reservation_id != 0 && scope.valid() && intent_id != 0 &&
                !idempotency_key.empty() && stake.valid_metadata() &&
                potential_risk.valid_metadata();
+    }
+};
+
+/// \brief Typed proof that one logical execution group reached terminal state.
+/// \details This is a structural trust boundary. The host must construct it
+/// from the authoritative Batch 3 progression and settlement owner.
+struct RiskSettlementEvidence {
+    std::uint64_t reservation_id = 0;
+    IntentId intent_id = 0;
+    ExecutionGroupIdentity execution_group;
+    GroupOutcome outcome;
+    std::vector<TradeSettlement> settlements;
+
+    bool valid_for(const RiskReservation& reservation) const {
+        if (reservation_id != reservation.reservation_id ||
+            intent_id != reservation.intent_id ||
+            execution_group.group_id != reservation.execution_group.group_id ||
+            execution_group.expected_members != reservation.execution_group.expected_members ||
+            !outcome.final || !outcome.all_members_terminal || outcome.unresolved ||
+            outcome.aggregation_status != AggregationStatus::READY ||
+            !outcome.kind ||
+            outcome.completed_members != execution_group.expected_members ||
+            settlements.size() != execution_group.expected_members) {
+            return false;
+        }
+        std::set<SettlementId> settlement_ids;
+        std::set<std::uint64_t> trade_ids;
+        bool has_execution = false;
+        for (const auto& settlement : settlements) {
+            if (!settlement.valid() || !settlement.terminal() ||
+                settlement.intent_id != intent_id ||
+                settlement.execution_group_id != execution_group.group_id ||
+                !settlement_ids.insert(settlement.settlement_id).second ||
+                !trade_ids.insert(settlement.trade_id).second) {
+                return false;
+            }
+            has_execution = has_execution || settlement.is_trading_result();
+        }
+        if (has_execution) {
+            if (!outcome.net_profit ||
+                (*outcome.kind != OutcomeKind::WIN &&
+                 *outcome.kind != OutcomeKind::LOSS &&
+                 *outcome.kind != OutcomeKind::DRAW)) {
+                return false;
+            }
+        } else if (*outcome.kind != OutcomeKind::REJECTED &&
+                   *outcome.kind != OutcomeKind::CANCELLED) {
+            return false;
+        }
+        return true;
     }
 };
 
@@ -188,7 +242,21 @@ struct RiskAdmissionResult {
 
     bool succeeded() const noexcept {
         return kind == RiskAdmissionKind::ADMITTED || kind == RiskAdmissionKind::APPLIED ||
-               kind == RiskAdmissionKind::DUPLICATE;
+               (kind == RiskAdmissionKind::DUPLICATE && reservation &&
+                reservation->state == RiskReservationState::RESERVED);
+    }
+
+    bool retains_risk() const noexcept {
+        return reservation &&
+               (reservation->state == RiskReservationState::RESERVED ||
+                reservation->state == RiskReservationState::SUBMITTED ||
+                reservation->state == RiskReservationState::EXECUTION_UNKNOWN);
+    }
+
+    bool is_submission_admission() const noexcept {
+        return kind == RiskAdmissionKind::ADMITTED ||
+               (kind == RiskAdmissionKind::DUPLICATE && reservation &&
+                reservation->state == RiskReservationState::RESERVED);
     }
 };
 
@@ -198,9 +266,14 @@ struct RiskAdmissionResult {
 /// owners do not coordinate; the host must create one owner per risk scope.
 class RiskAdmission {
 public:
-    explicit RiskAdmission(RiskAdmissionConfig config) : m_config(std::move(config)) {}
+    explicit RiskAdmission(
+        RiskAdmissionConfig config,
+        std::uint64_t first_reservation_id = 1)
+        : m_config(std::move(config)),
+          m_next_reservation_id(first_reservation_id),
+          m_id_sequence_valid(first_reservation_id != 0) {}
 
-    bool valid() const noexcept { return m_config.valid(); }
+    bool valid() const noexcept { return m_config.valid() && m_id_sequence_valid; }
 
     RiskAdmissionResult update_snapshot(const RiskAccountSnapshot& snapshot) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -219,7 +292,10 @@ public:
                 : RiskAdmissionResult::conflict(RiskAdmissionReason::REVISION_CONFLICT);
         }
         if (m_snapshot && !same_currency(m_snapshot->available_balance, snapshot.available_balance)) {
-            return RiskAdmissionResult::conflict(RiskAdmissionReason::CURRENCY_MISMATCH);
+            return RiskAdmissionResult::conflict(
+                m_snapshot->available_balance.currency != snapshot.available_balance.currency
+                    ? RiskAdmissionReason::CURRENCY_MISMATCH
+                    : RiskAdmissionReason::PRECISION_MISMATCH);
         }
         m_snapshot = snapshot;
         return {RiskAdmissionKind::APPLIED, RiskAdmissionReason::NONE, std::nullopt};
@@ -238,6 +314,9 @@ public:
         const auto by_intent = m_by_intent.find(request.intent_id);
         if (by_intent != m_by_intent.end()) {
             return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        if (m_id_sequence_exhausted) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::NUMERIC_OVERFLOW);
         }
         if (!valid_money(request.stake) || !valid_money(request.potential_risk)) {
             return RiskAdmissionResult::rejected(RiskAdmissionReason::INVALID_RISK);
@@ -287,21 +366,33 @@ public:
         }
 
         RiskReservation reservation;
-        reservation.reservation_id = m_next_reservation_id++;
+        reservation.reservation_id = m_next_reservation_id;
         reservation.scope = m_config.scope;
         reservation.intent_id = request.intent_id;
-        reservation.execution_group = request.execution_group;
+        reservation.execution_group = normalized_group(request);
         reservation.cardinality = request.cardinality;
         reservation.idempotency_key = request.idempotency_key;
         reservation.stake = request.stake;
         reservation.potential_risk = request.potential_risk;
         reservation.state = RiskReservationState::RESERVED;
         reservation.account_revision = m_snapshot->revision;
-        m_by_key.emplace(reservation.idempotency_key, reservation);
-        m_by_intent.emplace(reservation.intent_id, reservation.idempotency_key);
+        auto candidate_by_key = m_by_key;
+        auto candidate_by_intent = m_by_intent;
+        if (!candidate_by_key.emplace(reservation.idempotency_key, reservation).second ||
+            !candidate_by_intent.emplace(reservation.intent_id, reservation.idempotency_key).second) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        const bool exhaust_ids =
+            reservation.reservation_id == (std::numeric_limits<std::uint64_t>::max)();
+        const auto next_id = exhaust_ids ? 0 : reservation.reservation_id + 1;
+        m_by_key.swap(candidate_by_key);
+        m_by_intent.swap(candidate_by_intent);
+        m_next_reservation_id = next_id;
+        m_id_sequence_exhausted = exhaust_ids;
         return RiskAdmissionResult::admitted(reservation);
     }
 
+    /// \brief Marks submission-in-progress before any broker-side effect.
     RiskAdmissionResult commit(const RiskReservation& token) {
         return transition(token, RiskReservationState::SUBMITTED,
                           RiskAdmissionReason::COMMITTED,
@@ -323,7 +414,13 @@ public:
                           });
     }
 
-    RiskAdmissionResult settle(const RiskReservation& token) {
+    RiskAdmissionResult settle(
+        const RiskReservation& token,
+        const RiskSettlementEvidence& evidence) {
+        if (!evidence.valid_for(token)) {
+            return RiskAdmissionResult::rejected(
+                RiskAdmissionReason::INVALID_SETTLEMENT_EVIDENCE);
+        }
         return transition(token, RiskReservationState::SETTLED,
                           RiskAdmissionReason::SETTLED,
                           [](RiskReservationState state) {
@@ -362,14 +459,23 @@ private:
     }
 
     static bool same_request(const RiskReservation& stored, const RiskRequest& request) noexcept {
+        const auto group = normalized_group(request);
         return stored.intent_id == request.intent_id &&
-               stored.execution_group.group_id == request.execution_group.group_id &&
-               stored.execution_group.expected_members == request.execution_group.expected_members &&
+               stored.execution_group.group_id == group.group_id &&
+               stored.execution_group.expected_members == group.expected_members &&
                stored.cardinality == request.cardinality &&
                stored.stake.units == request.stake.units &&
                same_currency(stored.stake, request.stake) &&
                stored.potential_risk.units == request.potential_risk.units &&
                same_currency(stored.potential_risk, request.potential_risk);
+    }
+
+    static ExecutionGroupIdentity normalized_group(const RiskRequest& request) noexcept {
+        auto group = request.execution_group;
+        if (request.cardinality == ExecutionCardinality::ZERO_OR_ONE) {
+            group.expected_members = 1;
+        }
+        return group;
     }
 
     static bool can_add(std::int64_t lhs, std::int64_t rhs) noexcept {
@@ -425,6 +531,8 @@ private:
     mutable std::mutex m_mutex;
     std::optional<RiskAccountSnapshot> m_snapshot;
     std::uint64_t m_next_reservation_id = 1;
+    bool m_id_sequence_valid = true;
+    bool m_id_sequence_exhausted = false;
     std::map<std::string, RiskReservation> m_by_key;
     std::map<IntentId, std::string> m_by_intent;
 };

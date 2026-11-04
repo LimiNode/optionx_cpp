@@ -24,6 +24,24 @@ int main() {
     if (reserved.kind != RiskAdmissionKind::ADMITTED || !reserved.reservation) return 2;
     if (owner.commit(*reserved.reservation).kind != RiskAdmissionKind::APPLIED) return 3;
     if (owner.mark_unknown(*reserved.reservation).kind != RiskAdmissionKind::APPLIED) return 4;
-    if (owner.settle(*reserved.reservation).kind != RiskAdmissionKind::APPLIED) return 5;
+    RiskSettlementEvidence evidence;
+    evidence.reservation_id = reserved.reservation->reservation_id;
+    evidence.intent_id = reserved.reservation->intent_id;
+    evidence.execution_group = reserved.reservation->execution_group;
+    evidence.outcome.final = true;
+    evidence.outcome.all_members_terminal = true;
+    evidence.outcome.completed_members = 1;
+    evidence.outcome.aggregation_status = AggregationStatus::READY;
+    evidence.outcome.kind = OutcomeKind::DRAW;
+    evidence.outcome.net_profit = MoneyAmount{0, 2, optionx::CurrencyType::USD};
+    TradeSettlement settlement;
+    settlement.settlement_id = 100;
+    settlement.intent_id = intent.intent_id;
+    settlement.trade_id = 1;
+    settlement.kind = OutcomeKind::DRAW;
+    settlement.evidence = ExecutionEvidence::EXECUTED;
+    settlement.net_profit = MoneyAmount{0, 2, optionx::CurrencyType::USD};
+    evidence.settlements.push_back(settlement);
+    if (owner.settle(*reserved.reservation, evidence).kind != RiskAdmissionKind::APPLIED) return 5;
     return owner.reserved_risk_units() == 0 ? 0 : 6;
 }

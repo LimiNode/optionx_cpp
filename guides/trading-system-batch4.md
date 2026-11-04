@@ -24,6 +24,12 @@ two concurrent clients of the same owner cannot reserve the same remaining
 risk. A newer account snapshot may reduce future capacity; it does not revoke
 existing reservations.
 
+Publication uses copied candidate indexes and swaps both maps only after all
+allocations and insertions succeed. The owner ID sequence is advanced only at
+that publication point; `UINT64_MAX` is a valid final ID and then the sequence
+is exhausted without wrapping to zero. Allocation failure therefore leaves
+reservations, indexes, and the ID sequence unchanged.
+
 ## Lifecycle
 
 ```text
@@ -33,21 +39,27 @@ reserve -> RESERVED -> commit -> SUBMITTED
                       RELEASED       EXECUTION_UNKNOWN -> SETTLED
 ```
 
-`release()` is only valid before submission and is idempotent after release.
-`mark_unknown()` preserves the full reservation for an ambiguous submission;
-it is not a release operation. `settle()` is the explicit reconciliation path
-from `SUBMITTED` or `EXECUTION_UNKNOWN` and releases the reserved risk exactly
-once. Repeated transitions return `DUPLICATE`; invalid transitions leave state
-unchanged.
+`commit()` means submission-in-progress and must run before the first potential
+broker-side effect. `release()` is only valid before that point and is
+idempotent after release. `mark_unknown()` preserves the full reservation for
+an ambiguous submission; it is not a release operation. `settle()` requires a
+`RiskSettlementEvidence` containing the matching reservation/intent/group,
+`READY` Batch 3 aggregation, and one terminal `TradeSettlement` per required
+member. Partial, `UNKNOWN`, pending, and `BLOCKED_ERROR` evidence cannot release
+the group risk. Repeated transitions return `DUPLICATE`; invalid transitions
+leave state unchanged.
 
 ## Identity And Snapshot Scopes
 
 The idempotency key and intent identity are unique for the lifetime of this
-owner. Repeating the exact request returns the existing reservation. Reusing a
-key with a different payload, or reserving the same intent under another key,
-returns `CONFLICT`. Reservation IDs are owner-generated and are bound to the
-scope, intent, key, group and monetary payload when transition tokens are
-validated.
+owner. Repeating an exact request while its state is `RESERVED` returns the
+existing admission and remains usable for submission. Repeating it after
+`SUBMITTED`/`EXECUTION_UNKNOWN` returns historical `DUPLICATE` data but not a
+new submission admission; after `RELEASED`/`SETTLED`, it is never successful and
+cannot be used to submit again. Reusing a key with a different payload, or
+reserving the same intent under another key, returns `CONFLICT`. Reservation
+IDs are owner-generated and are bound to the scope, intent, key, group and
+monetary payload when transition tokens are validated.
 
 Snapshot revisions are monotonic. An older revision is rejected, and the same
 revision with different balance facts is a conflict. Snapshot revision is
