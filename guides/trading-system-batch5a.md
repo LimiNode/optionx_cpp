@@ -52,7 +52,7 @@ The following identities have different meanings and lifetimes:
 | `AccountId` | Stable internal identity of one configured trading account. | Persistent, independent of list position, never silently rebound or reused while referenced. |
 | External account identity | Provider account ID, realm and DEMO/REAL identity when authoritative. | Credentials and tokens are never journal data. |
 | `RiskScopeId` | Financial resource against which risk is reserved. | Separate from `AccountId`; aliases share this scope. |
-| `SessionId` | Operational interval or host run boundary. | Does not replace a series and does not delete history. |
+| `SessionId` | Explicit trading or operational interval selected by the host. | A process restart does not create a new session implicitly; it does not replace a series or delete history. |
 | `SeriesId` | One logical progression of outcomes. | May use different accounts over successive steps. |
 | `ExecutionGroupId` | One logical operation containing one or more physical trades. | Roster is fixed before the first possible submission. |
 | `trade_id` | Existing OptionX identity for one physical trade record. | Preserve the `TradeRecordDB` identity path. |
@@ -77,6 +77,20 @@ operations. A duplicate is merged only when provider identity, realm and
 DEMO/REAL status conclusively match. Email, display name or platform type alone
 are insufficient. The deterministic tie-breaker for a proven duplicate is the
 smallest persistent `AccountId`; other IDs remain aliases in history.
+
+The canonical choice is an identity decision, not a financial migration. For
+example, if account 20 already owns reservations in `RiskScopeId=5` and a new
+account 10 is later proven to be the same external account, account 20's
+existing trade references and reservations remain bound to their recorded
+identities. Account 10 becomes a canonical alias for future lookups only after
+the alias record and identity revision are durably committed.
+
+If the two records carry different `RiskScopeId`s but are proven to represent
+one physical balance, the registry enters a risk-scope conflict state. New
+admission for both affected scopes is blocked until an atomic merge or an
+explicit conflict resolution establishes one scope. Existing reservations are
+not silently moved, duplicated or released. Alias history, tombstones and
+identity revisions must survive restart.
 
 ## ADR-2: Multi-account Execution
 
@@ -122,6 +136,19 @@ required quote blocks a new converted decision; it cannot erase an accepted
 native settlement. Cross-currency group aggregation is a later extension that
 preserves native P&L, converts with persisted valuation facts, and records the
 valuation policy. No FX aggregation engine is part of Batch 5A or 5B.
+
+In 5B, native settlements are always durable even when a required valuation
+fact is unavailable. A group may therefore have all physical members terminal
+while its logical aggregate remains non-terminal with `AggregationStatus::PENDING`.
+It must not receive a confirmed logical `WIN`, `LOSS` or `DRAW`, must not expose
+a fabricated net P&L, and must not advance `SeriesProgression` until the
+valuation dependency is resolved or an explicitly approved policy handles it.
+This uses the existing pending/blocking mechanisms; it does not introduce a
+fake `OutcomeKind`. A later versioned revaluation may change a reporting
+projection, but it cannot rewrite a confirmed broker outcome implicitly. Risk
+remains reserved by default while the valuation dependency blocks logical
+progression; releasing it earlier requires an explicit durable policy and must
+not be inferred from physical terminality alone.
 
 ## ADR-4: Series, Money Management And Composition
 
@@ -185,6 +212,44 @@ The external broker call is always outside the MDBX transaction. Local commit
 can make a command ready and mark submission-started, but it cannot commit the
 broker side effect.
 
+### Owner hydration contract
+
+`TradingSystemRuntime` owns startup recovery. It opens the storage, validates
+schema/version and journal integrity, then creates or hydrates the in-memory
+`SeriesProgression`, `ExecutionGroupAggregator` and `RiskAdmission` owners.
+The journal is canonical; these objects are projections that may accept new
+work only after hydration succeeds.
+
+The required order is:
+
+1. Open storage and validate schema/version.
+2. Verify journal integrity, durable identities and idempotency indexes.
+3. Restore immutable group rosters and physical links.
+4. Restore active reservations and the reservation ID sequence for each risk
+   scope.
+5. Restore series and strategy-state projections with revision/receipt history.
+6. Check owner projections against the canonical durable facts.
+7. Mark unresolved operations and schedule their reconciliation.
+8. Enable admission only for risk scopes whose required invariants are restored.
+
+The runtime, not an individual policy module or broker callback, owns this
+sequence. A scope that is not hydrated, has a journal conflict, or depends on
+unresolved identity/valuation facts remains closed for new admission. Recovery
+does not require all unrelated scopes to wait for one another.
+
+If a durable commit succeeds but in-memory publication fails or is rejected,
+the runtime does not roll back the database or guess a result. It marks the
+projection not ready, reloads it from the journal, and keeps the affected
+admission gate closed until the projection matches. After commit, all owner
+updates are serialized through the existing owner/task loop. Batch 5 does not
+claim thread/process safety beyond that owner contract.
+
+Settlement receipts are inserted with a durable uniqueness key before the
+series, group, risk and policy projections are published. Replaying the same
+receipt is a no-op; a conflicting payload is a recovery error. No new
+settlement is accepted from an in-memory owner whose durable receipt cannot be
+confirmed.
+
 ## ADR-6: Recovery, Unknown Execution And Reset
 
 `RECONCILE` is an action, `PAUSE` is a progression gate, and `RESET_SERIES` is
@@ -231,6 +296,14 @@ Polymarket adapter, order book, position engine, or general exchange runtime.
 | Result before settlement commit | Physical fact exists; logical state may lag. | Apply settlement idempotently in one Unit of Work. |
 | During series/MM/risk update | Transition may be partially visible only if atomicity is broken. | Use transaction recovery or explicit journal replay; never guess a result. |
 | After local commit before notification | Facts are authoritative. | Replay notification from durable state. |
+| Multi-account partial submission | Some roster members may have broker effects; the group is not complete. | Keep submitted/unknown members reserved, reconcile each member, and do not resend ambiguous members. |
+| Crash after one physical execution in a group | One member is durable or observed while other members may be absent. | Restore the fixed roster and keep group progression pending until every member is known terminal or explicitly unresolved. |
+| Account identity change or deactivation | Historical account binding remains valid; new capability may be unavailable. | Keep a tombstone, block unsafe new admission, and reconcile through the recorded identity. |
+| Journal restored before owner hydration | Durable facts exist but in-memory projections are not authoritative yet. | Keep admission closed for that scope until owner hydration and consistency checks pass. |
+| Reset requested with a pending group | Reset is a new progression request, not cancellation of exposure. | Pause or create a new series while the old group and risk remain visible. |
+| Broker-side pending order during downtime | External order may remain active even without a local result. | Reconcile by broker/client identity; no automatic resend or risk release. |
+| Callback accepted in memory before durable commit | Observation is not yet canonical. | Do not publish terminal progression; retain/requeue the journal write, or leave the operation unresolved for reconciliation if the observation is lost. |
+| New canonical alias with active reservations | Account lookup identity changed while financial state is live. | Preserve old references and block conflicting risk scopes until an atomic alias/scope resolution. |
 
 ## Batch 5A API Sketches
 
@@ -265,6 +338,56 @@ The eventual API must preserve existing serialized field types and aggregate
 include ownership. It must not expose credentials, cookies, proxy secrets or
 tokens in journal records.
 
+### Conceptual 5B Unit of Work
+
+This is a bounded interface sketch, not a storage framework or implementation
+for this PR. It shows the required commit boundary and hydration gate:
+
+```cpp
+auto transaction = storage.begin_unit_of_work();
+transaction.physical_trades().upsert(trade_snapshot);
+transaction.settlements().insert_if_absent(settlement_receipt);
+transaction.series().update_if_revision(series_snapshot, expected_revision);
+transaction.reservations().apply_settlement(reservation_id, settlement_id);
+transaction.strategy_state().advance_once(module_id, settlement_id, next_state);
+
+if (!transaction.commit()) {
+    // No projection is published; durable facts are rolled back.
+    return StorageResult::ROLLED_BACK;
+}
+
+runtime.reload_projection_from_journal();
+runtime.enable_admission_after_hydration(risk_scope_id);
+```
+
+The conceptual repositories receive one transaction context and share one
+MDBX environment. A failed commit publishes no partial local transition. A
+successful commit followed by projection failure leaves the journal canonical,
+keeps the admission gate closed, and schedules owner rehydration; it never
+releases risk based only on an in-memory snapshot.
+
+## Rejected Alternatives / Rationale
+
+- **Two independent progress databases:** rejected because series, risk,
+  roster and settlement receipts could commit at different revisions. One
+  shared journal/UoW makes the local atomicity boundary explicit.
+- **Money-management policy calls the broker directly:** rejected because it
+  couples strategy state to transport retries and prevents one owner from
+  coordinating execution, risk and recovery. `TradingSystemRuntime` and
+  `ExecutionManager` keep those responsibilities separate.
+- **Delete duplicate accounts:** rejected because historical `AccountId`s and
+  trade references would disappear. Canonical aliases preserve history and
+  make identity revisions recoverable.
+- **Hard-coded module links:** rejected because replacing a filter or sizing
+  policy would require changing unrelated modules. The host owns a bounded,
+  typed pipeline configuration.
+- **Automatic reset after unknown exposure:** rejected because it can release
+  or double-spend risk while a broker-side operation remains live. Pause and
+  reconciliation preserve the old exposure; reset is explicit and idempotent.
+- **A universal Forex/crypto runtime for Polymarket compatibility:** rejected
+  because the supported future subset needs fill-aware binary execution facts,
+  not an unrelated order book, position engine or FX aggregation framework.
+
 ## 5A Delivery And Review Gate
 
 This batch is complete when:
@@ -273,6 +396,9 @@ This batch is complete when:
 - account, risk-scope, series, group, physical-trade and session lifetimes are
   explicit;
 - native money and valuation provenance are replayable;
+- cross-currency terminal physical facts cannot advance logical progression
+  without valuation evidence;
+- owner hydration and per-risk-scope admission gates are explicit;
 - the MDBX transaction ownership limitation is explicit;
 - crash boundaries and `EXECUTION_UNKNOWN` behavior are documented;
 - rejected alternatives are recorded here;

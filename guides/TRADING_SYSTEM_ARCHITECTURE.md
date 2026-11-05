@@ -47,7 +47,7 @@ The system keeps these identities distinct:
 | `broker_trade_id` | Broker-side numeric or string identity. | Available only after broker acceptance, or unresolved. |
 | `account_id` | Stable internal identity of a configured trading account. | Existing request/account DTO field; never silently rebound. |
 | `risk_scope_id` | Identity of the financial resource reserved by admission. | May be shared by account aliases; separate from `account_id`. |
-| `session_id` | Operational interval or host run boundary. | Does not replace a series or delete physical history. |
+| `session_id` | Explicit trading or operational interval selected by the host. | A process restart does not create a new session implicitly; it does not replace a series or delete physical history. |
 
 `TradeSignal` remains the source event. It must not be mutated to represent a
 later branch. A `TradeIntent` is the mutable, policy-approved candidate. A

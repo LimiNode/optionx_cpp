@@ -81,7 +81,10 @@ and is delivered in three separate review gates.
 Document account identity and aliases, risk scopes, multi-account execution
 rosters, native currency and valuation provenance, money-management state,
 module composition, journal ownership, MDBX transaction ownership and recovery
-boundaries. Do not add runtime code or schema migrations. Stop for review.
+boundaries. Separate existing in-memory owners from missing durable capabilities,
+define owner hydration and per-risk-scope admission gates, and specify how
+cross-currency physical settlements remain non-terminal without valuation facts.
+Do not add runtime code or schema migrations. Stop for review.
 
 ### Batch 5B: Durable Storage and Local Atomicity
 
