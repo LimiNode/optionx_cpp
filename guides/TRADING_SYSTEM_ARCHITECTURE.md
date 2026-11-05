@@ -2,10 +2,11 @@
 
 ## Status
 
-This is the foundation decision for a future `optionx::trading_system` domain.
+This is the foundation decision for the `optionx::trading_system` domain.
 It is intentionally independent of ADELIA, MegaConnector, GUI code and broker
-implementations. This document defines boundaries and invariants; it does not
-authorize a production runtime implementation by itself.
+implementations. Batches 1 through 4 provide tested in-memory contracts. The
+durable boundary is specified in [Batch 5A](trading-system-batch5a.md); this
+document still does not authorize a production runtime by itself.
 
 ## Responsibility Boundary
 
@@ -44,11 +45,20 @@ The system keeps these identities distinct:
 | `execution_group_id` | One logical operation represented by one or more physical broker trades. | Persistent until all members settle or become unknown. |
 | `trade_id` | OptionX persistent identity for one physical trade record. | Existing `TradeRecordDB` identity. |
 | `broker_trade_id` | Broker-side numeric or string identity. | Available only after broker acceptance, or unresolved. |
+| `account_id` | Stable internal identity of a configured trading account. | Existing request/account DTO field; never silently rebound. |
+| `risk_scope_id` | Identity of the financial resource reserved by admission. | May be shared by account aliases; separate from `account_id`. |
+| `session_id` | Operational interval or host run boundary. | Does not replace a series or delete physical history. |
 
 `TradeSignal` remains the source event. It must not be mutated to represent a
 later branch. A `TradeIntent` is the mutable, policy-approved candidate. A
 `TradeRequest` is the broker-facing physical request. A `TradeResult` describes
 the observed execution/outcome, and a `TradeRecord` is its durable snapshot.
+
+`PlatformType` identifies an implementation family, not a configured account.
+Account equivalence requires authoritative provider identity and DEMO/REAL realm;
+email or display name alone is insufficient. A proven duplicate becomes an
+alias of one canonical account and remains visible in historical references.
+Removing an account deactivates it but does not rebind or erase its operations.
 
 ## Lifecycle Invariants
 
@@ -71,6 +81,13 @@ The state source of truth is durable operation state. Event delivery is a
 notification mechanism and cannot be required to reach every upstream module
 for correctness. RAII manages subscriptions and runtime resources; it does
 not replace persistence or recovery after a process crash.
+
+For Batch 5, the durable source of truth is a logical operation journal with
+idempotency receipts and projections for physical trade and series queries.
+`TradeRecordDB` and `SignalRecordDB` remain useful physical/source adapters,
+but their current standalone write methods do not provide a shared Unit of
+Work. A future storage adapter must use one MDBX transaction for coordinated
+local facts or explicitly use recovery rather than claim atomicity.
 
 ## Branching and Execution Cardinality
 
@@ -140,3 +157,7 @@ graph editor, ADELIA, ImNodeFlow or MegaConnector.
 The adapter must preserve identities, cardinality, cancellation semantics and
 unknown execution state. It must not convert a rejected intent into a loss or
 turn a missing broker response into a cancellation.
+
+See [Trading System Batch 5A](trading-system-batch5a.md) for the account
+registry, multi-account roster, currency valuation, durable journal and crash
+recovery decisions.

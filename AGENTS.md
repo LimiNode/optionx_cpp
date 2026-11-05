@@ -38,6 +38,8 @@
   task scheduling, HTTP/WebSocket, trade queue, session DB и ограничения.
 - [Trading system Batch 2](guides/trading-system-batch2.md) - pure filters,
   decision snapshots and fixed-point sizing policies.
+- [Trading system Batch 5A](guides/trading-system-batch5a.md) - architecture
+  gate for durable identity, MDBX ownership and recovery; no runtime yet.
 - [Trading system Batch 3](guides/trading-system-batch3.md) - single-owner series
   transitions, settlement idempotency and fixed-roster split aggregation.
 - [Trade check API research](guides/trade-check2-research.md) - границы
