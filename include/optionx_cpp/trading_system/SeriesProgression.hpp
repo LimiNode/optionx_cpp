@@ -39,6 +39,54 @@ public:
 
     SeriesSnapshot snapshot() const { return m_state; }
 
+    /// \brief Hydrates the owner from a durable checkpoint and a fresh group owner.
+    ///
+    /// The checkpoint carries receipt and idempotency history because
+    /// `SeriesSnapshot` alone is only a read projection. All validation is
+    /// performed on a candidate copy before this owner is changed.
+    ProgressionResult hydrate(
+        const SeriesSnapshot& snapshot,
+        ExecutionGroupAggregator group,
+        const std::vector<TradeSettlement>& receipts,
+        const std::set<IntentId>& used_intents,
+        const std::set<std::string>& used_intent_keys) {
+        if (!snapshot.series.valid() || snapshot.series.state_revision ==
+                (std::numeric_limits<std::uint64_t>::max)()) {
+            return ProgressionResult::INVALID_IDENTITY;
+        }
+        SeriesProgression candidate(snapshot.series);
+        candidate.m_state = snapshot;
+        candidate.m_group = std::move(group);
+        for (const auto intent_id : used_intents) {
+            if (intent_id == 0) return ProgressionResult::INVALID_IDENTITY;
+        }
+        for (const auto& key : used_intent_keys) {
+            if (key.empty()) return ProgressionResult::INVALID_IDENTITY;
+        }
+        candidate.m_used_intents = used_intents;
+        candidate.m_used_intent_keys = used_intent_keys;
+        candidate.m_has_group = snapshot.status == SeriesStatus::WAITING_OUTCOME ||
+                                snapshot.status == SeriesStatus::UNRESOLVED ||
+                                snapshot.status == SeriesStatus::BLOCKED_ERROR;
+        if (candidate.m_has_group && !candidate.m_group.valid()) {
+            return ProgressionResult::INVALID_CONFIGURATION;
+        }
+        for (const auto& receipt : receipts) {
+            if (!receipt.valid() || !candidate.m_receipts.emplace(receipt.settlement_id, receipt).second) {
+                return ProgressionResult::SETTLEMENT_CONFLICT;
+            }
+            if (candidate.m_has_group &&
+                candidate.m_group.apply(receipt) != ProgressionResult::APPLIED) {
+                return ProgressionResult::INVALID_OUTCOME;
+            }
+        }
+        if (candidate.m_has_group && !same_outcome(candidate.m_group.outcome(), snapshot.outcome)) {
+            return ProgressionResult::INVALID_STATE;
+        }
+        swap(candidate);
+        return ProgressionResult::APPLIED;
+    }
+
     /// \brief Starts one operation with an immutable physical-member roster.
     ProgressionResult begin(
         const TradeIntent& intent,
@@ -140,6 +188,18 @@ public:
     }
 
 private:
+    static bool same_outcome(const GroupOutcome& lhs, const GroupOutcome& rhs) noexcept {
+        if (lhs.final != rhs.final || lhs.unresolved != rhs.unresolved ||
+            lhs.all_members_terminal != rhs.all_members_terminal ||
+            lhs.completed_members != rhs.completed_members ||
+            lhs.aggregation_status != rhs.aggregation_status || lhs.kind != rhs.kind ||
+            lhs.net_profit.has_value() != rhs.net_profit.has_value()) return false;
+        if (!lhs.net_profit) return true;
+        return lhs.net_profit->units == rhs.net_profit->units &&
+               lhs.net_profit->precision == rhs.net_profit->precision &&
+               lhs.net_profit->currency == rhs.net_profit->currency;
+    }
+
     ProgressionResult check_revision(std::uint64_t expected_revision) const noexcept {
         if (!m_state.series.valid()) return ProgressionResult::INVALID_IDENTITY;
         if (m_state.series.state_revision != expected_revision) {

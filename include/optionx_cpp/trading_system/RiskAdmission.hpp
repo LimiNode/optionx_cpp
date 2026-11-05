@@ -461,6 +461,60 @@ public:
         return m_snapshot;
     }
 
+    /// \brief Replaces in-memory state from validated durable facts.
+    ///
+    /// Validation completes before any owner state is changed. This method is
+    /// the narrow hydration boundary for Batch 5B; it does not query a broker
+    /// and does not infer missing reservations.
+    RiskAdmissionResult hydrate(
+        const RiskAccountSnapshot& snapshot,
+        const std::vector<RiskReservation>& reservations,
+        std::uint64_t next_reservation_id) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_config.valid() || !snapshot.valid() || next_reservation_id == 0) {
+            return RiskAdmissionResult::invalid_state(RiskAdmissionReason::INVALID_CONFIGURATION);
+        }
+        std::map<std::string, RiskReservation> by_key;
+        std::map<IntentId, std::string> by_intent;
+        std::uint64_t maximum_id = 0;
+        std::int64_t restored_active_risk = 0;
+        for (const auto& reservation : reservations) {
+            if (!reservation.valid() || reservation.scope.kind != m_config.scope.kind ||
+                reservation.scope.scope_id != m_config.scope.scope_id ||
+                reservation.potential_risk.currency != snapshot.available_balance.currency ||
+                reservation.potential_risk.precision != snapshot.available_balance.precision ||
+                !by_key.emplace(reservation.idempotency_key, reservation).second ||
+                !by_intent.emplace(reservation.intent_id, reservation.idempotency_key).second) {
+                return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+            }
+            if (reservation.reservation_id > maximum_id) maximum_id = reservation.reservation_id;
+            if (reservation.state != RiskReservationState::RELEASED &&
+                reservation.state != RiskReservationState::SETTLED) {
+                if (reservation.potential_risk.units >
+                    (std::numeric_limits<std::int64_t>::max)() - restored_active_risk) {
+                    return RiskAdmissionResult::rejected(RiskAdmissionReason::NUMERIC_OVERFLOW);
+                }
+                restored_active_risk += reservation.potential_risk.units;
+            }
+        }
+        if (restored_active_risk > snapshot.available_balance.units ||
+            (m_config.max_reserved_risk &&
+             restored_active_risk > m_config.max_reserved_risk->units)) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::BALANCE_LIMIT_EXCEEDED);
+        }
+        if (maximum_id == (std::numeric_limits<std::uint64_t>::max)() ||
+            next_reservation_id <= maximum_id) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::NUMERIC_OVERFLOW);
+        }
+        m_snapshot = snapshot;
+        m_by_key = std::move(by_key);
+        m_by_intent = std::move(by_intent);
+        m_next_reservation_id = next_reservation_id;
+        m_id_sequence_valid = true;
+        m_id_sequence_exhausted = false;
+        return {RiskAdmissionKind::APPLIED, RiskAdmissionReason::NONE, std::nullopt};
+    }
+
 private:
     static RiskAdmissionResult duplicate_snapshot() noexcept {
         return {RiskAdmissionKind::DUPLICATE, RiskAdmissionReason::NONE, std::nullopt};
