@@ -282,6 +282,48 @@ TEST(TradingSystemBatch5B, RosterRejectsDuplicatePhysicalTradeIdentity) {
     EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
 }
 
+TEST(TradingSystemBatch5B, AccountIdentityTombstoneAndRiskScopeConflictAreDurable) {
+    TestDatabase database;
+    ts::AccountIdentityRecord canonical{
+        11, "IntradeBar", "provider-account-1", "DEMO", 11, 1000, 0, true,
+        ts::trading_storage_schema_version};
+    ts::AccountIdentityRecord alias{
+        12, "IntradeBar", "provider-account-1", "DEMO", 11, 1000, 0, true,
+        ts::trading_storage_schema_version};
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_account(canonical).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_account(alias).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    ts::TradingSystemStorage storage(database.config());
+    ASSERT_TRUE(storage.account(11).value);
+    EXPECT_TRUE(storage.account(11).value->active);
+    EXPECT_EQ(storage.accounts_for_scope(1000).values.size(), 2U);
+
+    auto tombstone = *storage.account(12).value;
+    tombstone.active = false;
+    tombstone.identity_revision = 1;
+    {
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_account(tombstone).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    EXPECT_FALSE(storage.account(12).value->active);
+
+    auto conflicting = canonical;
+    conflicting.account_id = 13;
+    conflicting.canonical_account_id = 13;
+    conflicting.risk_scope_id = 2000;
+    {
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.put_account(conflicting).kind, ts::StorageResultKind::CONFLICT);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+}
+
 TEST(TradingSystemBatch5B, SeriesOwnerHydratesReceiptAndIdempotencyHistory) {
     ts::TradeSettlement first = settlement(901, 700);
     ts::TradeSettlement second = settlement(902, 701);

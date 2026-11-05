@@ -186,6 +186,25 @@ struct PhysicalTradeRecord {
     }
 };
 
+/// \brief Durable account identity binding without credentials or transport state.
+struct AccountIdentityRecord {
+    std::uint64_t account_id = 0;
+    std::string platform_type;
+    std::string external_identity;
+    std::string realm;
+    std::uint64_t canonical_account_id = 0;
+    std::uint64_t risk_scope_id = 0;
+    std::uint64_t identity_revision = 0;
+    bool active = true;
+    std::uint32_t schema_version = trading_storage_schema_version;
+
+    bool valid() const noexcept {
+        return account_id != 0 && canonical_account_id != 0 && risk_scope_id != 0 &&
+               !platform_type.empty() && schema_version == trading_storage_schema_version &&
+               (external_identity.empty() || !realm.empty());
+    }
+};
+
 struct SettlementRecord {
     TradeSettlement settlement;
     MoneyAmount native_profit;
@@ -354,6 +373,27 @@ inline PhysicalTradeRecord physical_trade_from_json(const nlohmann::json& value)
             value.value("schema_version", std::uint32_t{0})};
 }
 
+inline nlohmann::json account_to_json(const AccountIdentityRecord& value) {
+    return {{"account_id", value.account_id}, {"platform_type", value.platform_type},
+            {"external_identity", value.external_identity}, {"realm", value.realm},
+            {"canonical_account_id", value.canonical_account_id},
+            {"risk_scope_id", value.risk_scope_id},
+            {"identity_revision", value.identity_revision}, {"active", value.active},
+            {"schema_version", value.schema_version}};
+}
+
+inline AccountIdentityRecord account_from_json(const nlohmann::json& value) {
+    return {value.value("account_id", std::uint64_t{0}),
+            value.value("platform_type", std::string{}),
+            value.value("external_identity", std::string{}),
+            value.value("realm", std::string{}),
+            value.value("canonical_account_id", std::uint64_t{0}),
+            value.value("risk_scope_id", std::uint64_t{0}),
+            value.value("identity_revision", std::uint64_t{0}),
+            value.value("active", true),
+            value.value("schema_version", std::uint32_t{0})};
+}
+
 inline ReservationRecord reservation_from_json(const nlohmann::json& value) {
     ReservationRecord result;
     result.reservation_id = value.value("reservation_id", std::uint64_t{0});
@@ -471,6 +511,7 @@ public:
           m_intents(m_connection, "ts_intents"), m_rosters(m_connection, "ts_rosters"),
           m_reservations(m_connection, "ts_reservations"),
           m_physical_trades(m_connection, "ts_physical_trades"),
+          m_accounts(m_connection, "ts_accounts"),
           m_settlements(m_connection, "ts_settlements"),
           m_series(m_connection, "ts_series"), m_mm_state(m_connection, "ts_mm_state"),
           m_sequences(m_connection, "ts_sequences") {}
@@ -549,6 +590,20 @@ public:
                                               detail::physical_trade_from_json);
     }
 
+    StorageReadResult<AccountIdentityRecord> account(std::uint64_t id) const {
+        return read_json<AccountIdentityRecord>(m_accounts, std::to_string(id),
+                                                detail::account_from_json);
+    }
+
+    StorageCollectionResult<AccountIdentityRecord> accounts_for_scope(
+        std::uint64_t risk_scope_id) const {
+        return read_all_json<AccountIdentityRecord>(
+            m_accounts, detail::account_from_json,
+            [risk_scope_id](const AccountIdentityRecord& value) {
+                return value.risk_scope_id == risk_scope_id;
+            });
+    }
+
     StorageCollectionResult<PhysicalTradeRecord> physical_trades_in_state(
         const std::string& lifecycle_state) const {
         return read_all_json<PhysicalTradeRecord>(
@@ -579,6 +634,7 @@ private:
     mutable mdbxc::KeyValueTable<std::string, std::string> m_rosters;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_reservations;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_physical_trades;
+    mutable mdbxc::KeyValueTable<std::string, std::string> m_accounts;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_settlements;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_series;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_mm_state;
@@ -701,6 +757,41 @@ public:
         } catch (const std::exception& error) {
             m_failed = true;
             return {StorageResultKind::STORAGE_ERROR, 0, error.what()};
+        }
+    }
+
+    /// \brief Persists an account binding or its deactivated tombstone.
+    ///
+    /// A matching external identity may be represented by aliases only when
+    /// it resolves to the same risk scope. Ambiguous scope reuse is rejected.
+    StorageResult put_account(const AccountIdentityRecord& value) {
+        if (!valid_schema(value.schema_version) || !value.valid()) {
+            return fail({StorageResultKind::INVALID_ARGUMENT, "invalid account identity"});
+        }
+        try {
+            std::vector<std::pair<std::string, std::string>> encoded;
+            m_storage.m_accounts.load(encoded, m_transaction);
+            for (const auto& entry : encoded) {
+                const auto existing = detail::account_from_json(nlohmann::json::parse(entry.second));
+                if (existing.account_id == value.account_id ||
+                    value.external_identity.empty() ||
+                    existing.external_identity != value.external_identity ||
+                    existing.platform_type != value.platform_type ||
+                    existing.realm != value.realm) {
+                    continue;
+                }
+                if (existing.risk_scope_id != value.risk_scope_id) {
+                    return fail({StorageResultKind::CONFLICT,
+                                 "external account identity maps to another risk scope"});
+                }
+            }
+            return put_revisioned(m_storage.m_accounts, std::to_string(value.account_id),
+                                  detail::account_to_json(value).dump(),
+                                  value.identity_revision, value.identity_revision == 0
+                                      ? 0 : value.identity_revision - 1,
+                                  "identity_revision");
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
         }
     }
 
@@ -876,12 +967,13 @@ private:
 
     template<class Table>
     StorageResult put_revisioned(Table& table, const std::string& key, const std::string& encoded,
-                                 std::uint64_t new_revision, std::uint64_t expected_revision) {
+                                 std::uint64_t new_revision, std::uint64_t expected_revision,
+                                 const char* revision_field = "state_revision") {
         try {
             const auto existing = table.find(key, m_transaction);
             if (existing) {
                 nlohmann::json current = nlohmann::json::parse(*existing);
-                const auto current_revision = current.value("state_revision", std::uint64_t{0});
+                const auto current_revision = current.value(revision_field, std::uint64_t{0});
                 if (current_revision == new_revision && *existing == encoded) {
                     return {StorageResultKind::DUPLICATE, {}};
                 }

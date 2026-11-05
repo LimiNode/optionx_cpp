@@ -35,6 +35,7 @@ Unit of Work. The external broker call remains outside this local transaction.
 | `ts_intents` | Immutable logical intent payloads |
 | `ts_rosters` | Immutable execution-group rosters and account/risk-scope members |
 | `ts_physical_trades` | Physical trade identity and local lifecycle projection |
+| `ts_accounts` | Account identity bindings, aliases and deactivated tombstones |
 | `ts_reservations` | Risk reservation state and revision |
 | `ts_settlements` | Settlement receipt, native money and valuation evidence |
 | `ts_series` | Series checkpoint, including receipt and idempotency history |
@@ -87,8 +88,11 @@ scope becomes admissible again.
 
 The storage facade also exposes read-only recovery queries for journal event
 types, intents, group receipts, pending valuations, reservations by risk scope
-and physical trades by lifecycle state. They are projections over the same
-MDBX environment; they do not perform broker history matching.
+physical trades by lifecycle state and account bindings by RiskScope. Account
+records contain only stable identity metadata, canonical/alias mapping,
+realm, active status and RiskScope; credentials, cookies and proxy secrets are
+never stored. They are projections over the same MDBX environment; they do not
+perform broker history matching.
 
 ## Verification
 
@@ -96,7 +100,7 @@ MDBX environment; they do not perform broker history matching.
 and covers atomic settlement, rollback, duplicate replay after reopen,
 revision conflicts, immutable rosters including duplicate physical IDs,
 physical-trade persistence, pending and stale valuation, recovery queries,
-schema rejection, owner hydration and durable sequence rollback. The focused
-suite contains 11 tests.
+account tombstones and RiskScope conflicts, schema rejection, owner hydration
+and durable sequence rollback. The focused suite contains 12 tests.
 
 No test opens a broker connection or uses live credentials.
