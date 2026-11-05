@@ -68,6 +68,9 @@ Prove that two concurrent candidates cannot reserve the same available risk.
 Prove that rejected-before-submit releases risk while unknown execution keeps
 it reserved. Do not couple this batch to Intrade HTTP details.
 
+The in-memory contract and lifecycle rules are documented in
+[Trading System Batch 4](trading-system-batch4.md).
+
 ## Batch 5: Persistence and Recovery
 
 Extend existing storage through an explicit adapter or narrowly scoped tables.

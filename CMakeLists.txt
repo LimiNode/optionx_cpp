@@ -1116,6 +1116,8 @@ if(OPTIONX_BUILD_TESTS)
         trading_system_batch2_test
         trading_system_batch3_test
         trading_system_batch3_consumer_test
+        trading_system_batch4_test
+        trading_system_batch4_consumer_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
@@ -1194,6 +1196,10 @@ if(OPTIONX_BUILD_TESTS)
             set_target_properties(${test_name} PROPERTIES
                 CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
         endif()
+        if(test_name STREQUAL "trading_system_batch4_consumer_test")
+            set_target_properties(${test_name} PROPERTIES
+                CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+        endif()
 
         target_include_directories(${test_name} PRIVATE
             ${PROJECT_INCLUDE_DIRS}
@@ -1208,6 +1214,10 @@ if(OPTIONX_BUILD_TESTS)
         )
         if(MSVC)
             target_compile_options(${test_name} PRIVATE /bigobj)
+        endif()
+        if(test_name STREQUAL "trading_system_batch4_test")
+            find_package(Threads REQUIRED)
+            target_link_libraries(${test_name} PRIVATE Threads::Threads)
         endif()
         list(FIND OPTIONX_LIGHTWEIGHT_TESTS "${test_name}" lightweight_test_index)
         if(NOT lightweight_test_index EQUAL -1)
