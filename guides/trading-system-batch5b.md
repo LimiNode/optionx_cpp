@@ -59,9 +59,16 @@ same identity returns `CONFLICT`. A successful transition writes the journal,
 settlement, physical trade, series, reservation and policy projections in the
 same local transaction.
 
-Native cross-currency settlement is retained even without an FX quote, but the
-stored record is marked `logical_outcome_ready = false` and the operation
-returns `PENDING_VALUATION`. No logical WIN/LOSS/DRAW is fabricated.
+Native cross-currency settlement is retained even without an FX quote, or when
+the supplied quote is stale, but the stored record is marked
+`logical_outcome_ready = false` and the operation returns
+`PENDING_VALUATION`. No logical WIN/LOSS/DRAW is fabricated. The pending
+settlement still has a journal event, so recovery can distinguish a durable
+native fact from a transition that was never recorded.
+
+An execution roster rejects duplicate physical trade identities before it can
+be committed. This prevents repeated callback data from being mistaken for a
+second member of a split group.
 
 ## Hydration
 
@@ -78,11 +85,18 @@ These methods are owner boundaries, not crash recovery orchestration. Batch 5C
 will decide how unresolved external operations are reconciled and when a risk
 scope becomes admissible again.
 
+The storage facade also exposes read-only recovery queries for journal event
+types, intents, group receipts, pending valuations, reservations by risk scope
+and physical trades by lifecycle state. They are projections over the same
+MDBX environment; they do not perform broker history matching.
+
 ## Verification
 
 `tests/trading_system_batch5b_test.cpp` uses real temporary MDBX environments
 and covers atomic settlement, rollback, duplicate replay after reopen,
-revision conflicts, immutable rosters, physical-trade persistence, pending
-valuation, schema rejection, owner hydration and durable sequence rollback.
+revision conflicts, immutable rosters including duplicate physical IDs,
+physical-trade persistence, pending and stale valuation, recovery queries,
+schema rejection, owner hydration and durable sequence rollback. The focused
+suite contains 11 tests.
 
 No test opens a broker connection or uses live credentials.

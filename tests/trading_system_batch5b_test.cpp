@@ -144,13 +144,18 @@ TEST(TradingSystemBatch5B, AtomicSettlementWritesJournalAndAllProjections) {
     ts::TradingSystemStorage reopened(database.config());
     EXPECT_EQ(reopened.journal_by_key("settlement-event-900").kind,
               ts::StorageResultKind::APPLIED);
+    ASSERT_TRUE(reopened.journal_events("SETTLEMENT_APPLIED").succeeded());
+    EXPECT_EQ(reopened.journal_events("SETTLEMENT_APPLIED").values.size(), 1U);
     EXPECT_EQ(reopened.settlement(900).kind, ts::StorageResultKind::APPLIED);
+    EXPECT_EQ(reopened.settlements_for_group(80).values.size(), 1U);
     ASSERT_TRUE(reopened.series(12).value);
     EXPECT_EQ(reopened.series(12).value->series.state_revision, 1U);
     ASSERT_TRUE(reopened.reservation(500).value);
     EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::SETTLED);
+    EXPECT_EQ(reopened.reservations_for_scope(1000).values.size(), 1U);
     ASSERT_TRUE(reopened.physical_trade(700).value);
     EXPECT_EQ(reopened.physical_trade(700).value->lifecycle_state, "SETTLED");
+    EXPECT_EQ(reopened.physical_trades_in_state("SETTLED").values.size(), 1U);
     ASSERT_TRUE(reopened.money_management("mm.alpha").value);
     EXPECT_EQ(reopened.money_management("mm.alpha").value->last_settlement_id, 900U);
 }
@@ -233,6 +238,27 @@ TEST(TradingSystemBatch5B, NativeSettlementRemainsPendingWithoutValuation) {
     EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
     ASSERT_TRUE(storage.settlement(900).value);
     EXPECT_FALSE(storage.settlement(900).value->logical_outcome_ready);
+    EXPECT_EQ(storage.journal_by_key("settlement-event-900").kind,
+              ts::StorageResultKind::APPLIED);
+    EXPECT_EQ(storage.pending_valuations().values.size(), 1U);
+}
+
+TEST(TradingSystemBatch5B, StaleValuationRemainsPending) {
+    TestDatabase database;
+    ts::SettlementTransition pending = transition();
+    pending.settlement = settlement_record(CurrencyType::EUR);
+    pending.settlement.valuation = ts::ValuationFact{
+        CurrencyType::EUR, CurrencyType::USD, 11, 10, 123, "test", "fx-1",
+        "EXACT_FIXED_POINT", false, 2};
+    pending.journal.payload = ts::detail::settlement_to_json(pending.settlement.settlement);
+
+    ts::TradingSystemStorage storage(database.config());
+    auto unit = storage.begin();
+    EXPECT_EQ(unit.apply_settlement_atomic(pending).kind,
+              ts::StorageResultKind::PENDING_VALUATION);
+    EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    ASSERT_TRUE(storage.settlement(900).value);
+    EXPECT_FALSE(storage.settlement(900).value->logical_outcome_ready);
 }
 
 TEST(TradingSystemBatch5B, UnsupportedSchemaIsRejectedBeforeWrite) {
@@ -244,6 +270,16 @@ TEST(TradingSystemBatch5B, UnsupportedSchemaIsRejectedBeforeWrite) {
     EXPECT_EQ(unit.put_roster(value).kind, ts::StorageResultKind::UNSUPPORTED_SCHEMA);
     EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
     EXPECT_EQ(storage.roster(80).kind, ts::StorageResultKind::NOT_FOUND);
+}
+
+TEST(TradingSystemBatch5B, RosterRejectsDuplicatePhysicalTradeIdentity) {
+    TestDatabase database;
+    auto value = roster();
+    value.members[1].trade_id = value.members[0].trade_id;
+    ts::TradingSystemStorage storage(database.config());
+    auto unit = storage.begin();
+    EXPECT_EQ(unit.put_roster(value).kind, ts::StorageResultKind::INVALID_ARGUMENT);
+    EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
 }
 
 TEST(TradingSystemBatch5B, SeriesOwnerHydratesReceiptAndIdempotencyHistory) {

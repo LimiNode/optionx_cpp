@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,6 +79,17 @@ struct StorageReadResult {
     }
 };
 
+template <class T>
+struct StorageCollectionResult {
+    StorageResultKind kind = StorageResultKind::INVALID_STATE;
+    std::vector<T> values;
+    std::string message;
+
+    bool succeeded() const noexcept {
+        return kind == StorageResultKind::APPLIED;
+    }
+};
+
 /// \brief Immutable valuation evidence retained with a converted decision.
 struct ValuationFact {
     CurrencyType source = CurrencyType::UNKNOWN;
@@ -132,8 +144,9 @@ struct ExecutionRosterRecord {
     bool valid() const noexcept {
         if (group_id == 0 || intent_id == 0 || expected_members == 0 ||
             members.size() != expected_members) return false;
+        std::set<std::uint64_t> trade_ids;
         for (const auto& member : members) {
-            if (!member.valid()) return false;
+            if (!member.valid() || !trade_ids.insert(member.trade_id).second) return false;
         }
         return true;
     }
@@ -475,8 +488,43 @@ public:
         return read_json<JournalEvent>(m_journal, key, detail::journal_from_json);
     }
 
+    /// \brief Reads journal facts used by the future recovery stage.
+    ///
+    /// An empty event type returns all events. The query is read-only and
+    /// returns canonical facts, not mutable runtime projections.
+    StorageCollectionResult<JournalEvent> journal_events(
+        const std::string& event_type = {}) const {
+        return read_all_json<JournalEvent>(
+            m_journal, detail::journal_from_json,
+            [&event_type](const JournalEvent& value) {
+                return event_type.empty() || value.event_type == event_type;
+            });
+    }
+
+    StorageReadResult<TradeIntent> intent(IntentId id) const {
+        return read_json<TradeIntent>(m_intents, std::to_string(id),
+                                      [](const nlohmann::json& value) {
+                                          return value.get<TradeIntent>();
+                                      });
+    }
+
     StorageReadResult<SettlementRecord> settlement(SettlementId id) const {
         return read_json<SettlementRecord>(m_settlements, std::to_string(id), detail::settlement_record_from_json);
+    }
+
+    StorageCollectionResult<SettlementRecord> settlements_for_group(
+        ExecutionGroupId id) const {
+        return read_all_json<SettlementRecord>(
+            m_settlements, detail::settlement_record_from_json,
+            [id](const SettlementRecord& value) {
+                return value.settlement.execution_group_id == id;
+            });
+    }
+
+    StorageCollectionResult<SettlementRecord> pending_valuations() const {
+        return read_all_json<SettlementRecord>(
+            m_settlements, detail::settlement_record_from_json,
+            [](const SettlementRecord& value) { return !value.logical_outcome_ready; });
     }
 
     StorageReadResult<ExecutionRosterRecord> roster(ExecutionGroupId id) const {
@@ -487,9 +535,27 @@ public:
         return read_json<ReservationRecord>(m_reservations, std::to_string(id), detail::reservation_from_json);
     }
 
+    StorageCollectionResult<ReservationRecord> reservations_for_scope(
+        std::uint64_t risk_scope_id) const {
+        return read_all_json<ReservationRecord>(
+            m_reservations, detail::reservation_from_json,
+            [risk_scope_id](const ReservationRecord& value) {
+                return value.risk_scope_id == risk_scope_id;
+            });
+    }
+
     StorageReadResult<PhysicalTradeRecord> physical_trade(std::uint64_t id) const {
         return read_json<PhysicalTradeRecord>(m_physical_trades, std::to_string(id),
                                               detail::physical_trade_from_json);
+    }
+
+    StorageCollectionResult<PhysicalTradeRecord> physical_trades_in_state(
+        const std::string& lifecycle_state) const {
+        return read_all_json<PhysicalTradeRecord>(
+            m_physical_trades, detail::physical_trade_from_json,
+            [&lifecycle_state](const PhysicalTradeRecord& value) {
+                return lifecycle_state.empty() || value.lifecycle_state == lifecycle_state;
+            });
     }
 
     StorageReadResult<SeriesCheckpoint> series(SeriesId id) const {
@@ -539,6 +605,33 @@ private:
             return {StorageResultKind::APPLIED, std::move(parsed), {}};
         } catch (const std::exception& error) {
             return {StorageResultKind::STORAGE_ERROR, std::nullopt, error.what()};
+        }
+    }
+
+    template<class T, class Parser, class Predicate>
+    StorageCollectionResult<T> read_all_json(
+        mdbxc::KeyValueTable<std::string, std::string>& table,
+        Parser parser,
+        Predicate predicate) const {
+        try {
+            std::vector<std::pair<std::string, std::string>> encoded;
+            table.load(encoded);
+            std::vector<T> values;
+            values.reserve(encoded.size());
+            for (const auto& entry : encoded) {
+                const auto document = nlohmann::json::parse(entry.second);
+                if (document.contains("schema_version") &&
+                    document.at("schema_version").get<std::uint32_t>() !=
+                        trading_storage_schema_version) {
+                    return {StorageResultKind::UNSUPPORTED_SCHEMA, {},
+                            "unsupported durable schema"};
+                }
+                auto parsed = parser(document);
+                if (predicate(parsed)) values.push_back(std::move(parsed));
+            }
+            return {StorageResultKind::APPLIED, std::move(values), {}};
+        } catch (const std::exception& error) {
+            return {StorageResultKind::STORAGE_ERROR, {}, error.what()};
         }
     }
 };
@@ -691,28 +784,31 @@ public:
              transition.settlement.valuation->target != transition.logical_currency)) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "valuation fact does not match native and logical currencies"});
         }
-        if (transition.settlement.native_profit.currency != transition.logical_currency &&
-            !transition.settlement.valuation) {
-            auto pending = transition.settlement;
-            pending.logical_outcome_ready = false;
-            auto result = put_settlement(pending);
-            if (result.kind != StorageResultKind::APPLIED) return result;
-            return {StorageResultKind::PENDING_VALUATION, "native settlement stored; valuation is missing"};
-        }
 
         try {
+            auto persisted = transition.settlement;
+            const bool valuation_ready =
+                transition.settlement.native_profit.currency == transition.logical_currency ||
+                (transition.settlement.valuation && transition.settlement.valuation->fresh);
+            if (!valuation_ready) persisted.logical_outcome_ready = false;
+
             const auto existing = m_storage.m_settlements.find(
                 std::to_string(transition.settlement.settlement.settlement_id), m_transaction);
             if (existing) {
-                const auto encoded = detail::settlement_record_to_json(transition.settlement).dump();
+                const auto encoded = detail::settlement_record_to_json(persisted).dump();
                 if (*existing == encoded) return {StorageResultKind::DUPLICATE, {}};
                 return fail({StorageResultKind::CONFLICT, "settlement payload conflict"});
             }
 
             const auto journal_result = append_journal(transition.journal);
             if (journal_result.kind != StorageResultKind::APPLIED) return journal_result;
-            const auto settlement_result = put_settlement(transition.settlement);
+            const auto settlement_result = put_settlement(persisted);
             if (settlement_result.kind != StorageResultKind::APPLIED) return settlement_result;
+
+            if (!valuation_ready) {
+                return {StorageResultKind::PENDING_VALUATION,
+                        "native settlement stored; valuation is missing or stale"};
+            }
 
             if (transition.series) {
                 const auto result = put_series(*transition.series, transition.expected_series_revision);
