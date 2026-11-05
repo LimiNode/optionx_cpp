@@ -2,10 +2,12 @@
 
 ## Scope
 
-This audit was performed before adding a new trading-system runtime. The goal
-is to reuse the existing OptionX contracts and identify only the missing
-pieces. The result is an implementation map, not a claim that the proposed
-domain already exists.
+This audit was performed before adding a new trading-system runtime. Batches 1
+through 4 now provide the tested in-memory identity, policy, progression and
+risk contracts. The goal remains to reuse existing OptionX contracts and
+identify only the missing durable pieces. The result is an implementation map,
+not a claim that a durable runtime already exists. See [Batch 5A](trading-system-batch5a.md)
+for the architecture gate.
 
 ## Inventory
 
@@ -22,25 +24,51 @@ domain already exists.
 | `components/.../AccountInfoProvider.hpp` | EXTEND | Provides account information by account, symbol, option and order. A decision layer still needs an immutable, freshness-aware account snapshot. |
 | `market_data/` and Router | REUSE | Provider selection, subscription ownership, history continuity and source metadata already exist. The trading system should consume snapshots/batches and not reimplement routing. |
 | `utils/tasks`, `utils/pubsub`, `lifecycle.hpp` | REUSE | TaskManager, EventBus/EventMediator and LifecycleStack already define scheduling and staged shutdown. No new scheduler or bus is needed. |
-| `storages/SignalRecordDB.hpp` | EXTEND | Async/synchronous queueing, signal ID, trade ID and timestamp lookup are available. Add a dedicated operation/series persistence adapter rather than hiding new state in signal fields. |
-| `storages/TradeRecordDB.hpp` | EXTEND | Persistent linear trade IDs, UID/broker identity indices, upsert and recovery queries exist. It can store physical trade snapshots but not all logical intent/group transitions. |
-| MDBX dependency | REUSE | Existing storage is the persistence engine. A second storage engine would split recovery semantics. |
+| `storages/SignalRecordDB.hpp` | REUSE + ADAPTER | Async/synchronous queueing, signal ID, trade ID and timestamp lookup are available. It remains a source adapter, not the operation journal. |
+| `storages/TradeRecordDB.hpp` | REUSE + ADAPTER | Persistent linear trade IDs, UID/broker identity indices, upsert and recovery queries exist. It stores physical snapshots, not all logical intent/group transitions. |
+| MDBX dependency | REUSE WITH SHARED OWNERSHIP | Existing storage is the only persistence engine. A Batch 5 Unit of Work must share one environment/transaction context; current standalone DB facades do not yet provide that contract. |
 | ADELIA/MegaConnector concepts | NOT_NEEDED | They belong to the host/adapter layer and must not become OptionX dependencies. |
 
-## Gaps That Are Real
+## Existing In-Memory Capabilities
 
-1. A durable `intent_id`, `series_id`, `execution_group_id` and revision model is
-   missing from the broker-facing DTOs.
-2. There is no common typed lifecycle for rejected, cancelled, admitted,
-   submitted, unknown, executed and settled logical intents.
-3. There is no atomic risk admission/reservation owner shared by concurrent
-   strategies.
-4. `TradeRecordDB` and `SignalRecordDB` do not constitute an append-only
-   lifecycle journal or an idempotent settlement ledger.
-5. Account data is available through providers, but a decision snapshot needs
-   freshness/availability metadata and a coherent capture boundary.
-6. There is no generic split-group aggregator or explicit execution-cardinality
-   contract.
+These capabilities already exist in Batches 1 through 4 and must be reused,
+not re-designed by Batch 5:
+
+1. `TradeIntent` carries stable intent, series and execution-group identity with
+   validation and revision checks.
+2. `ExecutionCardinality` and `ExecutionGroupIdentity` define the supported
+   zero/one, exact-one, multiple and split-group policies.
+3. `SeriesProgression` owns one in-memory series, applies terminal outcomes and
+   rejects stale revisions, duplicate settlements and unresolved progression.
+4. `ExecutionGroupAggregator` fixes a physical roster, deduplicates settlement
+   receipts and aggregates terminal members without counting callbacks.
+5. `RiskAdmission` is a single-scope, mutex-protected owner. It validates
+   snapshots, prevents concurrent over-reservation, tracks idempotency and
+   retains risk for submitted or unknown execution.
+
+These owners are process-local projections. Their existing concurrency and
+idempotency guarantees do not imply restart recovery or cross-process
+coordination.
+
+## Missing Durable Capabilities
+
+The actual Batch 5 gaps are:
+
+1. A durable operation journal for intent, group roster, physical links,
+   reservation transitions, broker observations and settlement receipts.
+2. Durable series snapshots, strategy-state revisions and the reservation ID
+   sequence needed to hydrate the in-memory owners without reusing identities.
+3. A shared MDBX Unit of Work for one settlement transition. Current standalone
+   `TradeRecordDB` and `SignalRecordDB` writes cannot be made atomic by an
+   external wrapper.
+4. An owner-hydration and admission gate that restores projections before new
+   operations are accepted, including unresolved-operation reconciliation.
+5. Durable account aliases, identity revisions, risk-scope conflict handling and
+   deactivation tombstones.
+6. Native multi-currency settlement facts and persisted valuation provenance;
+   missing valuation must block logical progression rather than invent P&L.
+7. Crash recovery for partial multi-account submission, pending broker orders,
+   reset boundaries and callbacks accepted in memory but not durably committed.
 
 ## Existing Recovery Strengths
 
@@ -67,3 +95,7 @@ that record visible until broker reconciliation proves the outcome.
 - Use existing lifecycle/task/pub-sub facilities.
 - Add persistence only after the state machine and idempotency keys are
   specified.
+- Do not claim cross-table atomicity until repository methods accept a shared
+  transaction context and tests prove rollback/commit behavior.
+- Keep native money facts and valuation provenance; do not recompute historical
+  decisions from current exchange rates.

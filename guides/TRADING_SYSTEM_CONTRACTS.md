@@ -10,7 +10,9 @@ The original sketches below are not the runtime API. See
 [Batch 2](trading-system-batch2.md) for implemented decision/sizing contracts and
 [Batch 3](trading-system-batch3.md) for fixed-point outcomes, series transitions
 and settlement idempotency. The Batch 3 owner is in-memory only, not the durable
-state/recovery adapter proposed here.
+state/recovery adapter proposed here. See [Batch 5A](trading-system-batch5a.md)
+for the approved identity, valuation, transaction ownership and recovery
+boundaries before implementing durable storage.
 
 ## Stable IDs and States
 
@@ -174,11 +176,14 @@ normally total confirmed net P&L. One unknown member keeps the group pending.
 
 ## Persistence and Recovery
 
-The persistence adapter must support:
+The future persistence adapter must support:
 
 - create/update intent with monotonic revision;
 - create/update series state;
 - create execution group and physical trade links;
+- persist the immutable physical roster, account IDs, risk scopes and native
+  monetary facts before the first possible broker side effect;
+- persist versioned state for stateful money-management modules;
 - append or idempotently apply settlement identity;
 - find unresolved `SUBMITTING`/`EXECUTION_UNKNOWN` operations;
 - reconcile broker identity before retry;
@@ -186,8 +191,22 @@ The persistence adapter must support:
 
 `SignalRecordDB` and `TradeRecordDB` remain adapters and sources of existing
 signal/trade facts. They should not be silently treated as a complete journal.
-The first implementation can use a dedicated table or a carefully scoped
-extension, but it must not hide logical intent state in free-form comments.
+Their current public writes own their connection/transaction boundaries. A
+future Unit of Work must therefore use a shared MDBX environment and explicit
+transaction-aware repository operations, or document a compensating recovery
+protocol. Wrapping the current standalone methods is not atomicity. The first
+implementation can use dedicated named tables or a carefully scoped extension,
+but it must not hide logical intent state in free-form comments.
+
+The local transaction ends before the external broker call. It can make a
+command ready and record submission-started, but it cannot atomically commit a
+broker side effect. A timeout after a possible side effect remains
+`EXECUTION_UNKNOWN`; it retains risk and cannot trigger an automatic resend.
+
+For multi-currency outcomes, preserve native values and persist the selected
+valuation fact whenever conversion affects a decision or aggregate. A global
+base currency is reporting policy, not a requirement that every account or
+stake use that currency.
 
 ## Cancellation Rules
 

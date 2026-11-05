@@ -2,10 +2,10 @@
 
 ## Delivery Rule
 
-The new domain is delivered as small, testable batches. The current batch is
-the architecture/reuse audit only. It adds no production trading runtime and
-does not open live trades. Each later batch must preserve the existing broker,
-Router, task and storage contracts.
+The new domain is delivered as small, testable batches. Batches 1 through 4 are
+merged in `main`. Batch 5 is deliberately split into architecture, durable
+storage, and recovery stages. Each stage must preserve the existing broker,
+Router, task and storage contracts and must not open live trades.
 
 ## Batch 0: Foundation Audit
 
@@ -73,7 +73,30 @@ The in-memory contract and lifecycle rules are documented in
 
 ## Batch 5: Persistence and Recovery
 
-Extend existing storage through an explicit adapter or narrowly scoped tables.
+Batch 5 is governed by [Batch 5A architecture decisions](trading-system-batch5a.md)
+and is delivered in three separate review gates.
+
+### Batch 5A: Architecture and Contracts
+
+Document account identity and aliases, risk scopes, multi-account execution
+rosters, native currency and valuation provenance, money-management state,
+module composition, journal ownership, MDBX transaction ownership and recovery
+boundaries. Separate existing in-memory owners from missing durable capabilities,
+define owner hydration and per-risk-scope admission gates, and specify how
+cross-currency physical settlements remain non-terminal without valuation facts.
+Do not add runtime code or schema migrations. Stop for review.
+
+### Batch 5B: Durable Storage and Local Atomicity
+
+After 5A approval, extend existing storage through an explicit shared
+environment/transaction adapter or narrowly scoped named tables. Preserve the
+standalone `TradeRecordDB` and `SignalRecordDB` APIs. Implement durable
+idempotency, revisions, roster/reservation facts and one local Unit of Work for
+settlement application. Do not claim atomicity with a broker call.
+
+### Batch 5C: Simulated Recovery and Reconciliation
+
+After 5B approval, add an offline simulated execution/reconciliation adapter.
 The recovery test must simulate a crash at each boundary:
 
 1. before admission;
@@ -129,6 +152,7 @@ Every batch requires:
 - no secret or live-account material in fixtures;
 - a diff review showing that unrelated user changes were preserved.
 
-The first production PR after this audit should therefore be Batch 1 only. It
-should not include Kelly, Labouchere, news providers, GUI integration or a
-graph runtime.
+Batch 5A, 5B and 5C must remain separate Draft PRs until each review gate is
+accepted. None of them includes live Polymarket integration, an exchange
+orderbook/position engine, a GUI/graph editor, an FX aggregation engine, or a
+new scheduler/event bus.
