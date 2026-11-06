@@ -36,8 +36,10 @@ Unit of Work. The external broker call remains outside this local transaction.
 | `ts_rosters` | Immutable execution-group rosters and account/risk-scope members |
 | `ts_physical_trades` | Physical trade identity and local lifecycle projection |
 | `ts_accounts` | Account identity bindings, aliases and deactivated tombstones |
+| `ts_risk_scope_gates` | Durable fail-closed gates for account/RiskScope conflicts |
 | `ts_reservations` | Risk reservation state and revision |
 | `ts_settlements` | Settlement receipt, native money and valuation evidence |
+| `ts_valuation_resolutions` | Immutable second-stage FX valuation facts |
 | `ts_series` | Series checkpoint, including receipt and idempotency history |
 | `ts_mm_state` | Versioned policy-specific money-management state |
 | `ts_sequences` | Durable next-value counters |
@@ -67,6 +69,13 @@ the supplied quote is stale, but the stored record is marked
 settlement still has a journal event, so recovery can distinguish a durable
 native fact from a transition that was never recorded.
 
+Pending valuation is completed by `resolve_pending_valuation_atomic()`. It does
+not rewrite the native settlement: the selected FX fact and converted logical
+profit are stored as an immutable valuation-resolution record, while the
+logical projections are applied in the same Unit of Work. A resolved native
+settlement is therefore excluded from `pending_valuations()` even though its
+original native record remains unchanged.
+
 An execution roster rejects duplicate physical trade identities before it can
 be committed. This prevents repeated callback data from being mistaken for a
 second member of a split group.
@@ -77,6 +86,11 @@ second member of a split group.
 `ExecutionGroupAggregator`, receipt history and used intent/idempotency sets.
 It validates a candidate owner before publishing it, so a failed hydration
 does not partially replace the current owner.
+
+The checkpoint stores the current `GroupOutcome`. Receipts from completed
+groups remain idempotency history, but only receipts matching the current
+group roster are replayed into the current aggregator. A terminal current
+aggregator cannot be restored as `WAITING_OUTCOME`.
 
 `RiskAdmission::hydrate()` validates account facts, scope ownership, duplicate
 reservation identities and the next reservation ID before replacing its
@@ -94,6 +108,19 @@ realm, active status and RiskScope; credentials, cookies and proxy secrets are
 never stored. They are projections over the same MDBX environment; they do not
 perform broker history matching.
 
+### Physical-trade boundary
+
+`ts_physical_trades` is the Batch 5B physical-trade projection owned by
+`TradingSystemStorage`. It is not a second claim that the standalone
+`TradeRecordDB` has been updated. `TradeRecordDB` and `SignalRecordDB` retain
+their existing connection and transaction ownership, so their public writes
+must not be called as if they participated in this Unit of Work. Until a
+transaction-aware repository bridge is introduced, hosts must treat
+`ts_physical_trades` plus the logical journal as the durable Batch 5B source
+for this transition and reconcile any external `TradeRecordDB` snapshot through
+an explicit later protocol. There is no atomic commit spanning these separate
+repository APIs or an external broker.
+
 ## Verification
 
 `tests/trading_system_batch5b_test.cpp` uses real temporary MDBX environments
@@ -101,6 +128,8 @@ and covers atomic settlement, rollback, duplicate replay after reopen,
 revision conflicts, immutable rosters including duplicate physical IDs,
 physical-trade persistence, pending and stale valuation, recovery queries,
 account tombstones and RiskScope conflicts, schema rejection, owner hydration
-and durable sequence rollback. The focused suite contains 12 tests.
+and durable sequence rollback. It also covers multi-step series hydration,
+late-stage rollback after earlier projection writes, durable risk gates and
+malformed read rejection. The focused suite contains 19 tests.
 
 No test opens a broker connection or uses live credentials.

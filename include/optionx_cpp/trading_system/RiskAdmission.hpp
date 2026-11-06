@@ -55,6 +55,7 @@ struct RiskAdmissionConfig {
     RiskScope scope;
     std::int64_t max_snapshot_age_ms = 30'000;
     std::optional<MoneyAmount> max_reserved_risk;
+    bool admission_blocked = false;
 
     bool valid() const noexcept {
         return scope.valid() && max_snapshot_age_ms >= 0 &&
@@ -135,7 +136,8 @@ enum class RiskAdmissionReason {
     INVALID_TRANSITION,
     PAYLOAD_CONFLICT,
     REVISION_CONFLICT,
-    INVALID_SETTLEMENT_EVIDENCE
+    INVALID_SETTLEMENT_EVIDENCE,
+    RISK_SCOPE_BLOCKED
 };
 
 struct RiskReservation {
@@ -151,9 +153,20 @@ struct RiskReservation {
     std::uint64_t account_revision = 0;
 
     bool valid() const noexcept {
-        return reservation_id != 0 && scope.valid() && intent_id != 0 &&
-               !idempotency_key.empty() && stake.valid_metadata() &&
-               potential_risk.valid_metadata();
+        const bool valid_scope_kind = scope.kind == RiskScopeKind::ACCOUNT ||
+                                      scope.kind == RiskScopeKind::STRATEGY ||
+                                      scope.kind == RiskScopeKind::GROUP;
+        return reservation_id != 0 && valid_scope_kind && scope.valid() && intent_id != 0 &&
+               !idempotency_key.empty() && execution_group.valid_for(cardinality) &&
+               stake.valid_metadata() && stake.units > 0 &&
+               potential_risk.valid_metadata() && potential_risk.units > 0 &&
+               stake.currency == potential_risk.currency &&
+               stake.precision == potential_risk.precision &&
+               (state == RiskReservationState::RESERVED ||
+                state == RiskReservationState::SUBMITTED ||
+                state == RiskReservationState::EXECUTION_UNKNOWN ||
+                state == RiskReservationState::RELEASED ||
+                state == RiskReservationState::SETTLED);
     }
 };
 
@@ -326,6 +339,9 @@ public:
     RiskAdmissionResult reserve(const RiskRequest& request, std::int64_t now_ms) {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!valid()) return RiskAdmissionResult::rejected(RiskAdmissionReason::INVALID_CONFIGURATION);
+        if (m_config.admission_blocked) {
+            return RiskAdmissionResult::unavailable(RiskAdmissionReason::RISK_SCOPE_BLOCKED);
+        }
         if (!request.valid_identity()) return RiskAdmissionResult::rejected(RiskAdmissionReason::INVALID_REQUEST);
 
         const auto existing = m_by_key.find(request.idempotency_key);
@@ -471,12 +487,13 @@ public:
         const std::vector<RiskReservation>& reservations,
         std::uint64_t next_reservation_id) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (!m_config.valid() || !snapshot.valid() || next_reservation_id == 0) {
+        if (!m_config.valid() || !snapshot.valid()) {
             return RiskAdmissionResult::invalid_state(RiskAdmissionReason::INVALID_CONFIGURATION);
         }
         std::map<std::string, RiskReservation> by_key;
         std::map<IntentId, std::string> by_intent;
         std::uint64_t maximum_id = 0;
+        std::set<std::uint64_t> reservation_ids;
         std::int64_t restored_active_risk = 0;
         for (const auto& reservation : reservations) {
             if (!reservation.valid() || reservation.scope.kind != m_config.scope.kind ||
@@ -484,7 +501,8 @@ public:
                 reservation.potential_risk.currency != snapshot.available_balance.currency ||
                 reservation.potential_risk.precision != snapshot.available_balance.precision ||
                 !by_key.emplace(reservation.idempotency_key, reservation).second ||
-                !by_intent.emplace(reservation.intent_id, reservation.idempotency_key).second) {
+                !by_intent.emplace(reservation.intent_id, reservation.idempotency_key).second ||
+                !reservation_ids.insert(reservation.reservation_id).second) {
                 return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
             }
             if (reservation.reservation_id > maximum_id) maximum_id = reservation.reservation_id;
@@ -502,8 +520,14 @@ public:
              restored_active_risk > m_config.max_reserved_risk->units)) {
             return RiskAdmissionResult::rejected(RiskAdmissionReason::BALANCE_LIMIT_EXCEEDED);
         }
-        if (maximum_id == (std::numeric_limits<std::uint64_t>::max)() ||
-            next_reservation_id <= maximum_id) {
+        const bool exhausted = next_reservation_id == 0;
+        if (exhausted && maximum_id != (std::numeric_limits<std::uint64_t>::max)()) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::NUMERIC_OVERFLOW);
+        }
+        if (!exhausted && maximum_id == (std::numeric_limits<std::uint64_t>::max)()) {
+            return RiskAdmissionResult::rejected(RiskAdmissionReason::NUMERIC_OVERFLOW);
+        }
+        if (!exhausted && next_reservation_id <= maximum_id) {
             return RiskAdmissionResult::rejected(RiskAdmissionReason::NUMERIC_OVERFLOW);
         }
         m_snapshot = snapshot;
@@ -511,7 +535,7 @@ public:
         m_by_intent = std::move(by_intent);
         m_next_reservation_id = next_reservation_id;
         m_id_sequence_valid = true;
-        m_id_sequence_exhausted = false;
+        m_id_sequence_exhausted = exhausted;
         return {RiskAdmissionKind::APPLIED, RiskAdmissionReason::NONE, std::nullopt};
     }
 

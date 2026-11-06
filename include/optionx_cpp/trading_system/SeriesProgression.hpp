@@ -75,12 +75,20 @@ public:
             if (!receipt.valid() || !candidate.m_receipts.emplace(receipt.settlement_id, receipt).second) {
                 return ProgressionResult::SETTLEMENT_CONFLICT;
             }
+            // Receipts from completed groups remain idempotency history, but
+            // only receipts belonging to the current roster may be replayed
+            // into the current aggregator.
             if (candidate.m_has_group &&
+                receipt.execution_group_id == snapshot.current_group_id &&
                 candidate.m_group.apply(receipt) != ProgressionResult::APPLIED) {
                 return ProgressionResult::INVALID_OUTCOME;
             }
         }
         if (candidate.m_has_group && !same_outcome(candidate.m_group.outcome(), snapshot.outcome)) {
+            return ProgressionResult::INVALID_STATE;
+        }
+        if (candidate.m_has_group && candidate.m_group.outcome().final &&
+            snapshot.status == SeriesStatus::WAITING_OUTCOME) {
             return ProgressionResult::INVALID_STATE;
         }
         swap(candidate);
