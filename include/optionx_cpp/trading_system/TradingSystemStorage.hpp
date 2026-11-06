@@ -320,6 +320,18 @@ struct SettlementTransition {
     CurrencyType logical_currency = CurrencyType::UNKNOWN;
     std::vector<ReservationRecord> group_reservations;
     std::vector<std::uint64_t> expected_group_reservation_revisions;
+
+    /// \brief Exact physical-member to reservation binding for group completion.
+    ///
+    /// The legacy group_reservations fields remain accepted for source
+    /// compatibility, but new callers should use this explicit mapping.
+    struct ReservationBinding {
+        std::uint64_t trade_id = 0;
+        ReservationRecord reservation;
+        std::uint64_t expected_revision = 0;
+    };
+    std::vector<ReservationBinding> group_reservation_bindings;
+    std::optional<JournalEvent> completion_journal;
 };
 
 struct ValuationTransition {
@@ -337,6 +349,7 @@ struct ValuationTransition {
     std::uint64_t expected_money_management_revision = 0;
     std::vector<ReservationRecord> group_reservations;
     std::vector<std::uint64_t> expected_group_reservation_revisions;
+    std::vector<SettlementTransition::ReservationBinding> group_reservation_bindings;
 };
 
 namespace detail {
@@ -693,6 +706,15 @@ inline bool durable_record_valid(const SeriesCheckpoint& value) noexcept {
     if (!value.series.valid() || !valid_status || !valid_group_outcome(value.current_outcome)) {
         return false;
     }
+    const bool idle_status = value.status == SeriesStatus::ACTIVE ||
+                             value.status == SeriesStatus::COMPLETED;
+    const bool pending_status = value.status == SeriesStatus::WAITING_OUTCOME ||
+                                value.status == SeriesStatus::UNRESOLVED ||
+                                value.status == SeriesStatus::BLOCKED_ERROR;
+    if ((idle_status && (value.current_intent_id != 0 || value.current_group_id != 0)) ||
+        (pending_status && (value.current_intent_id == 0 || value.current_group_id == 0))) {
+        return false;
+    }
     std::set<SettlementId> settlement_ids;
     for (const auto& receipt : value.receipts) {
         if (!receipt.valid() || !settlement_ids.insert(receipt.settlement_id).second) return false;
@@ -794,18 +816,6 @@ inline bool same_group_outcome(const GroupOutcome& lhs, const GroupOutcome& rhs)
            lhs.net_profit->currency == rhs.net_profit->currency;
 }
 
-inline std::optional<GroupOutcome> normalize_group_outcome(
-    const GroupOutcome& native, const ValuationFact* valuation, CurrencyType target) {
-    auto result = native;
-    if (!result.net_profit) return result;
-    if (result.net_profit->currency == target) return result;
-    if (!valuation) return std::nullopt;
-    const auto converted = convert_money(*result.net_profit, *valuation, target);
-    if (!converted) return std::nullopt;
-    result.net_profit = *converted;
-    return result;
-}
-
 } // namespace detail
 
 /// \class TradingSystemStorage
@@ -821,6 +831,7 @@ public:
           m_accounts(m_connection, "ts_accounts"),
           m_risk_scope_gates(m_connection, "ts_risk_scope_gates"),
           m_settlements(m_connection, "ts_settlements"),
+          m_group_settlement_index(m_connection, "ts_group_settlement_index"),
           m_valuation_resolutions(m_connection, "ts_valuation_resolutions"),
           m_series(m_connection, "ts_series"), m_mm_state(m_connection, "ts_mm_state"),
           m_sequences(m_connection, "ts_sequences") {}
@@ -871,11 +882,24 @@ public:
 
     StorageCollectionResult<SettlementRecord> settlements_for_group(
         ExecutionGroupId id) const {
-        return read_all_json<SettlementRecord>(
-            m_settlements, detail::settlement_record_from_json,
-            [id](const SettlementRecord& value) {
-                return value.settlement.execution_group_id == id;
-            });
+        try {
+            std::vector<std::pair<std::string, std::string>> index_entries;
+            m_group_settlement_index.load(index_entries);
+            std::vector<SettlementRecord> values;
+            const auto prefix = std::to_string(id) + ":";
+            for (const auto& entry : index_entries) {
+                if (entry.first.rfind(prefix, 0) != 0) continue;
+                const auto value = settlement(std::stoull(entry.second));
+                if (value.kind == StorageResultKind::APPLIED && value.value) {
+                    values.push_back(*value.value);
+                } else if (value.kind != StorageResultKind::NOT_FOUND) {
+                    return {value.kind, {}, value.message};
+                }
+            }
+            return {StorageResultKind::APPLIED, std::move(values), {}};
+        } catch (const std::exception& error) {
+            return {StorageResultKind::STORAGE_ERROR, {}, error.what()};
+        }
     }
 
     StorageCollectionResult<SettlementRecord> pending_valuations() const {
@@ -971,13 +995,14 @@ private:
     mutable mdbxc::KeyValueTable<std::string, std::string> m_accounts;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_risk_scope_gates;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_settlements;
+    mutable mdbxc::KeyValueTable<std::string, std::string> m_group_settlement_index;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_valuation_resolutions;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_series;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_mm_state;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_sequences;
 
     static mdbxc::Config normalize_config(mdbxc::Config config) {
-        if (config.max_dbs < 16) config.max_dbs = 16;
+        if (config.max_dbs < 17) config.max_dbs = 17;
         return config;
     }
 
@@ -1193,7 +1218,7 @@ public:
         if (!valid_schema(value.schema_version)) {
             return fail({StorageResultKind::UNSUPPORTED_SCHEMA, "unsupported series schema"});
         }
-        if (!valid_schema(value.schema_version) || !value.series.valid()) {
+        if (!valid_schema(value.schema_version) || !detail::durable_record_valid(value)) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid series checkpoint"});
         }
         try {
@@ -1247,6 +1272,31 @@ public:
                              detail::settlement_record_to_json(value).dump());
     }
 
+    /// \brief Rebuilds the derived group index from canonical settlement facts.
+    ///
+    /// This is an explicit maintenance/recovery operation. Normal settlement
+    /// writes update the index in the same Unit of Work and do not scan history.
+    StorageResult rebuild_group_settlement_index() {
+        try {
+            std::vector<std::pair<std::string, std::string>> encoded;
+            m_storage.m_settlements.load(encoded, m_transaction);
+            for (const auto& entry : encoded) {
+                const auto record = detail::settlement_record_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (!record.valid()) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "cannot rebuild index from invalid settlement"});
+                }
+                const auto result = index_settlement(record.settlement);
+                if (result.kind != StorageResultKind::APPLIED &&
+                    result.kind != StorageResultKind::DUPLICATE) return result;
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     StorageResult put_valuation_resolution(const ValuationResolutionRecord& value) {
         if (!valid_schema(value.schema_version) || !value.valid()) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid valuation resolution"});
@@ -1256,133 +1306,169 @@ public:
                              detail::valuation_resolution_to_json(value).dump());
     }
 
-    /// \brief Applies a settlement and all supplied projections before commit.
-    StorageResult apply_settlement_atomic(const SettlementTransition& transition) {
+    /// \brief Records one physical settlement without advancing logical state.
+    StorageResult record_physical_settlement(const SettlementTransition& transition) {
         if (!transition.settlement.valid() || transition.journal.event_id == 0 ||
             transition.journal.idempotency_key.empty() || !transition.physical_trade) {
-            return fail({StorageResultKind::INVALID_ARGUMENT, "invalid settlement transition"});
+            return fail({StorageResultKind::INVALID_ARGUMENT, "invalid physical settlement transition"});
         }
-        if (transition.logical_currency == CurrencyType::UNKNOWN) {
-            return fail({StorageResultKind::INVALID_ARGUMENT, "logical currency is required"});
-        }
-        if (transition.settlement.valuation &&
+        if (transition.logical_currency != CurrencyType::UNKNOWN && transition.settlement.valuation &&
             (transition.settlement.valuation->source != transition.settlement.native_profit.currency ||
              transition.settlement.valuation->target != transition.logical_currency)) {
-            return fail({StorageResultKind::INVALID_ARGUMENT, "valuation fact does not match native and logical currencies"});
+            return fail({StorageResultKind::INVALID_ARGUMENT,
+                         "valuation fact does not match native and logical currencies"});
         }
-
         try {
             const auto physical_binding = validate_physical_bindings(transition);
             if (physical_binding.kind != StorageResultKind::APPLIED) return physical_binding;
 
-            ExecutionGroupAggregator aggregate;
-            const auto aggregate_result = build_group_aggregate(
-                transition.settlement.settlement.execution_group_id,
-                &transition.settlement, aggregate);
-            if (aggregate_result.kind != StorageResultKind::APPLIED) return aggregate_result;
-
-            const bool has_logical_projections =
-                transition.series || transition.reservation || transition.money_management ||
-                !transition.group_reservations.empty();
-            const bool group_terminal = aggregate.outcome().final &&
-                                        aggregate.outcome().all_members_terminal &&
-                                        aggregate.outcome().aggregation_status == AggregationStatus::READY;
-            const auto physical_valuation = transition.settlement.native_profit.currency ==
-                                                    transition.logical_currency
-                                                ? std::optional<MoneyAmount>(transition.settlement.native_profit)
-                                                : ((transition.settlement.valuation &&
-                                                    transition.settlement.valuation->fresh)
-                                                       ? detail::convert_money(
-                                                             transition.settlement.native_profit,
-                                                             *transition.settlement.valuation,
-                                                             transition.logical_currency)
-                                                       : std::nullopt);
-            const bool valuation_ready = physical_valuation.has_value();
             auto persisted = transition.settlement;
-            persisted.logical_outcome_ready = valuation_ready;
+            const auto target = transition.logical_currency == CurrencyType::UNKNOWN
+                ? persisted.native_profit.currency : transition.logical_currency;
+            persisted.logical_outcome_ready = persisted.native_profit.currency == target ||
+                (persisted.valuation && persisted.valuation->fresh &&
+                 detail::convert_money(persisted.native_profit, *persisted.valuation, target).has_value());
 
-            if (has_logical_projections &&
-                (!transition.series || !transition.reservation || !transition.money_management)) {
-                return fail({StorageResultKind::INVALID_ARGUMENT,
-                             "logical settlement requires all logical projections"});
-            }
-            if (has_logical_projections && !group_terminal) {
-                return fail({StorageResultKind::INVALID_STATE,
-                             "physical settlement does not complete execution group"});
-            }
-            if (has_logical_projections && !valuation_ready) {
-                return fail({StorageResultKind::INVALID_ARGUMENT,
-                             "logical settlement requires deterministic valuation"});
-            }
-            if (has_logical_projections) {
-                const auto normalized = detail::normalize_group_outcome(
-                    aggregate.outcome(), transition.settlement.valuation ?
-                                             &*transition.settlement.valuation : nullptr,
-                    transition.logical_currency);
-                if (!normalized || !transition.series ||
-                    !detail::same_group_outcome(*normalized, transition.series->current_outcome)) {
-                    return fail({StorageResultKind::CONFLICT,
-                                 "logical outcome does not match authoritative group aggregate"});
-                }
-                const auto bindings = validate_terminal_bindings(transition);
-                if (bindings.kind != StorageResultKind::APPLIED) return bindings;
-            }
-
-            const auto existing = m_storage.m_settlements.find(
-                std::to_string(transition.settlement.settlement.settlement_id), m_transaction);
+            const auto key = std::to_string(persisted.settlement.settlement_id);
+            const auto existing = m_storage.m_settlements.find(key, m_transaction);
             if (existing) {
-                const auto encoded = detail::settlement_record_to_json(persisted).dump();
-                if (*existing == encoded) return {StorageResultKind::DUPLICATE, {}};
-                return fail({StorageResultKind::CONFLICT, "settlement payload conflict"});
+                if (*existing != detail::settlement_record_to_json(persisted).dump()) {
+                    return fail({StorageResultKind::CONFLICT, "settlement payload conflict"});
+                }
+                const auto existing_physical = m_storage.m_physical_trades.find(
+                    std::to_string(transition.physical_trade->trade_id), m_transaction);
+                if (!existing_physical ||
+                    *existing_physical != detail::physical_trade_to_json(
+                        *transition.physical_trade).dump()) {
+                    return fail({StorageResultKind::CONFLICT,
+                                 "physical trade payload conflicts with durable identity"});
+                }
+                const auto index = index_settlement(persisted.settlement);
+                if (index.kind != StorageResultKind::APPLIED &&
+                    index.kind != StorageResultKind::DUPLICATE) return index;
+                return {StorageResultKind::DUPLICATE, {}};
             }
 
             const auto journal_result = append_journal(transition.journal);
             if (journal_result.kind != StorageResultKind::APPLIED) return journal_result;
             const auto settlement_result = put_settlement(persisted);
             if (settlement_result.kind != StorageResultKind::APPLIED) return settlement_result;
-
+            const auto index = index_settlement(persisted.settlement);
+            if (index.kind != StorageResultKind::APPLIED && index.kind != StorageResultKind::DUPLICATE) return index;
             const auto physical_result = put_physical_trade(
                 *transition.physical_trade, transition.expected_physical_trade_revision);
             if (physical_result.kind != StorageResultKind::APPLIED) return physical_result;
+            return persisted.logical_outcome_ready
+                ? StorageResult{StorageResultKind::APPLIED, {}}
+                : StorageResult{StorageResultKind::PENDING_VALUATION,
+                                "native settlement stored; valuation is missing or stale"};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
 
-            if (!has_logical_projections) {
-                return valuation_ready
-                           ? StorageResult{StorageResultKind::APPLIED, {}}
-                           : StorageResult{StorageResultKind::PENDING_VALUATION,
-                                           "native settlement stored; valuation is missing or stale"};
+    /// \brief Applies logical group projections after physical facts exist.
+    StorageResult apply_group_completion_atomic(const SettlementTransition& transition) {
+        if (!transition.settlement.valid() || !transition.series || !transition.reservation ||
+            !transition.money_management || transition.logical_currency == CurrencyType::UNKNOWN) {
+            return fail({StorageResultKind::INVALID_ARGUMENT,
+                         "logical group completion requires all projections"});
+        }
+        try {
+            const auto stored = m_storage.m_settlements.find(
+                std::to_string(transition.settlement.settlement.settlement_id), m_transaction);
+            if (!stored) return fail({StorageResultKind::NOT_FOUND, "physical settlement is missing"});
+            const auto persisted = detail::settlement_record_from_json(nlohmann::json::parse(*stored));
+            if (!persisted.valid() || !(persisted.settlement == transition.settlement.settlement)) {
+                return fail({StorageResultKind::CONFLICT, "logical completion settlement conflicts with physical fact"});
+            }
+            const auto completion_key = transition.completion_journal
+                ? transition.completion_journal->idempotency_key
+                : transition.journal.idempotency_key + ":logical";
+            if (completion_key.empty()) {
+                return fail({StorageResultKind::INVALID_ARGUMENT,
+                             "logical completion idempotency key is empty"});
+            }
+            if (m_storage.m_journal.find(completion_key, m_transaction)) {
+                return {StorageResultKind::DUPLICATE, {}};
             }
 
-            if (transition.series) {
-                const auto result = put_series(*transition.series, transition.expected_series_revision);
-                if (result.kind != StorageResultKind::APPLIED) return result;
+            SettlementTransition checked = transition;
+            if (!checked.physical_trade) {
+                const auto physical = m_storage.m_physical_trades.find(
+                    std::to_string(transition.settlement.settlement.trade_id), m_transaction);
+                if (!physical) return fail({StorageResultKind::NOT_FOUND, "physical trade is missing"});
+                checked.physical_trade = detail::physical_trade_from_json(nlohmann::json::parse(*physical));
             }
-            if (transition.reservation) {
-                const auto result = put_reservation(*transition.reservation,
-                                                    transition.expected_reservation_revision);
-                if (result.kind != StorageResultKind::APPLIED) return result;
+            ExecutionGroupAggregator aggregate;
+            const auto aggregate_result = build_group_aggregate(
+                transition.settlement.settlement.execution_group_id,
+                transition.logical_currency, aggregate);
+            if (aggregate_result.kind != StorageResultKind::APPLIED) return aggregate_result;
+            const auto outcome = aggregate.outcome();
+            if (!outcome.final || !outcome.all_members_terminal ||
+                outcome.aggregation_status != AggregationStatus::READY) {
+                return fail({StorageResultKind::INVALID_STATE,
+                             "logical completion requires a terminal valued group"});
             }
-            if (!transition.group_reservations.empty()) {
-                if (transition.group_reservations.size() !=
-                    transition.expected_group_reservation_revisions.size()) {
-                    return fail({StorageResultKind::INVALID_ARGUMENT,
-                                 "group reservation revision list is incomplete"});
-                }
-                for (std::size_t index = 0; index < transition.group_reservations.size(); ++index) {
-                    const auto result = put_reservation(
-                        transition.group_reservations[index],
-                        transition.expected_group_reservation_revisions[index]);
-                    if (result.kind != StorageResultKind::APPLIED) return result;
-                }
+            if (!detail::same_group_outcome(outcome, transition.series->current_outcome)) {
+                return fail({StorageResultKind::CONFLICT,
+                             "logical outcome does not match authoritative group aggregate"});
             }
-            if (transition.money_management) {
-                const auto result = put_money_management(*transition.money_management,
-                                                         transition.expected_money_management_revision);
-                if (result.kind != StorageResultKind::APPLIED) return result;
+            const auto bindings = validate_terminal_bindings(checked);
+            if (bindings.kind != StorageResultKind::APPLIED) return bindings;
+            const auto progression = validate_series_progression(checked);
+            if (progression.kind != StorageResultKind::APPLIED) return progression;
+
+            auto completion = transition.completion_journal;
+            if (!completion) {
+                const auto sequence = next_id("logical_completion_event");
+                if (sequence.kind != StorageResultKind::APPLIED) return fail({sequence.kind, sequence.message});
+                completion = transition.journal;
+                completion->event_id = sequence.value;
+                completion->event_type = "GROUP_COMPLETION";
+                completion->idempotency_key = transition.journal.idempotency_key + ":logical";
+                completion->payload = detail::group_outcome_to_json(outcome);
+            } else if (completion->idempotency_key == transition.journal.idempotency_key) {
+                return fail({StorageResultKind::INVALID_ARGUMENT,
+                             "physical and logical idempotency identities must differ"});
             }
+            const auto journal_result = append_journal(*completion);
+            if (journal_result.kind == StorageResultKind::DUPLICATE) return journal_result;
+            if (journal_result.kind != StorageResultKind::APPLIED) return journal_result;
+
+            if (auto result = put_series(*transition.series, transition.expected_series_revision);
+                result.kind != StorageResultKind::APPLIED) return result;
+            if (auto result = put_reservation(*transition.reservation,
+                                               transition.expected_reservation_revision);
+                result.kind != StorageResultKind::APPLIED) return result;
+            if (auto result = put_group_reservations(transition);
+                result.kind != StorageResultKind::APPLIED) return result;
+            if (auto result = put_money_management(*transition.money_management,
+                                                   transition.expected_money_management_revision);
+                result.kind != StorageResultKind::APPLIED) return result;
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
             return fail({StorageResultKind::STORAGE_ERROR, error.what()});
         }
+    }
+
+    /// \brief Convenience operation that records physical evidence and then
+    /// performs a separately idempotent logical completion.
+    StorageResult apply_settlement_atomic(const SettlementTransition& transition) {
+        const bool has_logical = transition.series || transition.reservation ||
+                                 transition.money_management || !transition.group_reservations.empty() ||
+                                 !transition.group_reservation_bindings.empty();
+        if (has_logical && (!transition.series || !transition.reservation || !transition.money_management)) {
+            return fail({StorageResultKind::INVALID_ARGUMENT,
+                         "logical settlement requires all logical projections"});
+        }
+        const auto physical = record_physical_settlement(transition);
+        if (physical.kind != StorageResultKind::APPLIED &&
+            physical.kind != StorageResultKind::DUPLICATE &&
+            physical.kind != StorageResultKind::PENDING_VALUATION) return physical;
+        if (!has_logical) return physical;
+        return apply_group_completion_atomic(transition);
     }
 
     /// \brief Resolves a previously persisted native settlement without rewriting it.
@@ -1414,23 +1500,11 @@ public:
                                       std::nullopt, 0, 0, 0, 0, transition.logical_currency});
             if (physical_binding.kind != StorageResultKind::APPLIED) return physical_binding;
 
-            ExecutionGroupAggregator aggregate;
-            const auto aggregate_result = build_group_aggregate(
-                native.settlement.execution_group_id, nullptr, aggregate);
-            if (aggregate_result.kind != StorageResultKind::APPLIED) return aggregate_result;
-            if (!aggregate.outcome().final || !aggregate.outcome().all_members_terminal ||
-                aggregate.outcome().aggregation_status != AggregationStatus::READY) {
-                return fail({StorageResultKind::INVALID_STATE,
-                             "valuation cannot advance a non-terminal execution group"});
-            }
             const auto logical_profit = detail::convert_money(
                 native.native_profit, transition.valuation, transition.logical_currency);
-            const auto normalized = detail::normalize_group_outcome(
-                aggregate.outcome(), &transition.valuation, transition.logical_currency);
-            if (!logical_profit || !normalized || !transition.series ||
-                !detail::same_group_outcome(*normalized, transition.series->current_outcome)) {
+            if (!logical_profit) {
                 return fail({StorageResultKind::INVALID_ARGUMENT,
-                             "valuation cannot deterministically reproduce logical outcome"});
+                             "valuation cannot represent the native settlement"});
             }
             ValuationResolutionRecord resolution{
                 transition.settlement_id, transition.valuation, *logical_profit,
@@ -1445,6 +1519,18 @@ public:
                 return fail({StorageResultKind::CONFLICT, "valuation resolution payload conflict"});
             }
 
+            ExecutionGroupAggregator aggregate;
+            const auto aggregate_result = build_group_aggregate(
+                native.settlement.execution_group_id, transition.logical_currency, aggregate,
+                0, &resolution);
+            if (aggregate_result.kind != StorageResultKind::APPLIED) return aggregate_result;
+            if (!aggregate.outcome().final || !aggregate.outcome().all_members_terminal ||
+                aggregate.outcome().aggregation_status != AggregationStatus::READY ||
+                !detail::same_group_outcome(aggregate.outcome(), transition.series->current_outcome)) {
+                return fail({StorageResultKind::INVALID_ARGUMENT,
+                             "valuation cannot deterministically reproduce logical outcome"});
+            }
+
             SettlementTransition bindings;
             bindings.settlement = native;
             bindings.series = transition.series;
@@ -1455,8 +1541,15 @@ public:
             bindings.group_reservations = transition.group_reservations;
             bindings.expected_group_reservation_revisions =
                 transition.expected_group_reservation_revisions;
+            bindings.group_reservation_bindings = transition.group_reservation_bindings;
             const auto binding_result = validate_terminal_bindings(bindings);
             if (binding_result.kind != StorageResultKind::APPLIED) return binding_result;
+
+            auto progression_bindings = bindings;
+            progression_bindings.settlement.settlement.net_profit = *logical_profit;
+            const auto progression_result = validate_series_progression(
+                progression_bindings, &resolution);
+            if (progression_result.kind != StorageResultKind::APPLIED) return progression_result;
 
             const auto journal_result = append_journal(transition.journal);
             if (journal_result.kind != StorageResultKind::APPLIED) return journal_result;
@@ -1470,19 +1563,8 @@ public:
             if (auto result = put_reservation(*transition.reservation,
                                                transition.expected_reservation_revision);
                 result.kind != StorageResultKind::APPLIED) return result;
-            if (!transition.group_reservations.empty()) {
-                if (transition.group_reservations.size() !=
-                    transition.expected_group_reservation_revisions.size()) {
-                    return fail({StorageResultKind::INVALID_ARGUMENT,
-                                 "group reservation revision list is incomplete"});
-                }
-                for (std::size_t index = 0; index < transition.group_reservations.size(); ++index) {
-                    if (auto result = put_reservation(
-                            transition.group_reservations[index],
-                            transition.expected_group_reservation_revisions[index]);
-                        result.kind != StorageResultKind::APPLIED) return result;
-                }
-            }
+            if (auto result = put_group_reservations(bindings);
+                result.kind != StorageResultKind::APPLIED) return result;
             if (auto result = put_money_management(*transition.money_management,
                                                    transition.expected_money_management_revision);
                 result.kind != StorageResultKind::APPLIED) return result;
@@ -1584,8 +1666,11 @@ private:
     }
 
     StorageResult build_group_aggregate(
-        ExecutionGroupId group_id, const SettlementRecord* incoming,
-        ExecutionGroupAggregator& aggregate) {
+        ExecutionGroupId group_id, CurrencyType target_currency,
+        ExecutionGroupAggregator& aggregate,
+        SettlementId excluded_settlement = 0,
+        const ValuationResolutionRecord* resolution_override = nullptr,
+        std::vector<TradeSettlement>* normalized_receipts = nullptr) {
         const auto roster_encoded = m_storage.m_rosters.find(
             std::to_string(group_id), m_transaction);
         if (!roster_encoded) {
@@ -1595,60 +1680,288 @@ private:
             const auto roster = detail::roster_from_json(nlohmann::json::parse(*roster_encoded));
             if (!roster.valid()) return fail({StorageResultKind::STORAGE_ERROR, "invalid execution roster"});
 
-            std::vector<std::pair<std::string, std::string>> encoded;
-            m_storage.m_settlements.load(encoded, m_transaction);
             std::vector<SettlementRecord> records;
-            std::set<SettlementId> settlement_ids;
-            CurrencyType currency = incoming ? incoming->native_profit.currency : CurrencyType::UNKNOWN;
-            std::uint8_t precision = incoming ? incoming->native_profit.precision : 0;
-            for (const auto& entry : encoded) {
+            std::vector<std::pair<std::string, std::string>> index_entries;
+            m_storage.m_group_settlement_index.load(index_entries, m_transaction);
+            const auto prefix = std::to_string(group_id) + ":";
+            for (const auto& index_entry : index_entries) {
+                if (index_entry.first.rfind(prefix, 0) != 0) continue;
+                const auto settlement_id = std::stoull(index_entry.second);
+                if (settlement_id == excluded_settlement) continue;
+                const auto encoded = m_storage.m_settlements.find(
+                    std::to_string(settlement_id), m_transaction);
+                if (!encoded) return fail({StorageResultKind::STORAGE_ERROR,
+                                           "settlement index points to missing fact"});
                 const auto record = detail::settlement_record_from_json(
-                    nlohmann::json::parse(entry.second));
-                if (!record.valid()) return fail({StorageResultKind::STORAGE_ERROR, "invalid settlement record"});
-                if (record.settlement.execution_group_id != group_id) continue;
+                    nlohmann::json::parse(*encoded));
+                if (!record.valid() || record.settlement.execution_group_id != group_id) {
+                    return fail({StorageResultKind::STORAGE_ERROR, "invalid indexed settlement record"});
+                }
                 if (record.settlement.intent_id != roster.intent_id) {
                     return fail({StorageResultKind::CONFLICT, "settlement intent conflicts with roster"});
                 }
-                if (currency == CurrencyType::UNKNOWN) {
-                    currency = record.native_profit.currency;
-                    precision = record.native_profit.precision;
-                }
-                if (record.native_profit.currency != currency ||
-                    record.native_profit.precision != precision) {
-                    return fail({StorageResultKind::CONFLICT, "group settlements use different native money metadata"});
-                }
                 records.push_back(record);
-                settlement_ids.insert(record.settlement.settlement_id);
             }
-            if (incoming && currency == CurrencyType::UNKNOWN) {
-                currency = incoming->native_profit.currency;
-                precision = incoming->native_profit.precision;
+            if (records.empty() && excluded_settlement == 0) {
+                return fail({StorageResultKind::INVALID_STATE, "group has no indexed settlements"});
             }
-            if (currency == CurrencyType::UNKNOWN) {
-                return fail({StorageResultKind::INVALID_ARGUMENT, "group currency is unknown"});
+
+            std::vector<TradeSettlement> normalized;
+            std::uint8_t precision = 0;
+            bool precision_selected = false;
+            for (const auto& record : records) {
+                std::optional<MoneyAmount> logical_profit;
+                if (record.native_profit.currency == target_currency) {
+                    logical_profit = record.native_profit;
+                } else if (record.valuation && record.valuation->fresh) {
+                    logical_profit = detail::convert_money(
+                        record.native_profit, *record.valuation, target_currency);
+                } else {
+                    std::optional<ValuationResolutionRecord> resolution;
+                    if (resolution_override &&
+                        resolution_override->settlement_id == record.settlement.settlement_id) {
+                        resolution = *resolution_override;
+                    } else {
+                        const auto encoded_resolution = m_storage.m_valuation_resolutions.find(
+                            std::to_string(record.settlement.settlement_id), m_transaction);
+                        if (encoded_resolution) {
+                            resolution = detail::valuation_resolution_from_json(
+                                nlohmann::json::parse(*encoded_resolution));
+                        }
+                    }
+                    if (resolution && resolution->logical_currency == target_currency &&
+                        resolution->valuation.fresh && resolution->logical_profit.valid_metadata()) {
+                        logical_profit = resolution->logical_profit;
+                    }
+                }
+                if (record.settlement.is_trading_result() && !logical_profit) {
+                    return {StorageResultKind::PENDING_VALUATION,
+                            "group has a physical settlement without its own valuation"};
+                }
+                auto event = record.settlement;
+                if (logical_profit && record.settlement.is_trading_result()) {
+                    if (!precision_selected) {
+                        precision = logical_profit->precision;
+                        precision_selected = true;
+                    }
+                    auto rescale = [precision](MoneyAmount value) -> std::optional<MoneyAmount> {
+                        if (value.precision == precision) return value;
+                        const auto power = detail::power_of_ten(
+                            static_cast<std::uint8_t>(value.precision > precision
+                                ? value.precision - precision : precision - value.precision));
+                        if (power == 0) return std::nullopt;
+                        if (value.precision < precision) {
+                            const auto magnitude = value.units < 0
+                                ? static_cast<std::uint64_t>(-(value.units + 1)) + 1
+                                : static_cast<std::uint64_t>(value.units);
+                            if (magnitude > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) / power)
+                                return std::nullopt;
+                            value.units *= static_cast<std::int64_t>(power);
+                        } else {
+                            if (value.units % static_cast<std::int64_t>(power) != 0) return std::nullopt;
+                            value.units /= static_cast<std::int64_t>(power);
+                        }
+                        value.precision = precision;
+                        return value;
+                    };
+                    logical_profit = rescale(*logical_profit);
+                    if (!logical_profit) return fail({StorageResultKind::CONFLICT,
+                                                       "group contributions cannot share a fixed-point precision"});
+                    event.net_profit = *logical_profit;
+                }
+                normalized.push_back(event);
             }
+            if (!precision_selected) precision = 2;
             std::vector<std::uint64_t> trade_ids;
             trade_ids.reserve(roster.members.size());
             for (const auto& member : roster.members) trade_ids.push_back(member.trade_id);
             aggregate = ExecutionGroupAggregator(
                 roster.intent_id, {roster.group_id, roster.expected_members},
-                trade_ids, currency, precision);
+                trade_ids, target_currency, precision);
             if (!aggregate.valid()) {
                 return fail({StorageResultKind::INVALID_STATE, "execution group roster is not aggregatable"});
             }
-            for (const auto& record : records) {
-                if (aggregate.apply(record.settlement) != ProgressionResult::APPLIED) {
-                    return fail({StorageResultKind::CONFLICT, "settlement conflicts with execution group aggregate"});
+            for (const auto& event : normalized) {
+                const auto apply_result = aggregate.apply(event);
+                if (apply_result != ProgressionResult::APPLIED) {
+                    return fail({StorageResultKind::CONFLICT,
+                                 "settlement conflicts with execution group aggregate"});
                 }
             }
-            if (incoming && !settlement_ids.count(incoming->settlement.settlement_id)) {
-                if (aggregate.apply(incoming->settlement) != ProgressionResult::APPLIED) {
-                    return fail({StorageResultKind::CONFLICT, "incoming settlement conflicts with execution group aggregate"});
-                }
-            }
+            if (normalized_receipts) *normalized_receipts = normalized;
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
             return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
+    StorageResult validate_series_progression(
+        const SettlementTransition& transition,
+        const ValuationResolutionRecord* resolution_override = nullptr) {
+        const auto encoded = m_storage.m_series.find(
+            std::to_string(transition.series->series.series_id), m_transaction);
+        if (!encoded) return fail({StorageResultKind::NOT_FOUND, "series checkpoint is missing"});
+        try {
+            const auto before_checkpoint = detail::checkpoint_from_json(
+                nlohmann::json::parse(*encoded));
+            if (!detail::durable_record_valid(before_checkpoint) ||
+                before_checkpoint.series.series_id != transition.series->series.series_id) {
+                return fail({StorageResultKind::STORAGE_ERROR, "invalid durable series checkpoint"});
+            }
+            ExecutionGroupAggregator all_group;
+            std::vector<TradeSettlement> all_receipts;
+            const auto aggregate_result = build_group_aggregate(
+                transition.settlement.settlement.execution_group_id, transition.logical_currency,
+                all_group, 0, resolution_override, &all_receipts);
+            if (aggregate_result.kind != StorageResultKind::APPLIED) return aggregate_result;
+            const auto roster_encoded = m_storage.m_rosters.find(
+                std::to_string(transition.settlement.settlement.execution_group_id), m_transaction);
+            if (!roster_encoded) return fail({StorageResultKind::INVALID_STATE, "execution roster is missing"});
+            const auto roster = detail::roster_from_json(nlohmann::json::parse(*roster_encoded));
+            std::uint8_t precision = 2;
+            for (const auto& event : all_receipts) {
+                if (event.net_profit) { precision = event.net_profit->precision; break; }
+            }
+            std::vector<std::uint64_t> trade_ids;
+            for (const auto& member : roster.members) trade_ids.push_back(member.trade_id);
+            ExecutionGroupAggregator before_group(
+                roster.intent_id, {roster.group_id, roster.expected_members},
+                trade_ids, transition.logical_currency, precision);
+            if (!before_group.valid()) {
+                return fail({StorageResultKind::INVALID_STATE, "execution group roster is not aggregatable"});
+            }
+            std::set<SettlementId> already_applied;
+            std::vector<TradeSettlement> receipts_before;
+            for (const auto& receipt : before_checkpoint.receipts) {
+                const auto normalized = std::find_if(
+                    all_receipts.begin(), all_receipts.end(),
+                    [&receipt](const TradeSettlement& value) {
+                        return value.settlement_id == receipt.settlement_id;
+                    });
+                if (normalized != all_receipts.end() && already_applied.insert(normalized->settlement_id).second) {
+                    receipts_before.push_back(*normalized);
+                }
+            }
+            std::vector<TradeSettlement> receipts_to_apply;
+            for (const auto& receipt : all_receipts) {
+                if (!already_applied.count(receipt.settlement_id)) receipts_to_apply.push_back(receipt);
+            }
+            if (receipts_to_apply.empty() ||
+                before_checkpoint.series.state_revision == (std::numeric_limits<std::uint64_t>::max)() ||
+                transition.series->series.state_revision !=
+                    before_checkpoint.series.state_revision + 1) {
+                return fail({StorageResultKind::REVISION_CONFLICT,
+                             "logical completion must advance the series exactly once"});
+            }
+            SeriesSnapshot before;
+            before.series = before_checkpoint.series;
+            before.status = before_checkpoint.status;
+            before.current_intent_id = before_checkpoint.current_intent_id;
+            before.current_group_id = before_checkpoint.current_group_id;
+            before.current_step = before_checkpoint.current_step;
+            before.outcome = before_checkpoint.current_outcome;
+            SeriesSnapshot candidate;
+            candidate.series = transition.series->series;
+            candidate.status = transition.series->status;
+            candidate.current_intent_id = transition.series->current_intent_id;
+            candidate.current_group_id = transition.series->current_group_id;
+            candidate.current_step = transition.series->current_step;
+            candidate.outcome = transition.series->current_outcome;
+            std::set<IntentId> used_intents(
+                before_checkpoint.used_intents.begin(), before_checkpoint.used_intents.end());
+            std::set<std::string> used_keys(
+                before_checkpoint.used_intent_keys.begin(), before_checkpoint.used_intent_keys.end());
+            const auto progression = SeriesProgression::validate_completion_transition(
+                before, candidate, std::move(before_group), receipts_before,
+                used_intents, used_keys, receipts_to_apply);
+            if (progression == ProgressionResult::APPLIED) return {StorageResultKind::APPLIED, {}};
+            if (progression == ProgressionResult::REVISION_CONFLICT ||
+                progression == ProgressionResult::REVISION_OVERFLOW) {
+                return fail({StorageResultKind::REVISION_CONFLICT,
+                             "series progression rejected the durable revision"});
+            }
+            if (progression == ProgressionResult::SETTLEMENT_CONFLICT ||
+                progression == ProgressionResult::WRONG_OPERATION ||
+                progression == ProgressionResult::UNKNOWN_MEMBER) {
+                return fail({StorageResultKind::CONFLICT,
+                             "series progression rejected the settlement identity"});
+            }
+            return fail({StorageResultKind::INVALID_STATE,
+                         "series checkpoint is not the result of the canonical progression"});
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
+    StorageResult index_settlement(const TradeSettlement& settlement) {
+        if (settlement.execution_group_id == 0 || settlement.settlement_id == 0) {
+            return fail({StorageResultKind::INVALID_ARGUMENT, "invalid settlement index identity"});
+        }
+        try {
+            const auto key = std::to_string(settlement.execution_group_id) + ":" +
+                             std::to_string(settlement.settlement_id);
+            const auto value = std::to_string(settlement.settlement_id);
+            const auto existing = m_storage.m_group_settlement_index.find(key, m_transaction);
+            if (existing) {
+                return *existing == value ? StorageResult{StorageResultKind::DUPLICATE, {}}
+                                           : fail({StorageResultKind::CONFLICT,
+                                                   "settlement group index conflict"});
+            }
+            m_storage.m_group_settlement_index.insert(key, value, m_transaction);
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
+    StorageResult put_group_reservations(const SettlementTransition& transition) {
+        if (!transition.group_reservation_bindings.empty()) {
+            for (const auto& binding : transition.group_reservation_bindings) {
+                if (binding.reservation.reservation_id == transition.reservation->reservation_id) continue;
+                const auto result = put_reservation(binding.reservation, binding.expected_revision);
+                if (result.kind != StorageResultKind::APPLIED) return result;
+            }
+            return {StorageResultKind::APPLIED, {}};
+        }
+        if (transition.group_reservations.size() !=
+            transition.expected_group_reservation_revisions.size()) {
+            return fail({StorageResultKind::INVALID_ARGUMENT,
+                         "group reservation revision list is incomplete"});
+        }
+        for (std::size_t index = 0; index < transition.group_reservations.size(); ++index) {
+            const auto result = put_reservation(
+                transition.group_reservations[index],
+                transition.expected_group_reservation_revisions[index]);
+            if (result.kind != StorageResultKind::APPLIED) return result;
+        }
+        return {StorageResultKind::APPLIED, {}};
+    }
+
+    std::optional<RiskReservationState> terminal_reservation_state(
+        std::uint64_t trade_id, ExecutionGroupId group_id) {
+        try {
+            std::vector<std::pair<std::string, std::string>> index_entries;
+            m_storage.m_group_settlement_index.load(index_entries, m_transaction);
+            const auto prefix = std::to_string(group_id) + ":";
+            std::optional<TradeSettlement> latest;
+            for (const auto& entry : index_entries) {
+                if (entry.first.rfind(prefix, 0) != 0) continue;
+                const auto encoded = m_storage.m_settlements.find(entry.second, m_transaction);
+                if (!encoded) return std::nullopt;
+                const auto record = detail::settlement_record_from_json(
+                    nlohmann::json::parse(*encoded));
+                if (record.settlement.trade_id != trade_id) continue;
+                if (!latest || record.settlement.settlement_id > latest->settlement_id) {
+                    latest = record.settlement;
+                }
+            }
+            if (!latest || !latest->terminal()) return std::nullopt;
+            return latest->kind == OutcomeKind::REJECTED ||
+                           latest->kind == OutcomeKind::CANCELLED
+                       ? RiskReservationState::RELEASED
+                       : RiskReservationState::SETTLED;
+        } catch (...) {
+            return std::nullopt;
         }
     }
 
@@ -1665,40 +1978,66 @@ private:
                 [&transition](const RosterMemberRecord& value) {
                     return value.trade_id == transition.settlement.settlement.trade_id;
                 });
-            const auto& reservation = *transition.reservation;
-            if (reservation.intent_id != roster.intent_id ||
-                reservation.risk_scope_id != member->risk_scope_id) {
-                return fail({StorageResultKind::CONFLICT, "reservation binding conflicts with roster"});
+            if (member == roster.members.end()) {
+                return fail({StorageResultKind::CONFLICT, "settlement member is absent from roster"});
             }
-            const auto expected_reservation_state =
-                transition.settlement.settlement.kind == OutcomeKind::REJECTED ||
-                transition.settlement.settlement.kind == OutcomeKind::CANCELLED
-                    ? RiskReservationState::RELEASED : RiskReservationState::SETTLED;
-            if (reservation.state != expected_reservation_state) {
-                return fail({StorageResultKind::INVALID_STATE, "reservation state is not terminal"});
+
+            struct Binding {
+                std::uint64_t trade_id = 0;
+                ReservationRecord reservation;
+            };
+            std::vector<Binding> bindings;
+            bindings.push_back({transition.settlement.settlement.trade_id, *transition.reservation});
+            if (!transition.group_reservation_bindings.empty()) {
+                for (const auto& value : transition.group_reservation_bindings) {
+                    bindings.push_back({value.trade_id, value.reservation});
+                }
+            } else {
+                for (const auto& value : transition.group_reservations) {
+                    std::vector<const RosterMemberRecord*> candidates;
+                    for (const auto& roster_member : roster.members) {
+                        if (roster_member.risk_scope_id == value.risk_scope_id &&
+                            roster_member.trade_id != transition.settlement.settlement.trade_id) {
+                            candidates.push_back(&roster_member);
+                        }
+                    }
+                    if (candidates.size() != 1) {
+                        return fail({StorageResultKind::CONFLICT,
+                                     "legacy reservation list is ambiguous; use explicit trade bindings"});
+                    }
+                    bindings.push_back({candidates.front()->trade_id, value});
+                }
             }
-            std::set<std::uint64_t> reservation_ids{reservation.reservation_id};
-            std::set<std::uint64_t> covered_scopes{reservation.risk_scope_id};
-            std::set<std::uint64_t> roster_scopes;
-            for (const auto& roster_member : roster.members) {
-                roster_scopes.insert(roster_member.risk_scope_id);
-            }
-            for (const auto& group_reservation : transition.group_reservations) {
-                if (!group_reservation.valid() ||
-                    !reservation_ids.insert(group_reservation.reservation_id).second ||
-                    group_reservation.intent_id != roster.intent_id ||
-                    !roster_scopes.count(group_reservation.risk_scope_id) ||
-                    group_reservation.state != expected_reservation_state) {
+
+            std::set<std::uint64_t> bound_trades;
+            std::set<std::uint64_t> reservation_ids;
+            for (const auto& binding : bindings) {
+                const auto roster_member = std::find_if(
+                    roster.members.begin(), roster.members.end(),
+                    [&binding](const RosterMemberRecord& value) {
+                        return value.trade_id == binding.trade_id;
+                    });
+                if (roster_member == roster.members.end() ||
+                    !bound_trades.insert(binding.trade_id).second ||
+                    !binding.reservation.valid() ||
+                    !reservation_ids.insert(binding.reservation.reservation_id).second ||
+                    binding.reservation.intent_id != roster.intent_id ||
+                    binding.reservation.risk_scope_id != roster_member->risk_scope_id ||
+                    binding.reservation.execution_group.group_id != roster.group_id) {
                     return fail({StorageResultKind::CONFLICT,
-                                 "group reservation roster binding is invalid"});
+                                 "reservation binding does not identify one roster member"});
                 }
-                covered_scopes.insert(group_reservation.risk_scope_id);
-            }
-            for (const auto& roster_member : roster.members) {
-                if (!covered_scopes.count(roster_member.risk_scope_id)) {
+
+                const auto expected_state = terminal_reservation_state(
+                    roster_member->trade_id, roster.group_id);
+                if (!expected_state || binding.reservation.state != *expected_state) {
                     return fail({StorageResultKind::INVALID_STATE,
-                                 "logical completion has not settled every risk scope"});
+                                 "reservation state does not match its physical settlement"});
                 }
+            }
+            if (bound_trades.size() != roster.members.size()) {
+                return fail({StorageResultKind::INVALID_STATE,
+                             "logical completion has not bound every physical member"});
             }
             if (transition.series->current_group_id != 0 &&
                 transition.series->current_group_id != roster.group_id) {

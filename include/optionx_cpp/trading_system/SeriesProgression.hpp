@@ -39,6 +39,34 @@ public:
 
     SeriesSnapshot snapshot() const { return m_state; }
 
+    /// \brief Validates one durable logical completion using the same state
+    /// machine as the live owner.
+    ///
+    /// `group_before` and `receipts_before` describe the durable state before
+    /// the `incoming` receipts are applied. No owner state is modified by this
+    /// helper.
+    static ProgressionResult validate_completion_transition(
+        const SeriesSnapshot& before,
+        const SeriesSnapshot& candidate,
+        ExecutionGroupAggregator group_before,
+        const std::vector<TradeSettlement>& receipts_before,
+        const std::set<IntentId>& used_intents,
+        const std::set<std::string>& used_intent_keys,
+        const std::vector<TradeSettlement>& incoming) {
+        SeriesProgression owner(before.series);
+        const auto hydrated = owner.hydrate(
+            before, std::move(group_before), receipts_before,
+            used_intents, used_intent_keys);
+        if (hydrated != ProgressionResult::APPLIED) return hydrated;
+        for (const auto& event : incoming) {
+            const auto applied = owner.apply(event, owner.snapshot().series.state_revision);
+            if (applied != ProgressionResult::APPLIED) return applied;
+        }
+        const auto actual = owner.snapshot();
+        return same_snapshot(actual, candidate)
+            ? ProgressionResult::APPLIED : ProgressionResult::INVALID_STATE;
+    }
+
     /// \brief Hydrates the owner from a durable checkpoint and a fresh group owner.
     ///
     /// The checkpoint carries receipt and idempotency history because
@@ -196,6 +224,17 @@ public:
     }
 
 private:
+    static bool same_snapshot(const SeriesSnapshot& lhs, const SeriesSnapshot& rhs) noexcept {
+        return lhs.series.series_id == rhs.series.series_id &&
+               lhs.series.origin_signal_id == rhs.series.origin_signal_id &&
+               lhs.series.next_step == rhs.series.next_step &&
+               lhs.status == rhs.status &&
+               lhs.current_intent_id == rhs.current_intent_id &&
+               lhs.current_group_id == rhs.current_group_id &&
+               lhs.current_step == rhs.current_step &&
+               same_outcome(lhs.outcome, rhs.outcome);
+    }
+
     static bool same_outcome(const GroupOutcome& lhs, const GroupOutcome& rhs) noexcept {
         if (lhs.final != rhs.final || lhs.unresolved != rhs.unresolved ||
             lhs.all_members_terminal != rhs.all_members_terminal ||

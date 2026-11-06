@@ -39,6 +39,7 @@ Unit of Work. The external broker call remains outside this local transaction.
 | `ts_risk_scope_gates` | Durable fail-closed gates for account/RiskScope conflicts |
 | `ts_reservations` | Risk reservation state and revision |
 | `ts_settlements` | Settlement receipt, native money and valuation evidence |
+| `ts_group_settlement_index` | Atomic `ExecutionGroupId -> SettlementId` derived index |
 | `ts_valuation_resolutions` | Immutable second-stage FX valuation facts |
 | `ts_series` | Series checkpoint, including receipt and idempotency history |
 | `ts_mm_state` | Versioned policy-specific money-management state |
@@ -55,16 +56,17 @@ are `APPLIED`, `DUPLICATE`, `CONFLICT`, `REVISION_CONFLICT`, `NOT_FOUND`,
 `INVALID_STATE`, `UNSUPPORTED_SCHEMA`, `PENDING_VALUATION` and
 `STORAGE_ERROR`.
 
-`apply_settlement_atomic()` checks the settlement identity before changing any
-projection. An identical receipt returns `DUPLICATE` and does not advance the
-series, reservation or money-management state. A different payload using the
-same identity returns `CONFLICT`. A physical transition writes the journal,
-settlement and physical-trade projection in the same local transaction. A
-physical receipt does not by itself complete its execution group. Series
-progression, logical outcome, MM state and risk release are written only when
-the authoritative aggregate for the complete immutable roster is terminal.
-Multi-scope groups may update all of their terminal reservations in the same
-Unit of Work.
+`record_physical_settlement()` is the first durable operation. It writes the
+physical journal, native settlement, group index and physical-trade projection
+without advancing logical state. `apply_group_completion_atomic()` is a
+separate idempotent operation with its own journal identity; it can therefore
+complete a group after a restart from already persisted physical facts.
+`apply_settlement_atomic()` is only a convenience that invokes both operations
+in one Unit of Work. An identical physical or logical identity returns
+`DUPLICATE`; a different payload using the same identity returns `CONFLICT`.
+Series progression, logical outcome, MM state and risk release are written
+only when the authoritative aggregate for the complete immutable roster is
+terminal.
 
 The transition has two deliberate forms:
 
@@ -74,6 +76,12 @@ The transition has two deliberate forms:
 | Physical settlement with missing/stale FX | Same physical facts, marked pending valuation | Forbidden until valuation and group completion are proven |
 | Complete terminal group with matching projections | Physical facts plus series, all group reservations and MM state | Exactly one logical advance |
 | Repeated physical or logical event | No additional writes | `DUPLICATE` |
+
+The group index is maintained in the same MDBX transaction as the settlement.
+`settlements_for_group()` and logical aggregation use that index instead of
+scanning all settlement facts. `UnitOfWork::rebuild_group_settlement_index()`
+is an explicit recovery/maintenance operation for rebuilding the derived index
+from canonical facts.
 
 `UNKNOWN`, pending and non-terminal group aggregates never release the full
 group risk. A logical transition must include the authoritative normalized
@@ -94,9 +102,19 @@ settlement is therefore excluded from `pending_valuations()` even though its
 original native record remains unchanged.
 
 Immediate and deferred valuation use the same fixed-point conversion and
-aggregate validation. A fresh quote is not sufficient by itself: the converted
-group result must match the supplied logical outcome. `ROUND_HALF_UP` rounds an
-exact half away from zero and conversion rejects integer overflow.
+aggregate validation. Valuation is resolved per physical contribution: a
+same-currency contribution needs no quote, while every cross-currency
+contribution needs its own fresh deterministic valuation. One available quote
+cannot silently value the rest of the group. A fresh quote is not sufficient
+by itself: the converted group result must match the supplied logical outcome.
+`ROUND_HALF_UP` rounds an exact half away from zero and conversion rejects
+integer overflow.
+
+Group reservations are bound to physical `trade_id` values through
+`ReservationBinding`. Their terminal state is derived from that member's own
+settlement: executed outcomes settle risk, while proven `REJECTED` or
+`CANCELLED`/`NOT_SUBMITTED` outcomes release it. RiskScope IDs alone are not a
+complete binding and are ambiguous when several reservations share one scope.
 
 An execution roster rejects duplicate physical trade identities before it can
 be committed. This prevents repeated callback data from being mistaken for a
@@ -155,9 +173,12 @@ revision conflicts, immutable rosters including duplicate physical IDs,
 physical-trade persistence, pending and stale valuation, recovery queries,
 account tombstones and RiskScope conflicts, schema rejection, owner hydration
 and durable sequence rollback. It also covers multi-step series hydration,
-late-stage rollback after earlier projection writes, multi-member physical vs
-logical settlement, immediate and deferred valuation consistency, exact-half
+late-stage rollback after earlier projection writes, restart between physical
+and logical settlement, multi-member physical vs logical settlement,
+per-contribution mixed-currency valuation, explicit trade-to-reservation
+bindings, per-member WIN/CANCELLED risk outcomes, checkpoint forgery rejection,
+index rebuild, immediate and deferred valuation consistency, exact-half
 rounding, durable risk gates and malformed read rejection. The focused suite
-contains 22 tests.
+contains 26 tests.
 
 No test opens a broker connection or uses live credentials.
