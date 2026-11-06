@@ -58,9 +58,26 @@ are `APPLIED`, `DUPLICATE`, `CONFLICT`, `REVISION_CONFLICT`, `NOT_FOUND`,
 `apply_settlement_atomic()` checks the settlement identity before changing any
 projection. An identical receipt returns `DUPLICATE` and does not advance the
 series, reservation or money-management state. A different payload using the
-same identity returns `CONFLICT`. A successful transition writes the journal,
-settlement, physical trade, series, reservation and policy projections in the
-same local transaction.
+same identity returns `CONFLICT`. A physical transition writes the journal,
+settlement and physical-trade projection in the same local transaction. A
+physical receipt does not by itself complete its execution group. Series
+progression, logical outcome, MM state and risk release are written only when
+the authoritative aggregate for the complete immutable roster is terminal.
+Multi-scope groups may update all of their terminal reservations in the same
+Unit of Work.
+
+The transition has two deliberate forms:
+
+| Input state | Durable effect | Logical progression |
+| --- | --- | --- |
+| Physical settlement, group still pending | Journal, settlement and physical trade | Forbidden; existing reservations remain active |
+| Physical settlement with missing/stale FX | Same physical facts, marked pending valuation | Forbidden until valuation and group completion are proven |
+| Complete terminal group with matching projections | Physical facts plus series, all group reservations and MM state | Exactly one logical advance |
+| Repeated physical or logical event | No additional writes | `DUPLICATE` |
+
+`UNKNOWN`, pending and non-terminal group aggregates never release the full
+group risk. A logical transition must include the authoritative normalized
+`GroupOutcome`; an arbitrary checkpoint outcome is rejected.
 
 Native cross-currency settlement is retained even without an FX quote, or when
 the supplied quote is stale, but the stored record is marked
@@ -75,6 +92,11 @@ profit are stored as an immutable valuation-resolution record, while the
 logical projections are applied in the same Unit of Work. A resolved native
 settlement is therefore excluded from `pending_valuations()` even though its
 original native record remains unchanged.
+
+Immediate and deferred valuation use the same fixed-point conversion and
+aggregate validation. A fresh quote is not sufficient by itself: the converted
+group result must match the supplied logical outcome. `ROUND_HALF_UP` rounds an
+exact half away from zero and conversion rejects integer overflow.
 
 An execution roster rejects duplicate physical trade identities before it can
 be committed. This prevents repeated callback data from being mistaken for a
@@ -95,6 +117,10 @@ aggregator cannot be restored as `WAITING_OUTCOME`.
 `RiskAdmission::hydrate()` validates account facts, scope ownership, duplicate
 reservation identities and the next reservation ID before replacing its
 in-memory maps. It preserves active risk and continues the durable sequence.
+After a restart, the host reads `risk_scope_gate()` and applies its typed
+blocked/ready decision through `RiskAdmission::restore_admission_gate()`.
+Hydration and reconciliation remain available; only new admission is blocked
+while a durable conflict gate is active.
 
 These methods are owner boundaries, not crash recovery orchestration. Batch 5C
 will decide how unresolved external operations are reconciled and when a risk
@@ -129,7 +155,9 @@ revision conflicts, immutable rosters including duplicate physical IDs,
 physical-trade persistence, pending and stale valuation, recovery queries,
 account tombstones and RiskScope conflicts, schema rejection, owner hydration
 and durable sequence rollback. It also covers multi-step series hydration,
-late-stage rollback after earlier projection writes, durable risk gates and
-malformed read rejection. The focused suite contains 19 tests.
+late-stage rollback after earlier projection writes, multi-member physical vs
+logical settlement, immediate and deferred valuation consistency, exact-half
+rounding, durable risk gates and malformed read rejection. The focused suite
+contains 22 tests.
 
 No test opens a broker connection or uses live credentials.

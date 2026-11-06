@@ -310,6 +310,19 @@ public:
 
     bool valid() const noexcept { return m_config.valid() && m_id_sequence_valid; }
 
+    /// \brief Restores durable fail-closed readiness before new admission.
+    ///
+    /// The storage layer supplies the typed gate state; this owner method only
+    /// applies that decision and never clears existing reservations.
+    RiskAdmissionResult restore_admission_gate(bool blocked) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_config.valid() || !m_id_sequence_valid) {
+            return RiskAdmissionResult::invalid_state(RiskAdmissionReason::INVALID_CONFIGURATION);
+        }
+        m_config.admission_blocked = blocked;
+        return {RiskAdmissionKind::APPLIED, RiskAdmissionReason::NONE, std::nullopt};
+    }
+
     RiskAdmissionResult update_snapshot(const RiskAccountSnapshot& snapshot) {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!valid() || !snapshot.valid()) {
