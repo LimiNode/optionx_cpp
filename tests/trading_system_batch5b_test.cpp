@@ -556,6 +556,7 @@ TEST(TradingSystemBatch5B, ThreeMemberCompletionAdvancesOneRevisionAndPreservesH
         auto next_reservation = reservation();
         next_reservation.reservation_id = 600;
         next_reservation.risk_scope_id = 104;
+        next_reservation.intent_id = 42;
         next_reservation.execution_group = {81, 1};
         next_reservation.stake = money(10);
         next_reservation.potential_risk = money(10);
@@ -1108,6 +1109,145 @@ TEST(TradingSystemBatch5B, CanonicalReplayHandlesMixedMemberCallbackOrder) {
     EXPECT_EQ(reopened.series(12).value->series.state_revision, 1U);
     EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::SETTLED);
     EXPECT_EQ(reopened.reservation(501).value->state, ts::RiskReservationState::SETTLED);
+}
+
+TEST(TradingSystemBatch5B, TerminalRiskEvidenceIgnoresLargerUnknownAndDuplicateIds) {
+    TestDatabase database;
+    seed(database);
+
+    auto win = settlement_record();
+    win.settlement = settlement(9, 700);
+    auto unknown = settlement_record();
+    unknown.settlement = settlement(10, 700);
+    unknown.settlement.kind = ts::OutcomeKind::UNKNOWN;
+    unknown.settlement.evidence = ts::ExecutionEvidence::MAY_HAVE_EXECUTED;
+    unknown.settlement.net_profit.reset();
+    unknown.native_profit = money(0);
+    auto duplicate_win = win;
+    duplicate_win.settlement.settlement_id = 11;
+
+    auto persist = [](ts::SettlementRecord record, std::uint64_t event_id,
+                      const ts::PhysicalTradeRecord& physical,
+                      const std::string& key) {
+        ts::SettlementTransition value;
+        value.journal = journal();
+        value.journal.event_id = event_id;
+        value.journal.idempotency_key = key;
+        value.settlement = std::move(record);
+        value.physical_trade = physical;
+        value.expected_physical_trade_revision = physical.state_revision == 0
+            ? 0 : physical.state_revision - 1;
+        value.logical_currency = CurrencyType::USD;
+        return value;
+    };
+    const auto physical_one = physical_trade(1);
+    const auto physical_two = physical_trade(2);
+    const auto physical_three = physical_trade(3);
+    for (const auto& value : {
+             persist(win, 109, physical_one, "settlement-event-9"),
+             persist(unknown, 110, physical_two, "settlement-event-10"),
+             persist(duplicate_win, 111, physical_three, "settlement-event-11")}) {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.record_physical_settlement(value).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    auto completion = persist(duplicate_win, 111, physical_three, "settlement-event-11");
+    completion.series = checkpoint(1);
+    completion.series->series.next_step = 1;
+    completion.series->current_outcome = terminal_outcome();
+    completion.series->receipts = {win.settlement, unknown.settlement,
+                                    duplicate_win.settlement};
+    completion.series->used_intents = {41};
+    completion.series->used_intent_keys = {"intent-41"};
+    completion.reservation = reservation(1);
+    completion.money_management = mm_state(1);
+    completion.money_management->last_settlement_id = 11;
+    completion.expected_series_revision = 0;
+    completion.expected_reservation_revision = 0;
+    completion.expected_money_management_revision = 0;
+
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.apply_group_completion_atomic(completion).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    ts::TradingSystemStorage reopened(database.config());
+    EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::SETTLED);
+    EXPECT_EQ(reopened.series(12).value->series.state_revision, 1U);
+}
+
+TEST(TradingSystemBatch5B, ReservationCannotBeReusedByAnotherImmutableRoster) {
+    TestDatabase database;
+    seed(database);
+    ts::ExecutionRosterRecord group_b;
+    group_b.group_id = 81;
+    group_b.intent_id = 42;
+    group_b.expected_members = 1;
+    group_b.members = {{801, 14, 1000, money(50)}};
+    group_b.reservation_bindings = {
+        {801, 500, 1000, money(50), money(50), "risk-41"}};
+
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_roster(group_b).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::CONFLICT);
+    }
+    ts::TradingSystemStorage reopened(database.config());
+    EXPECT_EQ(reopened.roster(81).kind, ts::StorageResultKind::NOT_FOUND);
+    EXPECT_EQ(reopened.roster(80).kind, ts::StorageResultKind::APPLIED);
+    EXPECT_EQ(reopened.audit_roster_reservation_bindings().kind,
+              ts::StorageResultKind::APPLIED);
+}
+
+TEST(TradingSystemBatch5B, JournalOnlyCommitDoesNotScanHistoricalRosters) {
+    TestDatabase database;
+    for (std::uint64_t index = 0; index < 8; ++index) {
+        ts::ReservationRecord reservation_value;
+        reservation_value.reservation_id = 600 + index;
+        reservation_value.risk_scope_id = 200 + index;
+        reservation_value.intent_id = 500 + index;
+        reservation_value.execution_group = {100 + index, 1};
+        reservation_value.cardinality = ts::ExecutionCardinality::EXACTLY_ONE;
+        reservation_value.stake = money(10);
+        reservation_value.potential_risk = money(10);
+        reservation_value.idempotency_key = "risk-history-" + std::to_string(index);
+
+        ts::ExecutionRosterRecord roster_value;
+        roster_value.group_id = 100 + index;
+        roster_value.intent_id = 500 + index;
+        roster_value.expected_members = 1;
+        roster_value.members = {{800 + index, 900 + index, 200 + index, money(10)}};
+        roster_value.reservation_bindings = {{
+            800 + index, 600 + index, 200 + index, money(10), money(10),
+            "risk-history-" + std::to_string(index)}};
+
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_reservation(reservation_value, 0).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_roster(roster_value).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    ts::TradingSystemStorage storage(database.config());
+    auto unit = storage.begin();
+    ts::JournalEvent event;
+    event.event_id = 1;
+    event.event_type = "MAINTENANCE_MARKER";
+    event.aggregate_id = "maintenance";
+    event.idempotency_key = "maintenance-1";
+    ASSERT_EQ(unit.append_journal(event).kind, ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    EXPECT_EQ(unit.roster_validation_checks(), 0U);
+    EXPECT_EQ(storage.audit_roster_reservation_bindings().kind,
+              ts::StorageResultKind::APPLIED);
 }
 
 TEST(TradingSystemBatch5B, JournalEventIdsShareOneDurableNamespace) {

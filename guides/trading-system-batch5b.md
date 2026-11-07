@@ -131,13 +131,21 @@ integer overflow.
 Group reservations are bound to physical `trade_id` values through immutable
 `ExecutionRosterRecord::reservation_bindings`, persisted before any external
 submission. Completion-time `ReservationBinding` values must match the stored
-reservation ID, RiskScope, monetary facts and idempotency key. Batch 5B
+reservation ID, intent/group/cardinality ownership, RiskScope, monetary facts
+and idempotency key. Batch 5B
 supports one reservation per physical trade; an aggregated reservation covering
 several trades is not inferred or silently accepted. Their terminal state is
 derived from that member's own settlement: executed outcomes settle risk,
 while proven `REJECTED` or `CANCELLED`/`NOT_SUBMITTED` outcomes release it.
 RiskScope IDs alone are not a complete binding and are ambiguous when several
 reservations share one scope.
+
+Settlement IDs identify observations; they do not establish chronology. Replay
+orders non-terminal observations before terminal evidence. A later `UNKNOWN`
+observation cannot override confirmed terminal evidence merely because its ID is
+larger, and identical terminal evidence with another ID is idempotent. Group
+aggregation and reservation terminal-state derivation use this same rule; a
+conflicting terminal pair is rejected.
 
 `RosterMemberRecord::stake` is the requested physical stake. The immutable
 reservation binding carries the admitted reservation stake and potential risk;
@@ -182,6 +190,11 @@ blocked/ready decision through `RiskAdmission::restore_admission_gate()`.
 Hydration and reconciliation remain available; only new admission is blocked
 while a durable conflict gate is active.
 
+Normal Unit-of-Work commits validate only rosters and reservations touched by
+that transaction. `audit_roster_reservation_bindings()` is the explicit full
+startup or maintenance audit; unrelated journal and valuation writes do not
+scan the historical roster table.
+
 These methods are owner boundaries, not crash recovery orchestration. Batch 5C
 will decide how unresolved external operations are reconciled and when a risk
 scope becomes admissible again.
@@ -221,6 +234,6 @@ per-contribution mixed-currency valuation, explicit trade-to-reservation
 bindings, per-member WIN/CANCELLED risk outcomes, checkpoint forgery rejection,
 index rebuild, immediate and deferred valuation consistency, exact-half
 rounding, durable risk gates and malformed read rejection. The focused suite
-contains 36 tests.
+contains 39 tests.
 
 No test opens a broker connection or uses live credentials.

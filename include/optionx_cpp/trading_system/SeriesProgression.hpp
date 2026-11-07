@@ -231,6 +231,11 @@ public:
                 return ProgressionResult::SETTLEMENT_CONFLICT;
             }
             const auto result = candidate.m_group.apply(event);
+            if (result == ProgressionResult::DUPLICATE) {
+                candidate.m_receipts.emplace(event.settlement_id, event);
+                applied_any = true;
+                continue;
+            }
             if (result != ProgressionResult::APPLIED) return result;
             candidate.m_receipts.emplace(event.settlement_id, event);
             applied_any = true;

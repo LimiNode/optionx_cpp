@@ -88,6 +88,27 @@ inline bool operator==(const TradeSettlement& lhs, const TradeSettlement& rhs) n
             lhs.net_profit->currency == rhs.net_profit->currency);
 }
 
+/// \brief Compares terminal evidence while ignoring its event identity.
+///
+/// Different broker observations may carry different settlement IDs while
+/// proving the same terminal physical result. Such observations are
+/// idempotent evidence, not a second terminal transition.
+inline bool same_terminal_evidence(
+    const TradeSettlement& lhs, const TradeSettlement& rhs) noexcept {
+    if (!lhs.terminal() || !rhs.terminal() ||
+        lhs.intent_id != rhs.intent_id ||
+        lhs.execution_group_id != rhs.execution_group_id ||
+        lhs.trade_id != rhs.trade_id || lhs.kind != rhs.kind ||
+        lhs.evidence != rhs.evidence ||
+        lhs.net_profit.has_value() != rhs.net_profit.has_value()) {
+        return false;
+    }
+    return !lhs.net_profit ||
+           (lhs.net_profit->units == rhs.net_profit->units &&
+            lhs.net_profit->precision == rhs.net_profit->precision &&
+            lhs.net_profit->currency == rhs.net_profit->currency);
+}
+
 /// \class GroupOutcome
 /// \brief A value snapshot; partial money never constitutes a final outcome.
 struct GroupOutcome {

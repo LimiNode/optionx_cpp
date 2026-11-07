@@ -421,11 +421,28 @@ inline bool same_reservation_identity(
            lhs.account_revision == rhs.account_revision;
 }
 
+inline bool canonical_settlement_before(
+    const SettlementRecord& lhs, const SettlementRecord& rhs) noexcept {
+    const auto lhs_phase = lhs.settlement.terminal() ? 1 : 0;
+    const auto rhs_phase = rhs.settlement.terminal() ? 1 : 0;
+    if (lhs_phase != rhs_phase) return lhs_phase < rhs_phase;
+    return lhs.settlement.settlement_id < rhs.settlement.settlement_id;
+}
+
 inline bool reservation_matches_binding(
     const ReservationRecord& reservation,
-    const RosterReservationBinding& binding) noexcept {
+    const RosterReservationBinding& binding,
+    const ExecutionRosterRecord& roster) noexcept {
+    const bool cardinality_matches = roster.expected_members == 1
+        ? reservation.cardinality == ExecutionCardinality::EXACTLY_ONE
+        : reservation.cardinality == ExecutionCardinality::MULTIPLE ||
+          reservation.cardinality == ExecutionCardinality::SPLIT_GROUP;
     return reservation.reservation_id == binding.reservation_id &&
            reservation.risk_scope_id == binding.risk_scope_id &&
+           reservation.intent_id == roster.intent_id &&
+           reservation.execution_group.group_id == roster.group_id &&
+           reservation.execution_group.expected_members == roster.expected_members &&
+           cardinality_matches &&
            same_money(reservation.stake, binding.stake) &&
            same_money(reservation.potential_risk, binding.potential_risk) &&
            reservation.idempotency_key == binding.idempotency_key;
@@ -1090,6 +1107,44 @@ public:
         return read_json<MoneyManagementStateRecord>(m_mm_state, id, detail::mm_from_json);
     }
 
+    /// \brief Performs the full roster/reservation integrity audit.
+    ///
+    /// This is an explicit startup or maintenance operation. Ordinary writes
+    /// validate only records touched by their Unit of Work.
+    StorageResult audit_roster_reservation_bindings() const {
+        try {
+            auto transaction = m_connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+            std::vector<std::pair<std::string, std::string>> encoded_rosters;
+            m_rosters.load(encoded_rosters, transaction);
+            for (const auto& entry : encoded_rosters) {
+                const auto roster = detail::roster_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (!roster.valid()) {
+                    return {StorageResultKind::STORAGE_ERROR,
+                            "invalid execution roster bindings"};
+                }
+                for (const auto& binding : roster.reservation_bindings) {
+                    const auto encoded_reservation = m_reservations.find(
+                        std::to_string(binding.reservation_id), transaction);
+                    if (!encoded_reservation) {
+                        return {StorageResultKind::INVALID_STATE,
+                                "execution roster reservation is missing"};
+                    }
+                    const auto reservation = detail::reservation_from_json(
+                        nlohmann::json::parse(*encoded_reservation));
+                    if (!reservation.valid() ||
+                        !detail::reservation_matches_binding(reservation, binding, roster)) {
+                        return {StorageResultKind::CONFLICT,
+                                "execution roster reservation binding conflicts"};
+                    }
+                }
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return {StorageResultKind::STORAGE_ERROR, error.what()};
+        }
+    }
+
     class UnitOfWork;
     UnitOfWork begin();
 
@@ -1302,7 +1357,14 @@ public:
         if (!valid_schema(roster.schema_version) || !roster.valid()) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid execution roster"});
         }
-        return put_immutable(m_storage.m_rosters, std::to_string(roster.group_id), detail::roster_to_json(roster).dump());
+        const auto result = put_immutable(
+            m_storage.m_rosters, std::to_string(roster.group_id),
+            detail::roster_to_json(roster).dump());
+        if (result.kind == StorageResultKind::APPLIED ||
+            result.kind == StorageResultKind::DUPLICATE) {
+            m_touched_rosters.insert(roster.group_id);
+        }
+        return result;
     }
 
     StorageResult put_reservation(const ReservationRecord& value, std::uint64_t expected_revision) {
@@ -1323,9 +1385,15 @@ public:
                                  "reservation immutable identity changed"});
                 }
             }
-            return put_revisioned(m_storage.m_reservations, std::to_string(value.reservation_id),
-                                  detail::reservation_to_json(value).dump(),
-                                  value.state_revision, expected_revision);
+            const auto result = put_revisioned(
+                m_storage.m_reservations, std::to_string(value.reservation_id),
+                detail::reservation_to_json(value).dump(),
+                value.state_revision, expected_revision);
+            if (result.kind == StorageResultKind::APPLIED ||
+                result.kind == StorageResultKind::DUPLICATE) {
+                m_touched_reservations.insert(value.reservation_id);
+            }
+            return result;
         } catch (const std::exception& error) {
             return fail({StorageResultKind::STORAGE_ERROR, error.what()});
         }
@@ -1744,7 +1812,7 @@ public:
             return {StorageResultKind::INVALID_STATE, "unit of work was aborted after an operation failure"};
         }
         try {
-            const auto bindings = validate_roster_reservation_bindings();
+            const auto bindings = validate_touched_roster_reservation_bindings();
             if (bindings.kind != StorageResultKind::APPLIED) {
                 rollback();
                 return bindings;
@@ -1763,6 +1831,11 @@ public:
         if (m_closed) return;
         try { m_transaction.rollback(); } catch (...) {}
         m_closed = true;
+    }
+
+    /// \brief Returns the number of roster/reservation bindings checked by this Unit of Work.
+    std::size_t roster_validation_checks() const noexcept {
+        return m_roster_validation_checks;
     }
 
 private:
@@ -1802,18 +1875,23 @@ private:
         }
     }
 
-    StorageResult validate_roster_reservation_bindings() {
+    StorageResult validate_touched_roster_reservation_bindings() {
         try {
-            std::vector<std::pair<std::string, std::string>> encoded_rosters;
-            m_storage.m_rosters.load(encoded_rosters, m_transaction);
-            for (const auto& entry : encoded_rosters) {
+            for (const auto group_id : m_touched_rosters) {
+                const auto encoded_roster = m_storage.m_rosters.find(
+                    std::to_string(group_id), m_transaction);
+                if (!encoded_roster) {
+                    return fail({StorageResultKind::NOT_FOUND,
+                                 "touched execution roster is missing"});
+                }
                 const auto roster = detail::roster_from_json(
-                    nlohmann::json::parse(entry.second));
+                    nlohmann::json::parse(*encoded_roster));
                 if (!roster.valid()) {
                     return fail({StorageResultKind::STORAGE_ERROR,
                                  "invalid execution roster bindings"});
                 }
                 for (const auto& binding : roster.reservation_bindings) {
+                    ++m_roster_validation_checks;
                     const auto encoded_reservation = m_storage.m_reservations.find(
                         std::to_string(binding.reservation_id), m_transaction);
                     if (!encoded_reservation) {
@@ -1823,10 +1901,48 @@ private:
                     const auto reservation = detail::reservation_from_json(
                         nlohmann::json::parse(*encoded_reservation));
                     if (!reservation.valid() ||
-                        !detail::reservation_matches_binding(reservation, binding)) {
+                        !detail::reservation_matches_binding(reservation, binding, roster)) {
                         return fail({StorageResultKind::CONFLICT,
                                      "execution roster reservation binding conflicts"});
                     }
+                }
+            }
+
+            for (const auto reservation_id : m_touched_reservations) {
+                const auto encoded_reservation = m_storage.m_reservations.find(
+                    std::to_string(reservation_id), m_transaction);
+                if (!encoded_reservation) {
+                    return fail({StorageResultKind::NOT_FOUND,
+                                 "touched reservation is missing"});
+                }
+                const auto reservation = detail::reservation_from_json(
+                    nlohmann::json::parse(*encoded_reservation));
+                if (!reservation.valid()) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "invalid touched reservation"});
+                }
+                const auto encoded_roster = m_storage.m_rosters.find(
+                    std::to_string(reservation.execution_group.group_id), m_transaction);
+                if (!encoded_roster) continue;
+                const auto roster = detail::roster_from_json(
+                    nlohmann::json::parse(*encoded_roster));
+                if (!roster.valid()) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "invalid execution roster bindings"});
+                }
+                const auto binding = std::find_if(
+                    roster.reservation_bindings.begin(), roster.reservation_bindings.end(),
+                    [reservation_id](const RosterReservationBinding& value) {
+                        return value.reservation_id == reservation_id;
+                    });
+                if (binding == roster.reservation_bindings.end()) {
+                    return fail({StorageResultKind::CONFLICT,
+                                 "reservation is not bound by its execution roster"});
+                }
+                ++m_roster_validation_checks;
+                if (!detail::reservation_matches_binding(reservation, *binding, roster)) {
+                    return fail({StorageResultKind::CONFLICT,
+                                 "execution roster reservation binding conflicts"});
                 }
             }
             return {StorageResultKind::APPLIED, {}};
@@ -1952,12 +2068,7 @@ private:
             // before terminal evidence; settlement_id is only a deterministic
             // tie-breaker within the same phase.
             std::stable_sort(records.begin(), records.end(),
-                             [](const SettlementRecord& lhs, const SettlementRecord& rhs) {
-                                 const auto lhs_phase = lhs.settlement.terminal() ? 1 : 0;
-                                 const auto rhs_phase = rhs.settlement.terminal() ? 1 : 0;
-                                 if (lhs_phase != rhs_phase) return lhs_phase < rhs_phase;
-                                 return lhs.settlement.settlement_id < rhs.settlement.settlement_id;
-                             });
+                             detail::canonical_settlement_before);
             if (records.empty() && excluded_settlement == 0) {
                 return fail({StorageResultKind::INVALID_STATE, "group has no indexed settlements"});
             }
@@ -2039,7 +2150,8 @@ private:
             }
             for (const auto& event : normalized) {
                 const auto apply_result = aggregate.apply(event);
-                if (apply_result != ProgressionResult::APPLIED) {
+                if (apply_result != ProgressionResult::APPLIED &&
+                    apply_result != ProgressionResult::DUPLICATE) {
                     return fail({StorageResultKind::CONFLICT,
                                  "settlement conflicts with execution group aggregate"});
                 }
@@ -2237,7 +2349,7 @@ private:
             const auto bounds = detail::group_index_bounds(group_id);
             const auto index_entries = m_storage.m_group_settlement_index.range<std::vector>(
                 bounds.first, bounds.second, m_transaction);
-            std::optional<TradeSettlement> latest;
+            std::vector<SettlementRecord> candidates;
             for (const auto& entry : index_entries) {
                 if (entry.first.rfind(bounds.first, 0) != 0) {
                     return {StorageResultKind::STORAGE_ERROR, std::nullopt,
@@ -2260,14 +2372,23 @@ private:
                     return {StorageResultKind::STORAGE_ERROR, std::nullopt,
                             "group settlement index points to another group"};
                 }
-                if (record.settlement.trade_id != trade_id) continue;
-                if (!latest || record.settlement.settlement_id > latest->settlement_id) {
-                    latest = record.settlement;
+                if (record.settlement.trade_id == trade_id) candidates.push_back(record);
+            }
+            std::stable_sort(candidates.begin(), candidates.end(),
+                             detail::canonical_settlement_before);
+            std::optional<TradeSettlement> terminal;
+            for (const auto& candidate : candidates) {
+                if (!candidate.settlement.terminal()) continue;
+                if (!terminal) {
+                    terminal = candidate.settlement;
+                } else if (!same_terminal_evidence(*terminal, candidate.settlement)) {
+                    return {StorageResultKind::CONFLICT, std::nullopt,
+                            "conflicting terminal settlement evidence"};
                 }
             }
-            if (!latest || !latest->terminal()) return {StorageResultKind::NOT_FOUND, std::nullopt, {}};
-            return {StorageResultKind::APPLIED, latest->kind == OutcomeKind::REJECTED ||
-                           latest->kind == OutcomeKind::CANCELLED
+            if (!terminal) return {StorageResultKind::NOT_FOUND, std::nullopt, {}};
+            return {StorageResultKind::APPLIED, terminal->kind == OutcomeKind::REJECTED ||
+                           terminal->kind == OutcomeKind::CANCELLED
                        ? RiskReservationState::RELEASED
                        : RiskReservationState::SETTLED, {}};
         } catch (...) {
@@ -2449,6 +2570,9 @@ private:
     mdbxc::Transaction m_transaction;
     bool m_failed = false;
     bool m_closed = false;
+    std::set<ExecutionGroupId> m_touched_rosters;
+    std::set<std::uint64_t> m_touched_reservations;
+    std::size_t m_roster_validation_checks = 0;
 };
 
 inline TradingSystemStorage::UnitOfWork TradingSystemStorage::begin() {
