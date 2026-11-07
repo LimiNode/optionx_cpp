@@ -129,6 +129,14 @@ ts::ReservationRecord multi_reservation(
     return result;
 }
 
+ts::ReservationRecord three_reservation(
+    std::uint64_t reservation_id, std::uint64_t risk_scope_id,
+    std::int64_t amount, std::uint64_t revision = 0) {
+    auto result = multi_reservation(reservation_id, risk_scope_id, amount, revision);
+    result.execution_group = {80, 3};
+    return result;
+}
+
 ts::PhysicalTradeRecord physical_trade_for(
     std::uint64_t trade_id, std::uint64_t account_id,
     std::uint64_t risk_scope_id, std::uint64_t revision = 0) {
@@ -155,6 +163,9 @@ ts::SettlementTransition transition() {
     result.series = checkpoint(1);
     result.series->series.next_step = 1;
     result.series->current_outcome = terminal_outcome();
+    result.series->receipts = {settlement()};
+    result.series->used_intents = {41};
+    result.series->used_intent_keys = {"intent-41"};
     result.physical_trade = physical_trade(1);
     result.reservation = reservation(1);
     result.money_management = mm_state(1);
@@ -172,6 +183,7 @@ ts::ExecutionRosterRecord roster() {
     result.intent_id = 41;
     result.expected_members = 1;
     result.members = {{700, 11, 1000, money(10)}};
+    result.reservation_bindings = {{700, 500, 1000, money(50), money(50), "risk-41"}};
     return result;
 }
 
@@ -181,6 +193,24 @@ ts::ExecutionRosterRecord multi_roster() {
     result.intent_id = 41;
     result.expected_members = 2;
     result.members = {{700, 11, 1000, money(10)}, {701, 12, 102, money(20)}};
+    result.reservation_bindings = {
+        {700, 500, 1000, money(50), money(50), "risk-500"},
+        {701, 501, 102, money(20), money(20), "risk-501"}};
+    return result;
+}
+
+ts::ExecutionRosterRecord three_roster() {
+    ts::ExecutionRosterRecord result;
+    result.group_id = 80;
+    result.intent_id = 41;
+    result.expected_members = 3;
+    result.members = {{700, 11, 1000, money(10)},
+                      {701, 12, 102, money(20)},
+                      {702, 13, 103, money(30)}};
+    result.reservation_bindings = {
+        {700, 500, 1000, money(50), money(50), "risk-500"},
+        {701, 501, 102, money(20), money(20), "risk-501"},
+        {702, 502, 103, money(30), money(30), "risk-502"}};
     return result;
 }
 
@@ -224,6 +254,35 @@ void seed_multi(TestDatabase& database) {
     ASSERT_EQ(unit.put_money_management(mm_state(), 0).kind,
               ts::StorageResultKind::APPLIED);
     ASSERT_EQ(unit.put_roster(multi_roster()).kind, ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+}
+
+void seed_three(TestDatabase& database) {
+    ts::TradingSystemStorage storage(database.config());
+    auto unit = storage.begin();
+    auto waiting = checkpoint(0);
+    waiting.status = ts::SeriesStatus::WAITING_OUTCOME;
+    waiting.current_intent_id = 41;
+    waiting.current_group_id = 80;
+    waiting.current_step = 0;
+    waiting.used_intents = {41};
+    waiting.used_intent_keys = {"intent-41"};
+    ASSERT_EQ(unit.put_series(waiting, 0).kind, ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_reservation(three_reservation(500, 1000, 50), 0).kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_reservation(three_reservation(501, 102, 20), 0).kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_reservation(three_reservation(502, 103, 30), 0).kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_physical_trade(physical_trade(), 0).kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_physical_trade(physical_trade_for(701, 12, 102), 0).kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_physical_trade(physical_trade_for(702, 13, 103), 0).kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_money_management(mm_state(), 0).kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(unit.put_roster(three_roster()).kind, ts::StorageResultKind::APPLIED);
     ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
 }
 
@@ -342,6 +401,9 @@ TEST(TradingSystemBatch5B, MixedCurrencyFactsRemainDurableUntilEveryValuationIsR
     completion.series = checkpoint(1);
     completion.series->series.next_step = 1;
     completion.series->current_outcome = multi_terminal_outcome();
+    completion.series->receipts = {settlement(901, 700), settlement(902, 701)};
+    completion.series->used_intents = {41};
+    completion.series->used_intent_keys = {"intent-41"};
     completion.reservation = multi_reservation(501, 102, 20, 1);
     completion.money_management = mm_state(1);
     completion.expected_series_revision = 0;
@@ -370,6 +432,9 @@ TEST(TradingSystemBatch5B, MixedCurrencyFactsRemainDurableUntilEveryValuationIsR
     resolution.series = checkpoint(1);
     resolution.series->series.next_step = 1;
     resolution.series->current_outcome = multi_terminal_outcome();
+    resolution.series->receipts = {settlement(901, 700), settlement(902, 701)};
+    resolution.series->used_intents = {41};
+    resolution.series->used_intent_keys = {"intent-41"};
     resolution.physical_trade = physical_trade(2);
     resolution.reservation = multi_reservation(500, 1000, 50, 1);
     resolution.money_management = mm_state(1);
@@ -393,6 +458,238 @@ TEST(TradingSystemBatch5B, MixedCurrencyFactsRemainDurableUntilEveryValuationIsR
     ASSERT_TRUE(reopened.settlement(902).value);
     EXPECT_EQ(reopened.settlement(901).value->native_profit.currency, CurrencyType::EUR);
     EXPECT_EQ(reopened.settlement(902).value->native_profit.currency, CurrencyType::EUR);
+    EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::SETTLED);
+    EXPECT_EQ(reopened.reservation(501).value->state, ts::RiskReservationState::SETTLED);
+}
+
+TEST(TradingSystemBatch5B, ThreeMemberCompletionAdvancesOneRevisionAndPreservesHistory) {
+    TestDatabase database;
+    seed_three(database);
+
+    std::vector<ts::SettlementTransition> physical;
+    for (std::size_t index = 0; index != 3; ++index) {
+        const auto settlement_id = static_cast<std::uint64_t>(930 + index);
+        const auto trade_id = static_cast<std::uint64_t>(700 + index);
+        ts::SettlementTransition value;
+        value.journal = journal();
+        value.journal.event_id = 1930 + index;
+        value.journal.idempotency_key = "settlement-event-" + std::to_string(settlement_id);
+        value.settlement = {settlement(settlement_id, trade_id), money(100), std::nullopt,
+                            true, ts::trading_storage_schema_version};
+        value.physical_trade = index == 0
+            ? physical_trade(1)
+            : index == 1
+                ? physical_trade_for(trade_id, 12, 102, 1)
+                : physical_trade_for(trade_id, 13, 103, 1);
+        value.logical_currency = CurrencyType::USD;
+        physical.push_back(value);
+    }
+    {
+        ts::TradingSystemStorage storage(database.config());
+        for (const auto& value : physical) {
+            auto unit = storage.begin();
+        const auto result = unit.apply_settlement_atomic(value);
+        ASSERT_EQ(result.kind, ts::StorageResultKind::APPLIED) << result.message;
+            ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+        }
+    }
+
+    ts::ExecutionGroupAggregator aggregate(41, {80, 3}, {700, 701, 702}, CurrencyType::USD);
+    for (const auto& value : physical) {
+        ASSERT_EQ(aggregate.apply(value.settlement.settlement), ts::ProgressionResult::APPLIED);
+    }
+    ts::SettlementTransition completion = physical.back();
+    completion.series = checkpoint(1);
+    completion.series->series.next_step = 1;
+    completion.series->current_outcome = aggregate.outcome();
+    completion.series->receipts = {
+        physical[0].settlement.settlement,
+        physical[1].settlement.settlement,
+        physical[2].settlement.settlement};
+    completion.series->used_intents = {41};
+    completion.series->used_intent_keys = {"intent-41"};
+    completion.physical_trade = physical_trade_for(702, 13, 103, 1);
+    completion.reservation = three_reservation(502, 103, 30, 1);
+    completion.money_management = mm_state(1);
+    completion.money_management->last_settlement_id = 932;
+    completion.expected_series_revision = 0;
+    completion.expected_reservation_revision = 0;
+    completion.expected_money_management_revision = 0;
+    completion.group_reservation_bindings = {
+        {700, three_reservation(500, 1000, 50, 1), 0},
+        {701, three_reservation(501, 102, 20, 1), 0}};
+
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.apply_group_completion_atomic(completion).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        ts::TradingSystemStorage storage(database.config());
+        ASSERT_EQ(storage.series(12).value->series.state_revision, 1U);
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.apply_group_completion_atomic(completion).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto next = *storage.series(12).value;
+        next.series.state_revision = 2;
+        next.status = ts::SeriesStatus::WAITING_OUTCOME;
+        next.current_intent_id = 42;
+        next.current_group_id = 81;
+        next.current_step = 1;
+        next.current_outcome = {};
+        next.used_intents.push_back(42);
+        next.used_intent_keys.push_back("intent-42");
+        ts::ExecutionRosterRecord next_roster;
+        next_roster.group_id = 81;
+        next_roster.intent_id = 42;
+        next_roster.expected_members = 1;
+        next_roster.members = {{800, 14, 104, money(10)}};
+        next_roster.reservation_bindings = {{800, 600, 104, money(10), money(10), "risk-600"}};
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_roster(next_roster).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_series(next, 1).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    ts::TradingSystemStorage reopened(database.config());
+    ASSERT_TRUE(reopened.series(12).value);
+    EXPECT_EQ(reopened.series(12).value->series.state_revision, 2U);
+    EXPECT_EQ(reopened.series(12).value->receipts.size(), 3U);
+    EXPECT_EQ(reopened.series(12).value->used_intents.size(), 2U);
+    EXPECT_EQ(reopened.settlements_for_group(80).values.size(), 3U);
+}
+
+TEST(TradingSystemBatch5B, IndependentValuationsSurviveRestartBeforeLogicalCompletion) {
+    TestDatabase database;
+    seed_multi(database);
+
+    auto native_a = settlement_record(CurrencyType::EUR);
+    native_a.settlement = settlement(941, 700);
+    native_a.settlement.net_profit = money(10000, CurrencyType::EUR);
+    native_a.native_profit = money(10000, CurrencyType::EUR);
+    native_a.logical_outcome_ready = false;
+    auto native_b = settlement_record(CurrencyType::RUB);
+    native_b.settlement = settlement(942, 701);
+    native_b.settlement.kind = ts::OutcomeKind::LOSS;
+    native_b.settlement.net_profit = money(-500000, CurrencyType::RUB);
+    native_b.native_profit = money(-500000, CurrencyType::RUB);
+    native_b.logical_outcome_ready = false;
+
+    auto persist_native = [](ts::SettlementRecord record, std::uint64_t event_id,
+                              ts::PhysicalTradeRecord trade) {
+        ts::SettlementTransition value;
+        value.journal.event_id = event_id;
+        value.journal.event_type = "SETTLEMENT_APPLIED";
+        value.journal.aggregate_id = "group:80";
+        value.journal.idempotency_key = "settlement-event-" +
+                                         std::to_string(record.settlement.settlement_id);
+        value.settlement = std::move(record);
+        value.physical_trade = trade;
+        value.logical_currency = CurrencyType::USD;
+        return value;
+    };
+    const auto physical_a = persist_native(native_a, 1941, physical_trade(1));
+    const auto physical_b = persist_native(native_b, 1942, physical_trade_for(701, 12, 102, 1));
+    for (const auto& value : {physical_a, physical_b}) {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.apply_settlement_atomic(value).kind,
+                  ts::StorageResultKind::PENDING_VALUATION);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    ts::ValuationTransition resolution_a;
+    resolution_a.journal.event_id = 1943;
+    resolution_a.journal.event_type = "VALUATION_RESOLVED";
+    resolution_a.journal.aggregate_id = "group:80";
+    resolution_a.journal.idempotency_key = "valuation-event-941";
+    resolution_a.settlement_id = 941;
+    resolution_a.valuation = {CurrencyType::EUR, CurrencyType::USD, 1, 1, 100,
+                              "test", "fx-941", "EXACT_FIXED_POINT", true, 2};
+    resolution_a.logical_currency = CurrencyType::USD;
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.record_valuation_resolution_atomic(resolution_a).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        ts::TradingSystemStorage storage(database.config());
+        EXPECT_EQ(storage.series(12).value->series.state_revision, 0U);
+        EXPECT_TRUE(storage.valuation_resolution(941).value.has_value());
+    }
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        auto conflicting = resolution_a;
+        conflicting.valuation.rate_numerator = 2;
+        conflicting.valuation.snapshot_id = "fx-941-conflict";
+        EXPECT_EQ(unit.record_valuation_resolution_atomic(conflicting).kind,
+                  ts::StorageResultKind::CONFLICT);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+
+    ts::TradeSettlement logical_a = settlement(941, 700);
+    logical_a.net_profit = money(10000);
+    ts::TradeSettlement logical_b = settlement(942, 701);
+    logical_b.kind = ts::OutcomeKind::LOSS;
+    logical_b.net_profit = money(-5000);
+    ts::ExecutionGroupAggregator outcome_aggregate(
+        41, {80, 2}, {700, 701}, CurrencyType::USD);
+    ASSERT_EQ(outcome_aggregate.apply(logical_a), ts::ProgressionResult::APPLIED);
+    ASSERT_EQ(outcome_aggregate.apply(logical_b), ts::ProgressionResult::APPLIED);
+
+    ts::ValuationTransition resolution_b;
+    resolution_b.journal.event_id = 1944;
+    resolution_b.journal.event_type = "VALUATION_RESOLVED";
+    resolution_b.journal.aggregate_id = "group:80";
+    resolution_b.journal.idempotency_key = "valuation-event-942";
+    resolution_b.settlement_id = 942;
+    resolution_b.valuation = {CurrencyType::RUB, CurrencyType::USD, 1, 100, 101,
+                              "test", "fx-942", "EXACT_FIXED_POINT", true, 2};
+    resolution_b.logical_currency = CurrencyType::USD;
+    resolution_b.series = checkpoint(1);
+    resolution_b.series->series.next_step = 1;
+    resolution_b.series->current_outcome = outcome_aggregate.outcome();
+    resolution_b.series->receipts = {logical_a, logical_b};
+    resolution_b.series->used_intents = {41};
+    resolution_b.series->used_intent_keys = {"intent-41"};
+    resolution_b.physical_trade = physical_trade_for(701, 12, 102, 1);
+    resolution_b.reservation = multi_reservation(501, 102, 20, 1);
+    resolution_b.money_management = mm_state(1);
+    resolution_b.money_management->last_settlement_id = 942;
+    resolution_b.expected_series_revision = 0;
+    resolution_b.expected_physical_trade_revision = 1;
+    resolution_b.expected_reservation_revision = 0;
+    resolution_b.expected_money_management_revision = 0;
+    resolution_b.group_reservation_bindings = {
+        {700, multi_reservation(500, 1000, 50, 1), 0}};
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.resolve_pending_valuation_atomic(resolution_b).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        ts::TradingSystemStorage storage(database.config());
+        EXPECT_EQ(storage.series(12).value->series.state_revision, 1U);
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.record_valuation_resolution_atomic(resolution_a).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        EXPECT_EQ(unit.resolve_pending_valuation_atomic(resolution_b).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    ts::TradingSystemStorage reopened(database.config());
+    EXPECT_EQ(reopened.series(12).value->series.state_revision, 1U);
     EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::SETTLED);
     EXPECT_EQ(reopened.reservation(501).value->state, ts::RiskReservationState::SETTLED);
 }
@@ -423,6 +720,9 @@ TEST(TradingSystemBatch5B, TerminalReservationStateFollowsItsOwnPhysicalOutcome)
     second.physical_trade = physical_trade_for(701, 12, 102, 1);
     second.series = checkpoint(1);
     second.series->series.next_step = 1;
+    second.series->receipts = {first.settlement.settlement, second.settlement.settlement};
+    second.series->used_intents = {41};
+    second.series->used_intent_keys = {"intent-41"};
     auto outcome = ts::ExecutionGroupAggregator(
         41, {80, 2}, {700, 701}, CurrencyType::USD);
     ASSERT_EQ(outcome.apply(first.settlement.settlement), ts::ProgressionResult::APPLIED);
@@ -455,6 +755,165 @@ TEST(TradingSystemBatch5B, TerminalReservationStateFollowsItsOwnPhysicalOutcome)
     ts::TradingSystemStorage reopened(database.config());
     EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::SETTLED);
     EXPECT_EQ(reopened.reservation(501).value->state, ts::RiskReservationState::RELEASED);
+}
+
+TEST(TradingSystemBatch5B, SameScopeReservationSwapIsRejectedByImmutableRoster) {
+    TestDatabase database;
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        auto waiting = checkpoint(0);
+        waiting.status = ts::SeriesStatus::WAITING_OUTCOME;
+        waiting.current_intent_id = 41;
+        waiting.current_group_id = 80;
+        waiting.used_intents = {41};
+        waiting.used_intent_keys = {"intent-41"};
+        ASSERT_EQ(unit.put_series(waiting, 0).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_reservation(multi_reservation(500, 1000, 50), 0).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_reservation(multi_reservation(501, 1000, 20), 0).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_physical_trade(physical_trade(), 0).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_physical_trade(physical_trade_for(701, 12, 1000), 0).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.put_money_management(mm_state(), 0).kind,
+                  ts::StorageResultKind::APPLIED);
+        auto immutable_roster = multi_roster();
+        immutable_roster.members[1].risk_scope_id = 1000;
+        immutable_roster.reservation_bindings[1].risk_scope_id = 1000;
+        ASSERT_EQ(unit.put_roster(immutable_roster).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    auto first = settlement_record();
+    first.settlement = settlement(961, 700);
+    auto second = settlement_record();
+    second.settlement = settlement(962, 701);
+    {
+        ts::TradingSystemStorage storage(database.config());
+        for (const auto& value : {std::make_pair(first, physical_trade(1)),
+                                  std::make_pair(second, physical_trade_for(701, 12, 1000, 1))}) {
+            ts::SettlementTransition transition;
+            transition.journal.event_id = value.first.settlement.settlement_id + 1000;
+            transition.journal.event_type = "SETTLEMENT_APPLIED";
+            transition.journal.aggregate_id = "group:80";
+            transition.journal.idempotency_key = "settlement-event-" +
+                                                 std::to_string(value.first.settlement.settlement_id);
+            transition.settlement = value.first;
+            transition.physical_trade = value.second;
+            transition.logical_currency = CurrencyType::USD;
+            auto unit = storage.begin();
+            ASSERT_EQ(unit.apply_settlement_atomic(transition).kind,
+                      ts::StorageResultKind::APPLIED);
+            ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+        }
+    }
+
+    ts::ExecutionGroupAggregator aggregate(41, {80, 2}, {700, 701}, CurrencyType::USD);
+    ASSERT_EQ(aggregate.apply(first.settlement), ts::ProgressionResult::APPLIED);
+    ASSERT_EQ(aggregate.apply(second.settlement), ts::ProgressionResult::APPLIED);
+    ts::SettlementTransition swapped;
+    swapped.journal.event_id = 1963;
+    swapped.journal.event_type = "GROUP_COMPLETION";
+    swapped.journal.aggregate_id = "group:80";
+    swapped.journal.idempotency_key = "settlement-event-962";
+    swapped.settlement = second;
+    swapped.series = checkpoint(1);
+    swapped.series->series.next_step = 1;
+    swapped.series->current_outcome = aggregate.outcome();
+    swapped.series->receipts = {first.settlement, second.settlement};
+    swapped.series->used_intents = {41};
+    swapped.series->used_intent_keys = {"intent-41"};
+    swapped.physical_trade = physical_trade_for(701, 12, 1000, 1);
+    swapped.reservation = multi_reservation(500, 1000, 50, 1);
+    swapped.money_management = mm_state(1);
+    swapped.money_management->last_settlement_id = 962;
+    swapped.expected_series_revision = 0;
+    swapped.expected_reservation_revision = 0;
+    swapped.expected_money_management_revision = 0;
+    swapped.logical_currency = CurrencyType::USD;
+    swapped.group_reservation_bindings = {
+        {700, multi_reservation(501, 1000, 20, 1), 0}};
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        const auto result = unit.apply_group_completion_atomic(swapped);
+        EXPECT_EQ(result.kind, ts::StorageResultKind::CONFLICT) << result.message;
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+    ts::TradingSystemStorage reopened(database.config());
+    EXPECT_EQ(reopened.series(12).value->series.state_revision, 0U);
+    EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::RESERVED);
+    EXPECT_EQ(reopened.reservation(501).value->state, ts::RiskReservationState::RESERVED);
+}
+
+TEST(TradingSystemBatch5B, GroupIndexReportsCorruptionAndRebuildRemovesOrphans) {
+    TestDatabase database;
+    seed(database);
+    auto physical = transition();
+    physical.series.reset();
+    physical.reservation.reset();
+    physical.money_management.reset();
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.record_physical_settlement(physical).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        ts::TradingSystemStorage storage(database.config());
+        {
+            mdbxc::KeyValueTable<std::string, std::string> settlements(
+                storage.connection(), "ts_settlements");
+            auto transaction = storage.connection()->transaction(mdbxc::TransactionMode::WRITABLE);
+            ASSERT_TRUE(settlements.erase("900", transaction));
+            transaction.commit();
+        }
+        EXPECT_EQ(storage.settlements_for_group(80).kind, ts::StorageResultKind::STORAGE_ERROR);
+    }
+
+    TestDatabase rebuild_database;
+    seed(rebuild_database);
+    physical = transition();
+    physical.series.reset();
+    physical.reservation.reset();
+    physical.money_management.reset();
+    {
+        ts::TradingSystemStorage storage(rebuild_database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.record_physical_settlement(physical).kind,
+                  ts::StorageResultKind::APPLIED);
+        auto other = settlement_record();
+        other.settlement = settlement(901, 701);
+        other.settlement.execution_group_id = 81;
+        other.native_profit = money(100);
+        ASSERT_EQ(unit.put_settlement(other).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        ts::TradingSystemStorage storage(rebuild_database.config());
+        {
+            mdbxc::KeyValueTable<std::string, std::string> index(
+                storage.connection(), "ts_group_settlement_index");
+            auto transaction = storage.connection()->transaction(mdbxc::TransactionMode::WRITABLE);
+            index.insert("80:901", "901", transaction);
+            index.insert("80:999", "999", transaction);
+            transaction.commit();
+        }
+        EXPECT_EQ(storage.settlements_for_group(80).kind, ts::StorageResultKind::STORAGE_ERROR);
+    }
+    {
+        ts::TradingSystemStorage storage(rebuild_database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.rebuild_group_settlement_index().kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    ts::TradingSystemStorage reopened(rebuild_database.config());
+    EXPECT_EQ(reopened.settlements_for_group(80).kind, ts::StorageResultKind::APPLIED);
+    EXPECT_EQ(reopened.settlements_for_group(80).values.size(), 1U);
 }
 
 TEST(TradingSystemBatch5B, InvalidCheckpointCannotForgeLogicalProgression) {
@@ -547,6 +1006,9 @@ TEST(TradingSystemBatch5B, PhysicalSettlementDoesNotCompleteMultiMemberGroup) {
     second.reservation = multi_reservation(501, 102, 20, 1);
     second.series = checkpoint(1);
     second.series->series.next_step = 1;
+    second.series->receipts = {first.settlement.settlement, second.settlement.settlement};
+    second.series->used_intents = {41};
+    second.series->used_intent_keys = {"intent-41"};
     second.expected_series_revision = 0;
     second.money_management = mm_state(1);
     second.money_management->last_settlement_id = 902;
@@ -604,6 +1066,8 @@ TEST(TradingSystemBatch5B, ImmediateValuationMustMatchNormalizedGroupOutcome) {
     correct.journal.event_id = 1202;
     correct.journal.idempotency_key = "settlement-event-900-fx-correct";
     correct.series->current_outcome.net_profit = money(200);
+    correct.series->receipts = {settlement(900, 700)};
+    correct.series->receipts.front().net_profit = money(200);
     {
         ts::TradingSystemStorage storage(database.config());
         auto unit = storage.begin();
@@ -802,6 +1266,9 @@ TEST(TradingSystemBatch5B, PendingValuationResolvesExactlyOnceAfterReopen) {
     resolution.logical_currency = CurrencyType::USD;
     resolution.series = checkpoint(1);
     resolution.series->series.next_step = 1;
+    resolution.series->receipts = {settlement()};
+    resolution.series->used_intents = {41};
+    resolution.series->used_intent_keys = {"intent-41"};
     resolution.expected_series_revision = 0;
     resolution.series->current_outcome = terminal_outcome();
     resolution.physical_trade = physical_trade(2);

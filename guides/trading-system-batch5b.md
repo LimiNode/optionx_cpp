@@ -78,10 +78,14 @@ The transition has two deliberate forms:
 | Repeated physical or logical event | No additional writes | `DUPLICATE` |
 
 The group index is maintained in the same MDBX transaction as the settlement.
-`settlements_for_group()` and logical aggregation use that index instead of
-scanning all settlement facts. `UnitOfWork::rebuild_group_settlement_index()`
-is an explicit recovery/maintenance operation for rebuilding the derived index
-from canonical facts.
+`settlements_for_group()` and logical aggregation use a true MDBX key range
+(`<group_id>:` through `<group_id>;`) instead of loading the complete index.
+Every indexed value is checked against its key and canonical settlement. A
+missing settlement or a settlement belonging to another group is a
+`STORAGE_ERROR`, never an omitted member. `UnitOfWork::rebuild_group_settlement_index()`
+is an explicit transactional recovery operation: it derives the expected
+entries from canonical settlements and removes stale, orphan and wrong-group
+entries before inserting missing entries.
 
 `UNKNOWN`, pending and non-terminal group aggregates never release the full
 group risk. A logical transition must include the authoritative normalized
@@ -94,12 +98,14 @@ the supplied quote is stale, but the stored record is marked
 settlement still has a journal event, so recovery can distinguish a durable
 native fact from a transition that was never recorded.
 
-Pending valuation is completed by `resolve_pending_valuation_atomic()`. It does
-not rewrite the native settlement: the selected FX fact and converted logical
-profit are stored as an immutable valuation-resolution record, while the
-logical projections are applied in the same Unit of Work. A resolved native
-settlement is therefore excluded from `pending_valuations()` even though its
-original native record remains unchanged.
+`record_valuation_resolution_atomic()` persists one immutable valuation fact
+independently of the rest of its group. It does not require series, MM or risk
+projections and does not rewrite the native settlement. `resolve_pending_valuation_atomic()`
+uses that fact and then attempts logical completion; it returns
+`PENDING_VALUATION` while any other required contribution remains unresolved.
+Only the final group completion changes series/MM/risk projections, in the same
+Unit of Work. A resolved native settlement is therefore excluded from
+`pending_valuations()` even though its original native record remains unchanged.
 
 Immediate and deferred valuation use the same fixed-point conversion and
 aggregate validation. Valuation is resolved per physical contribution: a
@@ -110,11 +116,27 @@ by itself: the converted group result must match the supplied logical outcome.
 `ROUND_HALF_UP` rounds an exact half away from zero and conversion rejects
 integer overflow.
 
-Group reservations are bound to physical `trade_id` values through
-`ReservationBinding`. Their terminal state is derived from that member's own
-settlement: executed outcomes settle risk, while proven `REJECTED` or
-`CANCELLED`/`NOT_SUBMITTED` outcomes release it. RiskScope IDs alone are not a
-complete binding and are ambiguous when several reservations share one scope.
+Group reservations are bound to physical `trade_id` values through immutable
+`ExecutionRosterRecord::reservation_bindings`, persisted before any external
+submission. Completion-time `ReservationBinding` values must match the stored
+reservation ID, RiskScope, monetary facts and idempotency key. Batch 5B
+supports one reservation per physical trade; an aggregated reservation covering
+several trades is not inferred or silently accepted. Their terminal state is
+derived from that member's own settlement: executed outcomes settle risk,
+while proven `REJECTED` or `CANCELLED`/`NOT_SUBMITTED` outcomes release it.
+RiskScope IDs alone are not a complete binding and are ambiguous when several
+reservations share one scope.
+
+## Series revision contract
+
+Physical settlement receipts are independently idempotent, but one logical
+group completion is one `SeriesProgression` transition. The validated
+`apply_group_completion()` path applies all newly observed members to the
+existing aggregator and advances `TradeSeries::state_revision` exactly once,
+regardless of the number of physical members. The durable checkpoint must carry
+the complete receipt history and the complete used `IntentId` and idempotency
+key sets. Storage compares those collections, the current outcome, status,
+group identity, next step and revision before accepting the checkpoint.
 
 An execution roster rejects duplicate physical trade identities before it can
 be committed. This prevents repeated callback data from being mistaken for a
@@ -179,6 +201,6 @@ per-contribution mixed-currency valuation, explicit trade-to-reservation
 bindings, per-member WIN/CANCELLED risk outcomes, checkpoint forgery rejection,
 index rebuild, immediate and deferred valuation consistency, exact-half
 rounding, durable risk gates and malformed read rejection. The focused suite
-contains 26 tests.
+contains 30 tests.
 
 No test opens a broker connection or uses live credentials.

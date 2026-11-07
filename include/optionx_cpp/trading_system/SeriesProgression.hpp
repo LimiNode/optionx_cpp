@@ -58,10 +58,9 @@ public:
             before, std::move(group_before), receipts_before,
             used_intents, used_intent_keys);
         if (hydrated != ProgressionResult::APPLIED) return hydrated;
-        for (const auto& event : incoming) {
-            const auto applied = owner.apply(event, owner.snapshot().series.state_revision);
-            if (applied != ProgressionResult::APPLIED) return applied;
-        }
+        const auto applied = owner.apply_group_completion(
+            incoming, owner.snapshot().series.state_revision);
+        if (applied != ProgressionResult::APPLIED) return applied;
         const auto actual = owner.snapshot();
         return same_snapshot(actual, candidate)
             ? ProgressionResult::APPLIED : ProgressionResult::INVALID_STATE;
@@ -213,6 +212,59 @@ public:
         return ProgressionResult::APPLIED;
     }
 
+    /// \brief Applies all receipts of one logical group as one revisioned transition.
+    ///
+    /// Physical receipt identities remain independently idempotent, but the
+    /// durable series revision belongs to the logical group completion rather
+    /// than to the number of physical members.
+    ProgressionResult apply_group_completion(
+        const std::vector<TradeSettlement>& events,
+        std::uint64_t expected_revision) {
+        if (events.empty()) return ProgressionResult::INVALID_STATE;
+
+        auto candidate = *this;
+        bool applied_any = false;
+        for (const auto& event : events) {
+            const auto receipt = candidate.m_receipts.find(event.settlement_id);
+            if (receipt != candidate.m_receipts.end()) {
+                if (receipt->second == event) continue;
+                return ProgressionResult::SETTLEMENT_CONFLICT;
+            }
+            const auto result = candidate.m_group.apply(event);
+            if (result != ProgressionResult::APPLIED) return result;
+            candidate.m_receipts.emplace(event.settlement_id, event);
+            applied_any = true;
+        }
+        if (!applied_any) return ProgressionResult::DUPLICATE;
+
+        const auto check = check_revision(expected_revision);
+        if (check != ProgressionResult::APPLIED) return check;
+        if (!m_has_group || (m_state.status != SeriesStatus::WAITING_OUTCOME &&
+                            m_state.status != SeriesStatus::UNRESOLVED &&
+                            m_state.status != SeriesStatus::BLOCKED_ERROR)) {
+            return ProgressionResult::INVALID_STATE;
+        }
+
+        const auto outcome = candidate.m_group.outcome();
+        candidate.m_state.outcome = outcome;
+        if (outcome.all_members_terminal &&
+            outcome.aggregation_status == AggregationStatus::NUMERIC_OVERFLOW) {
+            candidate.m_state.status = SeriesStatus::BLOCKED_ERROR;
+        } else if (outcome.final) {
+            if (outcome.net_profit) ++candidate.m_state.series.next_step;
+            candidate.m_state.status = SeriesStatus::ACTIVE;
+            candidate.m_state.current_intent_id = 0;
+            candidate.m_state.current_group_id = 0;
+            candidate.m_has_group = false;
+        } else {
+            candidate.m_state.status = outcome.unresolved ? SeriesStatus::UNRESOLVED
+                                                        : SeriesStatus::WAITING_OUTCOME;
+        }
+        ++candidate.m_state.series.state_revision;
+        swap(candidate);
+        return ProgressionResult::APPLIED;
+    }
+
     /// \brief Closes an idle series, never cancels an outstanding operation.
     ProgressionResult complete(std::uint64_t expected_revision) {
         const auto check = check_revision(expected_revision);
@@ -228,6 +280,7 @@ private:
         return lhs.series.series_id == rhs.series.series_id &&
                lhs.series.origin_signal_id == rhs.series.origin_signal_id &&
                lhs.series.next_step == rhs.series.next_step &&
+               lhs.series.state_revision == rhs.series.state_revision &&
                lhs.status == rhs.status &&
                lhs.current_intent_id == rhs.current_intent_id &&
                lhs.current_group_id == rhs.current_group_id &&
