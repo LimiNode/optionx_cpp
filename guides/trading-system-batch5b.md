@@ -87,9 +87,21 @@ is an explicit transactional recovery operation: it derives the expected
 entries from canonical settlements and removes stale, orphan and wrong-group
 entries before inserting missing entries.
 
+The range key is not a chronology. During aggregation, non-terminal
+reconciliation observations such as `UNKNOWN` are replayed before terminal
+evidence. Settlement IDs are used only as a deterministic tie-breaker within
+the same phase; they are never treated as timestamps. A conflicting terminal
+result for one physical member is rejected.
+
 `UNKNOWN`, pending and non-terminal group aggregates never release the full
 group risk. A logical transition must include the authoritative normalized
 `GroupOutcome`; an arbitrary checkpoint outcome is rejected.
+
+All journal events share the durable `journal_event` sequence and the global
+`ts_journal_ids` uniqueness index. Externally supplied event IDs advance the
+same sequence, while automatically generated logical-completion events skip
+already occupied IDs. Sequence updates are part of the Unit of Work and roll
+back with it.
 
 Native cross-currency settlement is retained even without an FX quote, or when
 the supplied quote is stale, but the stored record is marked
@@ -126,6 +138,14 @@ derived from that member's own settlement: executed outcomes settle risk,
 while proven `REJECTED` or `CANCELLED`/`NOT_SUBMITTED` outcomes release it.
 RiskScope IDs alone are not a complete binding and are ambiguous when several
 reservations share one scope.
+
+`RosterMemberRecord::stake` is the requested physical stake. The immutable
+reservation binding carries the admitted reservation stake and potential risk;
+for Batch 5B the binding stake must equal the physical stake, while potential
+risk may represent the policy's reserved exposure. Reservation identity fields
+(`reservation_id`, account/risk scope, intent/group/cardinality, stake,
+potential risk, account revision and idempotency key) cannot change in a
+revisioned lifecycle update. Only lifecycle state and its revision may change.
 
 ## Series revision contract
 
@@ -201,6 +221,6 @@ per-contribution mixed-currency valuation, explicit trade-to-reservation
 bindings, per-member WIN/CANCELLED risk outcomes, checkpoint forgery rejection,
 index rebuild, immediate and deferred valuation consistency, exact-half
 rounding, durable risk gates and malformed read rejection. The focused suite
-contains 30 tests.
+contains 36 tests.
 
 No test opens a broker connection or uses live credentials.

@@ -175,7 +175,17 @@ struct ExecutionRosterRecord {
         std::set<std::uint64_t> bound_trades;
         std::set<std::uint64_t> reservation_ids;
         for (const auto& binding : reservation_bindings) {
-            if (!binding.valid() || !trade_ids.count(binding.trade_id) ||
+            const auto member = std::find_if(
+                members.begin(), members.end(),
+                [&binding](const RosterMemberRecord& value) {
+                    return value.trade_id == binding.trade_id;
+                });
+            if (!binding.valid() || member == members.end() ||
+                binding.risk_scope_id != member->risk_scope_id ||
+                binding.stake.units != member->stake.units ||
+                binding.stake.precision != member->stake.precision ||
+                binding.stake.currency != member->stake.currency ||
+                !trade_ids.count(binding.trade_id) ||
                 !bound_trades.insert(binding.trade_id).second ||
                 !reservation_ids.insert(binding.reservation_id).second) return false;
         }
@@ -390,6 +400,35 @@ inline std::pair<std::string, std::string> group_index_bounds(ExecutionGroupId g
 
 inline nlohmann::json money_to_json(const MoneyAmount& value) {
     return {{"units", value.units}, {"precision", value.precision}, {"currency", value.currency}};
+}
+
+inline bool same_money(const MoneyAmount& lhs, const MoneyAmount& rhs) noexcept {
+    return lhs.units == rhs.units && lhs.precision == rhs.precision &&
+           lhs.currency == rhs.currency;
+}
+
+inline bool same_reservation_identity(
+    const ReservationRecord& lhs, const ReservationRecord& rhs) noexcept {
+    return lhs.reservation_id == rhs.reservation_id &&
+           lhs.risk_scope_id == rhs.risk_scope_id &&
+           lhs.risk_scope_kind == rhs.risk_scope_kind &&
+           lhs.intent_id == rhs.intent_id &&
+           lhs.execution_group.group_id == rhs.execution_group.group_id &&
+           lhs.execution_group.expected_members == rhs.execution_group.expected_members &&
+           lhs.cardinality == rhs.cardinality && same_money(lhs.stake, rhs.stake) &&
+           same_money(lhs.potential_risk, rhs.potential_risk) &&
+           lhs.idempotency_key == rhs.idempotency_key &&
+           lhs.account_revision == rhs.account_revision;
+}
+
+inline bool reservation_matches_binding(
+    const ReservationRecord& reservation,
+    const RosterReservationBinding& binding) noexcept {
+    return reservation.reservation_id == binding.reservation_id &&
+           reservation.risk_scope_id == binding.risk_scope_id &&
+           same_money(reservation.stake, binding.stake) &&
+           same_money(reservation.potential_risk, binding.potential_risk) &&
+           reservation.idempotency_key == binding.idempotency_key;
 }
 
 inline MoneyAmount money_from_json(const nlohmann::json& value) {
@@ -1168,6 +1207,8 @@ public:
             if (m_storage.m_journal_ids.find(event_key, m_transaction)) {
                 return fail({StorageResultKind::CONFLICT, "journal event id already exists"});
             }
+            const auto sequence = advance_journal_sequence(event.event_id);
+            if (sequence.kind != StorageResultKind::APPLIED) return sequence;
             m_storage.m_journal.insert(event.idempotency_key, encoded, m_transaction);
             m_storage.m_journal_ids.insert(event_key, event.idempotency_key, m_transaction);
             return {StorageResultKind::APPLIED, {}};
@@ -1271,8 +1312,23 @@ public:
         if (!valid_schema(value.schema_version) || !value.valid()) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid reservation"});
         }
-        return put_revisioned(m_storage.m_reservations, std::to_string(value.reservation_id),
-                              detail::reservation_to_json(value).dump(), value.state_revision, expected_revision);
+        try {
+            const auto existing = m_storage.m_reservations.find(
+                std::to_string(value.reservation_id), m_transaction);
+            if (existing) {
+                const auto current = detail::reservation_from_json(
+                    nlohmann::json::parse(*existing));
+                if (!detail::same_reservation_identity(current, value)) {
+                    return fail({StorageResultKind::CONFLICT,
+                                 "reservation immutable identity changed"});
+                }
+            }
+            return put_revisioned(m_storage.m_reservations, std::to_string(value.reservation_id),
+                                  detail::reservation_to_json(value).dump(),
+                                  value.state_revision, expected_revision);
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
     }
 
     StorageResult put_physical_trade(const PhysicalTradeRecord& value,
@@ -1482,10 +1538,6 @@ public:
                 return fail({StorageResultKind::INVALID_ARGUMENT,
                              "logical completion idempotency key is empty"});
             }
-            if (m_storage.m_journal.find(completion_key, m_transaction)) {
-                return {StorageResultKind::DUPLICATE, {}};
-            }
-
             SettlementTransition checked = transition;
             if (!checked.physical_trade) {
                 const auto physical = m_storage.m_physical_trades.find(
@@ -1508,27 +1560,44 @@ public:
                 return fail({StorageResultKind::CONFLICT,
                              "logical outcome does not match authoritative group aggregate"});
             }
-            const auto bindings = validate_terminal_bindings(checked);
-            if (bindings.kind != StorageResultKind::APPLIED) return bindings;
-            const auto progression = validate_series_progression(checked);
-            if (progression.kind != StorageResultKind::APPLIED) return progression;
-
             auto completion = transition.completion_journal;
             if (!completion) {
-                const auto sequence = next_id("logical_completion_event");
-                if (sequence.kind != StorageResultKind::APPLIED) return fail({sequence.kind, sequence.message});
+                const auto existing = m_storage.m_journal.find(completion_key, m_transaction);
                 completion = transition.journal;
-                completion->event_id = sequence.value;
+                if (existing) {
+                    completion->event_id = detail::journal_from_json(
+                        nlohmann::json::parse(*existing)).event_id;
+                } else {
+                    const auto sequence = next_journal_event_id();
+                    if (sequence.kind != StorageResultKind::APPLIED) {
+                        return fail({sequence.kind, sequence.message});
+                    }
+                    completion->event_id = sequence.value;
+                }
                 completion->event_type = "GROUP_COMPLETION";
+                completion->state_revision = transition.series->series.state_revision;
                 completion->idempotency_key = transition.journal.idempotency_key + ":logical";
                 completion->payload = detail::group_outcome_to_json(outcome);
             } else if (completion->idempotency_key == transition.journal.idempotency_key) {
                 return fail({StorageResultKind::INVALID_ARGUMENT,
                              "physical and logical idempotency identities must differ"});
             }
+            if (completion->event_type != "GROUP_COMPLETION" ||
+                completion->aggregate_id != "group:" +
+                    std::to_string(transition.settlement.settlement.execution_group_id) ||
+                completion->state_revision != transition.series->series.state_revision ||
+                completion->payload != detail::group_outcome_to_json(outcome)) {
+                return fail({StorageResultKind::CONFLICT,
+                             "logical completion journal payload conflicts with aggregate"});
+            }
             const auto journal_result = append_journal(*completion);
             if (journal_result.kind == StorageResultKind::DUPLICATE) return journal_result;
             if (journal_result.kind != StorageResultKind::APPLIED) return journal_result;
+
+            const auto bindings = validate_terminal_bindings(checked);
+            if (bindings.kind != StorageResultKind::APPLIED) return bindings;
+            const auto progression = validate_series_progression(checked);
+            if (progression.kind != StorageResultKind::APPLIED) return progression;
 
             if (auto result = put_series(*transition.series, transition.expected_series_revision);
                 result.kind != StorageResultKind::APPLIED) return result;
@@ -1675,6 +1744,11 @@ public:
             return {StorageResultKind::INVALID_STATE, "unit of work was aborted after an operation failure"};
         }
         try {
+            const auto bindings = validate_roster_reservation_bindings();
+            if (bindings.kind != StorageResultKind::APPLIED) {
+                rollback();
+                return bindings;
+            }
             m_transaction.commit();
             m_closed = true;
             return {StorageResultKind::APPLIED, {}};
@@ -1692,6 +1766,75 @@ public:
     }
 
 private:
+    StorageResult advance_journal_sequence(std::uint64_t event_id) {
+        if (event_id == (std::numeric_limits<std::uint64_t>::max)()) {
+            return fail({StorageResultKind::INVALID_ARGUMENT,
+                         "journal event id namespace is exhausted"});
+        }
+        try {
+            constexpr const char* sequence_name = "journal_event";
+            const auto current = m_storage.m_sequences.find(sequence_name, m_transaction);
+            std::size_t parsed_length = 0;
+            const auto next = current
+                ? std::stoull(*current, &parsed_length)
+                : std::uint64_t{1};
+            if (current && (parsed_length != current->size() || next == 0)) {
+                return fail({StorageResultKind::STORAGE_ERROR,
+                             "journal event sequence is malformed"});
+            }
+            if (next <= event_id) {
+                m_storage.m_sequences.insert_or_assign(
+                    sequence_name, std::to_string(event_id + 1), m_transaction);
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
+    SequenceResult next_journal_event_id() {
+        for (;;) {
+            const auto sequence = next_id("journal_event");
+            if (sequence.kind != StorageResultKind::APPLIED) return sequence;
+            if (!m_storage.m_journal_ids.find(std::to_string(sequence.value), m_transaction)) {
+                return sequence;
+            }
+        }
+    }
+
+    StorageResult validate_roster_reservation_bindings() {
+        try {
+            std::vector<std::pair<std::string, std::string>> encoded_rosters;
+            m_storage.m_rosters.load(encoded_rosters, m_transaction);
+            for (const auto& entry : encoded_rosters) {
+                const auto roster = detail::roster_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (!roster.valid()) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "invalid execution roster bindings"});
+                }
+                for (const auto& binding : roster.reservation_bindings) {
+                    const auto encoded_reservation = m_storage.m_reservations.find(
+                        std::to_string(binding.reservation_id), m_transaction);
+                    if (!encoded_reservation) {
+                        return fail({StorageResultKind::INVALID_STATE,
+                                     "execution roster reservation is missing"});
+                    }
+                    const auto reservation = detail::reservation_from_json(
+                        nlohmann::json::parse(*encoded_reservation));
+                    if (!reservation.valid() ||
+                        !detail::reservation_matches_binding(reservation, binding)) {
+                        return fail({StorageResultKind::CONFLICT,
+                                     "execution roster reservation binding conflicts"});
+                    }
+                }
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     StorageResult persist_scope_gate(
         std::uint64_t risk_scope_id, std::uint64_t related_scope_id,
         const std::string& conflict_id) {
@@ -1804,6 +1947,17 @@ private:
                 }
                 records.push_back(record);
             }
+            // MDBX orders the derived keys lexicographically, which is not a
+            // settlement chronology. Reconciliation observations are replayed
+            // before terminal evidence; settlement_id is only a deterministic
+            // tie-breaker within the same phase.
+            std::stable_sort(records.begin(), records.end(),
+                             [](const SettlementRecord& lhs, const SettlementRecord& rhs) {
+                                 const auto lhs_phase = lhs.settlement.terminal() ? 1 : 0;
+                                 const auto rhs_phase = rhs.settlement.terminal() ? 1 : 0;
+                                 if (lhs_phase != rhs_phase) return lhs_phase < rhs_phase;
+                                 return lhs.settlement.settlement_id < rhs.settlement.settlement_id;
+                             });
             if (records.empty() && excluded_settlement == 0) {
                 return fail({StorageResultKind::INVALID_STATE, "group has no indexed settlements"});
             }
