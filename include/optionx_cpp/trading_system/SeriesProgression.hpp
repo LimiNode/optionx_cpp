@@ -39,6 +39,89 @@ public:
 
     SeriesSnapshot snapshot() const { return m_state; }
 
+    /// \brief Validates one durable logical completion using the same state
+    /// machine as the live owner.
+    ///
+    /// `group_before` and `receipts_before` describe the durable state before
+    /// the `incoming` receipts are applied. No owner state is modified by this
+    /// helper.
+    static ProgressionResult validate_completion_transition(
+        const SeriesSnapshot& before,
+        const SeriesSnapshot& candidate,
+        ExecutionGroupAggregator group_before,
+        const std::vector<TradeSettlement>& receipts_before,
+        const std::set<IntentId>& used_intents,
+        const std::set<std::string>& used_intent_keys,
+        const std::vector<TradeSettlement>& incoming) {
+        SeriesProgression owner(before.series);
+        const auto hydrated = owner.hydrate(
+            before, std::move(group_before), receipts_before,
+            used_intents, used_intent_keys);
+        if (hydrated != ProgressionResult::APPLIED) return hydrated;
+        const auto applied = owner.apply_group_completion(
+            incoming, owner.snapshot().series.state_revision);
+        if (applied != ProgressionResult::APPLIED) return applied;
+        const auto actual = owner.snapshot();
+        return same_snapshot(actual, candidate)
+            ? ProgressionResult::APPLIED : ProgressionResult::INVALID_STATE;
+    }
+
+    /// \brief Hydrates the owner from a durable checkpoint and a fresh group owner.
+    ///
+    /// The checkpoint carries receipt and idempotency history because
+    /// `SeriesSnapshot` alone is only a read projection. All validation is
+    /// performed on a candidate copy before this owner is changed.
+    ProgressionResult hydrate(
+        const SeriesSnapshot& snapshot,
+        ExecutionGroupAggregator group,
+        const std::vector<TradeSettlement>& receipts,
+        const std::set<IntentId>& used_intents,
+        const std::set<std::string>& used_intent_keys) {
+        if (!snapshot.series.valid() || snapshot.series.state_revision ==
+                (std::numeric_limits<std::uint64_t>::max)()) {
+            return ProgressionResult::INVALID_IDENTITY;
+        }
+        SeriesProgression candidate(snapshot.series);
+        candidate.m_state = snapshot;
+        candidate.m_group = std::move(group);
+        for (const auto intent_id : used_intents) {
+            if (intent_id == 0) return ProgressionResult::INVALID_IDENTITY;
+        }
+        for (const auto& key : used_intent_keys) {
+            if (key.empty()) return ProgressionResult::INVALID_IDENTITY;
+        }
+        candidate.m_used_intents = used_intents;
+        candidate.m_used_intent_keys = used_intent_keys;
+        candidate.m_has_group = snapshot.status == SeriesStatus::WAITING_OUTCOME ||
+                                snapshot.status == SeriesStatus::UNRESOLVED ||
+                                snapshot.status == SeriesStatus::BLOCKED_ERROR;
+        if (candidate.m_has_group && !candidate.m_group.valid()) {
+            return ProgressionResult::INVALID_CONFIGURATION;
+        }
+        for (const auto& receipt : receipts) {
+            if (!receipt.valid() || !candidate.m_receipts.emplace(receipt.settlement_id, receipt).second) {
+                return ProgressionResult::SETTLEMENT_CONFLICT;
+            }
+            // Receipts from completed groups remain idempotency history, but
+            // only receipts belonging to the current roster may be replayed
+            // into the current aggregator.
+            if (candidate.m_has_group &&
+                receipt.execution_group_id == snapshot.current_group_id &&
+                candidate.m_group.apply(receipt) != ProgressionResult::APPLIED) {
+                return ProgressionResult::INVALID_OUTCOME;
+            }
+        }
+        if (candidate.m_has_group && !same_outcome(candidate.m_group.outcome(), snapshot.outcome)) {
+            return ProgressionResult::INVALID_STATE;
+        }
+        if (candidate.m_has_group && candidate.m_group.outcome().final &&
+            snapshot.status == SeriesStatus::WAITING_OUTCOME) {
+            return ProgressionResult::INVALID_STATE;
+        }
+        swap(candidate);
+        return ProgressionResult::APPLIED;
+    }
+
     /// \brief Starts one operation with an immutable physical-member roster.
     ProgressionResult begin(
         const TradeIntent& intent,
@@ -129,6 +212,59 @@ public:
         return ProgressionResult::APPLIED;
     }
 
+    /// \brief Applies all receipts of one logical group as one revisioned transition.
+    ///
+    /// Physical receipt identities remain independently idempotent, but the
+    /// durable series revision belongs to the logical group completion rather
+    /// than to the number of physical members.
+    ProgressionResult apply_group_completion(
+        const std::vector<TradeSettlement>& events,
+        std::uint64_t expected_revision) {
+        if (events.empty()) return ProgressionResult::INVALID_STATE;
+
+        auto candidate = *this;
+        bool applied_any = false;
+        for (const auto& event : events) {
+            const auto receipt = candidate.m_receipts.find(event.settlement_id);
+            if (receipt != candidate.m_receipts.end()) {
+                if (receipt->second == event) continue;
+                return ProgressionResult::SETTLEMENT_CONFLICT;
+            }
+            const auto result = candidate.m_group.apply(event);
+            if (result != ProgressionResult::APPLIED) return result;
+            candidate.m_receipts.emplace(event.settlement_id, event);
+            applied_any = true;
+        }
+        if (!applied_any) return ProgressionResult::DUPLICATE;
+
+        const auto check = check_revision(expected_revision);
+        if (check != ProgressionResult::APPLIED) return check;
+        if (!m_has_group || (m_state.status != SeriesStatus::WAITING_OUTCOME &&
+                            m_state.status != SeriesStatus::UNRESOLVED &&
+                            m_state.status != SeriesStatus::BLOCKED_ERROR)) {
+            return ProgressionResult::INVALID_STATE;
+        }
+
+        const auto outcome = candidate.m_group.outcome();
+        candidate.m_state.outcome = outcome;
+        if (outcome.all_members_terminal &&
+            outcome.aggregation_status == AggregationStatus::NUMERIC_OVERFLOW) {
+            candidate.m_state.status = SeriesStatus::BLOCKED_ERROR;
+        } else if (outcome.final) {
+            if (outcome.net_profit) ++candidate.m_state.series.next_step;
+            candidate.m_state.status = SeriesStatus::ACTIVE;
+            candidate.m_state.current_intent_id = 0;
+            candidate.m_state.current_group_id = 0;
+            candidate.m_has_group = false;
+        } else {
+            candidate.m_state.status = outcome.unresolved ? SeriesStatus::UNRESOLVED
+                                                        : SeriesStatus::WAITING_OUTCOME;
+        }
+        ++candidate.m_state.series.state_revision;
+        swap(candidate);
+        return ProgressionResult::APPLIED;
+    }
+
     /// \brief Closes an idle series, never cancels an outstanding operation.
     ProgressionResult complete(std::uint64_t expected_revision) {
         const auto check = check_revision(expected_revision);
@@ -140,6 +276,30 @@ public:
     }
 
 private:
+    static bool same_snapshot(const SeriesSnapshot& lhs, const SeriesSnapshot& rhs) noexcept {
+        return lhs.series.series_id == rhs.series.series_id &&
+               lhs.series.origin_signal_id == rhs.series.origin_signal_id &&
+               lhs.series.next_step == rhs.series.next_step &&
+               lhs.series.state_revision == rhs.series.state_revision &&
+               lhs.status == rhs.status &&
+               lhs.current_intent_id == rhs.current_intent_id &&
+               lhs.current_group_id == rhs.current_group_id &&
+               lhs.current_step == rhs.current_step &&
+               same_outcome(lhs.outcome, rhs.outcome);
+    }
+
+    static bool same_outcome(const GroupOutcome& lhs, const GroupOutcome& rhs) noexcept {
+        if (lhs.final != rhs.final || lhs.unresolved != rhs.unresolved ||
+            lhs.all_members_terminal != rhs.all_members_terminal ||
+            lhs.completed_members != rhs.completed_members ||
+            lhs.aggregation_status != rhs.aggregation_status || lhs.kind != rhs.kind ||
+            lhs.net_profit.has_value() != rhs.net_profit.has_value()) return false;
+        if (!lhs.net_profit) return true;
+        return lhs.net_profit->units == rhs.net_profit->units &&
+               lhs.net_profit->precision == rhs.net_profit->precision &&
+               lhs.net_profit->currency == rhs.net_profit->currency;
+    }
+
     ProgressionResult check_revision(std::uint64_t expected_revision) const noexcept {
         if (!m_state.series.valid()) return ProgressionResult::INVALID_IDENTITY;
         if (m_state.series.state_revision != expected_revision) {
