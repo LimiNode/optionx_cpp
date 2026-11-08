@@ -423,10 +423,8 @@ inline bool same_reservation_identity(
 
 inline bool canonical_settlement_before(
     const SettlementRecord& lhs, const SettlementRecord& rhs) noexcept {
-    const auto lhs_phase = lhs.settlement.terminal() ? 1 : 0;
-    const auto rhs_phase = rhs.settlement.terminal() ? 1 : 0;
-    if (lhs_phase != rhs_phase) return lhs_phase < rhs_phase;
-    return lhs.settlement.settlement_id < rhs.settlement.settlement_id;
+    return optionx::trading_system::canonical_settlement_before(
+        lhs.settlement, rhs.settlement);
 }
 
 inline bool reservation_matches_binding(

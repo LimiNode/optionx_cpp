@@ -144,8 +144,8 @@ Settlement IDs identify observations; they do not establish chronology. Replay
 orders non-terminal observations before terminal evidence. A later `UNKNOWN`
 observation cannot override confirmed terminal evidence merely because its ID is
 larger, and identical terminal evidence with another ID is idempotent. Group
-aggregation and reservation terminal-state derivation use this same rule; a
-conflicting terminal pair is rejected.
+aggregation, reservation terminal-state derivation and current-series hydration
+use this same rule; a conflicting terminal pair is rejected.
 
 `RosterMemberRecord::stake` is the requested physical stake. The immutable
 reservation binding carries the admitted reservation stake and potential risk;
@@ -180,7 +180,11 @@ does not partially replace the current owner.
 The checkpoint stores the current `GroupOutcome`. Receipts from completed
 groups remain idempotency history, but only receipts matching the current
 group roster are replayed into the current aggregator. A terminal current
-aggregator cannot be restored as `WAITING_OUTCOME`.
+aggregator cannot be restored as `WAITING_OUTCOME`. Hydration sorts current
+group receipts by the canonical replay order and accepts equivalent terminal
+evidence as `DUPLICATE` without advancing the group a second time. Receipts
+from historical groups remain stored by `SettlementId` but are not applied to
+the current aggregator.
 
 `RiskAdmission::hydrate()` validates account facts, scope ownership, duplicate
 reservation identities and the next reservation ID before replacing its
@@ -234,6 +238,6 @@ per-contribution mixed-currency valuation, explicit trade-to-reservation
 bindings, per-member WIN/CANCELLED risk outcomes, checkpoint forgery rejection,
 index rebuild, immediate and deferred valuation consistency, exact-half
 rounding, durable risk gates and malformed read rejection. The focused suite
-contains 39 tests.
+contains 40 tests.
 
 No test opens a broker connection or uses live credentials.

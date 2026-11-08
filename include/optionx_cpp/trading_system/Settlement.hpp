@@ -109,6 +109,18 @@ inline bool same_terminal_evidence(
             lhs.net_profit->currency == rhs.net_profit->currency);
 }
 
+/// \brief Orders settlement observations for deterministic replay.
+///
+/// Non-terminal reconciliation evidence is replayed before terminal evidence;
+/// SettlementId is only a deterministic tie-breaker within one phase.
+inline bool canonical_settlement_before(
+    const TradeSettlement& lhs, const TradeSettlement& rhs) noexcept {
+    const auto lhs_phase = lhs.terminal() ? 1 : 0;
+    const auto rhs_phase = rhs.terminal() ? 1 : 0;
+    if (lhs_phase != rhs_phase) return lhs_phase < rhs_phase;
+    return lhs.settlement_id < rhs.settlement_id;
+}
+
 /// \class GroupOutcome
 /// \brief A value snapshot; partial money never constitutes a final outcome.
 struct GroupOutcome {

@@ -1181,6 +1181,177 @@ TEST(TradingSystemBatch5B, TerminalRiskEvidenceIgnoresLargerUnknownAndDuplicateI
     EXPECT_EQ(reopened.series(12).value->series.state_revision, 1U);
 }
 
+TEST(TradingSystemBatch5B, SeriesHydrationCanonicalizesDuplicateTerminalEvidenceAfterReopen) {
+    TestDatabase database;
+    seed_multi(database);
+
+    auto win = settlement_record();
+    win.settlement = settlement(9, 700);
+    auto unknown = settlement_record();
+    unknown.settlement = settlement(10, 701);
+    unknown.settlement.kind = ts::OutcomeKind::UNKNOWN;
+    unknown.settlement.evidence = ts::ExecutionEvidence::MAY_HAVE_EXECUTED;
+    unknown.settlement.net_profit.reset();
+    unknown.native_profit = money(0);
+    auto duplicate_win = win;
+    duplicate_win.settlement.settlement_id = 11;
+    auto loss = settlement_record();
+    loss.settlement = settlement(12, 701);
+    loss.settlement.kind = ts::OutcomeKind::LOSS;
+    loss.settlement.net_profit = money(-20);
+    loss.native_profit = money(-20);
+
+    auto persist = [](ts::SettlementRecord record, std::uint64_t event_id,
+                      const ts::PhysicalTradeRecord& physical,
+                      const std::string& key) {
+        ts::SettlementTransition value;
+        value.journal = journal();
+        value.journal.event_id = event_id;
+        value.journal.idempotency_key = key;
+        value.journal.payload = ts::detail::settlement_to_json(record.settlement);
+        value.settlement = std::move(record);
+        value.physical_trade = physical;
+        value.expected_physical_trade_revision = physical.state_revision == 0
+            ? 0 : physical.state_revision - 1;
+        value.logical_currency = CurrencyType::USD;
+        return value;
+    };
+
+    const auto physical_700 = physical_trade_for(700, 11, 1000, 1);
+    const auto physical_701 = physical_trade_for(701, 12, 102, 1);
+    for (const auto& value : {
+             persist(win, 109, physical_700, "settlement-event-9"),
+             persist(unknown, 110, physical_701, "settlement-event-10"),
+             persist(duplicate_win, 111, physical_700, "settlement-event-11"),
+             persist(loss, 112, physical_701, "settlement-event-12")}) {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        const auto recorded = unit.record_physical_settlement(value);
+        ASSERT_TRUE(recorded.kind == ts::StorageResultKind::APPLIED ||
+                    recorded.kind == ts::StorageResultKind::DUPLICATE)
+            << recorded.message;
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    const auto checkpoint_from = [](const ts::SeriesSnapshot& snapshot,
+                                    std::vector<ts::TradeSettlement> receipts) {
+        ts::SeriesCheckpoint result;
+        result.series = snapshot.series;
+        result.status = snapshot.status;
+        result.current_intent_id = snapshot.current_intent_id;
+        result.current_group_id = snapshot.current_group_id;
+        result.current_step = snapshot.current_step;
+        result.current_outcome = snapshot.outcome;
+        result.receipts = std::move(receipts);
+        result.used_intents = {41};
+        result.used_intent_keys = {"intent-41"};
+        result.schema_version = ts::trading_storage_schema_version;
+        return result;
+    };
+
+    ts::SeriesSnapshot initial;
+    initial.series = {12, 7, 0, 0};
+    initial.status = ts::SeriesStatus::WAITING_OUTCOME;
+    initial.current_intent_id = 41;
+    initial.current_group_id = 80;
+    initial.current_step = 0;
+    ts::SeriesProgression owner(initial.series);
+    ASSERT_EQ(owner.hydrate(
+                  initial, ts::ExecutionGroupAggregator(
+                              41, {80, 2}, {700, 701}, CurrencyType::USD),
+                  {}, {41}, {"intent-41"}),
+              ts::ProgressionResult::APPLIED);
+    ASSERT_EQ(owner.apply_group_completion(
+                  {unknown.settlement, win.settlement, duplicate_win.settlement}, 0),
+              ts::ProgressionResult::APPLIED);
+    ASSERT_EQ(owner.snapshot().status, ts::SeriesStatus::UNRESOLVED);
+    ASSERT_EQ(owner.snapshot().series.state_revision, 1U);
+    ASSERT_EQ(owner.snapshot().outcome.completed_members, 1U);
+
+    const auto partial = checkpoint_from(
+        owner.snapshot(), {duplicate_win.settlement, unknown.settlement, win.settlement});
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_series(partial, 0).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    ts::SeriesCheckpoint reopened_checkpoint;
+    {
+        ts::TradingSystemStorage storage(database.config());
+        ASSERT_TRUE(storage.series(12).value);
+        reopened_checkpoint = *storage.series(12).value;
+    }
+
+    ts::SeriesSnapshot reopened_snapshot;
+    reopened_snapshot.series = reopened_checkpoint.series;
+    reopened_snapshot.status = reopened_checkpoint.status;
+    reopened_snapshot.current_intent_id = reopened_checkpoint.current_intent_id;
+    reopened_snapshot.current_group_id = reopened_checkpoint.current_group_id;
+    reopened_snapshot.current_step = reopened_checkpoint.current_step;
+    reopened_snapshot.outcome = reopened_checkpoint.current_outcome;
+    ts::SeriesProgression reopened_owner({12, 7, 0, 0});
+    ASSERT_EQ(reopened_owner.hydrate(
+                  reopened_snapshot, ts::ExecutionGroupAggregator(
+                                        41, {80, 2}, {700, 701}, CurrencyType::USD),
+                  reopened_checkpoint.receipts, {41}, {"intent-41"}),
+              ts::ProgressionResult::APPLIED);
+    EXPECT_EQ(reopened_owner.snapshot().status, ts::SeriesStatus::UNRESOLVED);
+    EXPECT_EQ(reopened_owner.snapshot().outcome.completed_members, 1U);
+    EXPECT_EQ(reopened_owner.apply(win.settlement, 1), ts::ProgressionResult::DUPLICATE);
+    EXPECT_EQ(reopened_owner.apply(duplicate_win.settlement, 1),
+              ts::ProgressionResult::DUPLICATE);
+
+    auto conflicting = win.settlement;
+    conflicting.settlement_id = 13;
+    conflicting.kind = ts::OutcomeKind::LOSS;
+    conflicting.net_profit = money(-100);
+    EXPECT_EQ(reopened_owner.apply(conflicting, 1),
+              ts::ProgressionResult::MEMBER_ALREADY_TERMINAL);
+    ASSERT_EQ(reopened_owner.apply(loss.settlement, 1),
+              ts::ProgressionResult::APPLIED);
+    ASSERT_EQ(reopened_owner.snapshot().status, ts::SeriesStatus::ACTIVE);
+    ASSERT_EQ(reopened_owner.snapshot().series.state_revision, 2U);
+    ASSERT_EQ(reopened_owner.snapshot().series.next_step, 1U);
+
+    auto completion = persist(
+        loss, 112, physical_701, "settlement-event-12");
+    completion.series = checkpoint_from(
+        reopened_owner.snapshot(),
+        {duplicate_win.settlement, unknown.settlement, win.settlement, loss.settlement});
+    completion.reservation = multi_reservation(501, 102, 20, 1);
+    completion.group_reservation_bindings = {
+        {700, multi_reservation(500, 1000, 50, 1), 0}};
+    completion.money_management = mm_state(1);
+    completion.money_management->last_settlement_id = 12;
+    completion.expected_series_revision = 1;
+    completion.expected_reservation_revision = 0;
+    completion.expected_money_management_revision = 0;
+
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.apply_group_completion_atomic(completion).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        ts::TradingSystemStorage storage(database.config());
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.apply_group_completion_atomic(completion).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+
+    ts::TradingSystemStorage reopened(database.config());
+    ASSERT_EQ(reopened.series(12).value->series.state_revision, 2U);
+    EXPECT_EQ(reopened.reservation(500).value->state, ts::RiskReservationState::SETTLED);
+    EXPECT_EQ(reopened.reservation(501).value->state, ts::RiskReservationState::SETTLED);
+    EXPECT_EQ(reopened.money_management("mm.alpha").value->state_revision, 1U);
+    EXPECT_EQ(reopened.money_management("mm.alpha").value->last_settlement_id, 12U);
+}
+
 TEST(TradingSystemBatch5B, ReservationCannotBeReusedByAnotherImmutableRoster) {
     TestDatabase database;
     seed(database);

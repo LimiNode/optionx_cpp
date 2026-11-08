@@ -9,8 +9,10 @@
 #include "TradeIntent.hpp"
 #include "ExecutionGroupAggregator.hpp"
 
+#include <algorithm>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace optionx::trading_system {
 
@@ -98,6 +100,8 @@ public:
         if (candidate.m_has_group && !candidate.m_group.valid()) {
             return ProgressionResult::INVALID_CONFIGURATION;
         }
+        std::vector<TradeSettlement> current_group_receipts;
+        current_group_receipts.reserve(receipts.size());
         for (const auto& receipt : receipts) {
             if (!receipt.valid() || !candidate.m_receipts.emplace(receipt.settlement_id, receipt).second) {
                 return ProgressionResult::SETTLEMENT_CONFLICT;
@@ -106,8 +110,16 @@ public:
             // only receipts belonging to the current roster may be replayed
             // into the current aggregator.
             if (candidate.m_has_group &&
-                receipt.execution_group_id == snapshot.current_group_id &&
-                candidate.m_group.apply(receipt) != ProgressionResult::APPLIED) {
+                receipt.execution_group_id == snapshot.current_group_id) {
+                current_group_receipts.push_back(receipt);
+            }
+        }
+        std::stable_sort(current_group_receipts.begin(), current_group_receipts.end(),
+                         canonical_settlement_before);
+        for (const auto& receipt : current_group_receipts) {
+            const auto result = candidate.m_group.apply(receipt);
+            if (result != ProgressionResult::APPLIED &&
+                result != ProgressionResult::DUPLICATE) {
                 return ProgressionResult::INVALID_OUTCOME;
             }
         }
