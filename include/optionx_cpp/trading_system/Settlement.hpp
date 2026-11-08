@@ -88,6 +88,39 @@ inline bool operator==(const TradeSettlement& lhs, const TradeSettlement& rhs) n
             lhs.net_profit->currency == rhs.net_profit->currency);
 }
 
+/// \brief Compares terminal evidence while ignoring its event identity.
+///
+/// Different broker observations may carry different settlement IDs while
+/// proving the same terminal physical result. Such observations are
+/// idempotent evidence, not a second terminal transition.
+inline bool same_terminal_evidence(
+    const TradeSettlement& lhs, const TradeSettlement& rhs) noexcept {
+    if (!lhs.terminal() || !rhs.terminal() ||
+        lhs.intent_id != rhs.intent_id ||
+        lhs.execution_group_id != rhs.execution_group_id ||
+        lhs.trade_id != rhs.trade_id || lhs.kind != rhs.kind ||
+        lhs.evidence != rhs.evidence ||
+        lhs.net_profit.has_value() != rhs.net_profit.has_value()) {
+        return false;
+    }
+    return !lhs.net_profit ||
+           (lhs.net_profit->units == rhs.net_profit->units &&
+            lhs.net_profit->precision == rhs.net_profit->precision &&
+            lhs.net_profit->currency == rhs.net_profit->currency);
+}
+
+/// \brief Orders settlement observations for deterministic replay.
+///
+/// Non-terminal reconciliation evidence is replayed before terminal evidence;
+/// SettlementId is only a deterministic tie-breaker within one phase.
+inline bool canonical_settlement_before(
+    const TradeSettlement& lhs, const TradeSettlement& rhs) noexcept {
+    const auto lhs_phase = lhs.terminal() ? 1 : 0;
+    const auto rhs_phase = rhs.terminal() ? 1 : 0;
+    if (lhs_phase != rhs_phase) return lhs_phase < rhs_phase;
+    return lhs.settlement_id < rhs.settlement_id;
+}
+
 /// \class GroupOutcome
 /// \brief A value snapshot; partial money never constitutes a final outcome.
 struct GroupOutcome {

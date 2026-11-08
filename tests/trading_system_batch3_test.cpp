@@ -299,7 +299,7 @@ TEST(TradingSystemBatch3, PhysicalDuplicateNeverFillsAnotherMemberSlot) {
     EXPECT_EQ(aggregator.apply(event), ProgressionResult::DUPLICATE);
     auto duplicate_trade = event;
     ++duplicate_trade.settlement_id;
-    EXPECT_EQ(aggregator.apply(duplicate_trade), ProgressionResult::MEMBER_ALREADY_TERMINAL);
+    EXPECT_EQ(aggregator.apply(duplicate_trade), ProgressionResult::DUPLICATE);
     auto impersonation = event;
     impersonation.trade_id = 2;
     EXPECT_EQ(aggregator.apply(impersonation), ProgressionResult::SETTLEMENT_CONFLICT);
@@ -561,7 +561,7 @@ TEST(TradingSystemBatch3, FinalOverflowIsBlockedAndNeverFabricatesFinancialOutco
                       ProgressionResult::INVALID_STATE);
             auto replacement = second;
             replacement.settlement_id = 103;
-            EXPECT_EQ(owner.apply(replacement, 3), ProgressionResult::MEMBER_ALREADY_TERMINAL);
+            EXPECT_EQ(owner.apply(replacement, 3), ProgressionResult::DUPLICATE);
             replacement.settlement_id = second.settlement_id;
             replacement.net_profit->units *= 2;
             EXPECT_EQ(owner.apply(replacement, 3), ProgressionResult::SETTLEMENT_CONFLICT);

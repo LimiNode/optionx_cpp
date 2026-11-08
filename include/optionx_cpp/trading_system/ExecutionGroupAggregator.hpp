@@ -58,6 +58,9 @@ public:
         const auto member = m_members.find(event.trade_id);
         if (member == m_members.end()) return ProgressionResult::UNKNOWN_MEMBER;
         if (member->second && member->second->terminal()) {
+            if (same_terminal_evidence(*member->second, event)) {
+                return ProgressionResult::DUPLICATE;
+            }
             return ProgressionResult::MEMBER_ALREADY_TERMINAL;
         }
         if (event.net_profit) {
