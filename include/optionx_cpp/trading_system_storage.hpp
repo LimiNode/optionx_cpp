@@ -8,5 +8,6 @@
 #include <optionx_cpp/trading_system.hpp>
 
 #include "trading_system/TradingSystemStorage.hpp"
+#include "trading_system/ExecutionRecovery.hpp"
 
 #endif // OPTIONX_HEADER_TRADING_SYSTEM_STORAGE_AGGREGATE_HPP_INCLUDED

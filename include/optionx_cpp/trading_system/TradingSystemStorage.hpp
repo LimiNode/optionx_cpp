@@ -1836,6 +1836,14 @@ public:
         return m_roster_validation_checks;
     }
 
+    /// \brief Allocates a journal event identity inside this Unit of Work.
+    ///
+    /// The allocation and the subsequent journal append share the same MDBX
+    /// transaction. Callers must append the returned identity before commit.
+    SequenceResult next_journal_event_id_for_append() {
+        return next_journal_event_id();
+    }
+
 private:
     StorageResult advance_journal_sequence(std::uint64_t event_id) {
         if (event_id == (std::numeric_limits<std::uint64_t>::max)()) {
