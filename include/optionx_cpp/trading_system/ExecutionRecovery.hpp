@@ -5,7 +5,7 @@
 /// \file ExecutionRecovery.hpp
 /// \brief Offline execution journal, simulated broker and fail-closed recovery.
 
-#include <optionx_cpp/trading_system_storage.hpp>
+#include "TradingSystemStorage.hpp"
 
 #include <algorithm>
 #include <cstdint>

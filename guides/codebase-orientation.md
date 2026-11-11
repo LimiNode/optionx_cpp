@@ -32,6 +32,13 @@ Aggregate headers в корне `include/optionx_cpp` - часть публич�
 aggregate header. Если код нужен только внутреннему manager, не расширяй
 публичный include без необходимости.
 
+`trading_system.hpp` is the single aggregate for the complete
+`optionx::trading_system` domain, including its trading-specific MDBX storage
+and offline execution recovery. `storages.hpp` remains a separate aggregate
+for generic/session/record storage. Do not recreate a second
+`trading_system_storage.hpp` entry point or move trading-specific persistence
+into `storages.hpp` merely because both use MDBX.
+
 ## DDD Слои И Namespace
 
 | Слой | Namespace | Правило зависимости |

@@ -35,11 +35,11 @@ node lifecycles. See [English](lifecycle-stack.md) or
 | `optionx_cpp/utils.hpp` | Pub-sub, tasks, crypto, strings, time, ids | Для инфраструктурного кода и новых components |
 | `optionx_cpp/lifecycle.hpp` | `ILifecycleModule`, `LifecycleStack` | Для необязательной общей обработки и staged shutdown модулей |
 | `optionx_cpp/data.hpp` | DTO, events, enums, account/symbol/tick/bar/trading data | Для API boundary и сообщений |
-| `optionx_cpp/trading_system.hpp` | Trading-system identity, decision context, filters and sizing policies | Для broker-independent admission decisions before execution |
+| `optionx_cpp/trading_system.hpp` | Complete trading-system domain: identity, policies, storage and execution recovery | Для торговой системы и её durable execution lifecycle; aggregate requires MDBX |
 | `optionx_cpp/components.hpp` | `BaseComponent`, HTTP и trade execution base classes | Для нового manager/component |
 | `optionx_cpp/market_data.hpp` | Provider role, subscription DTOs, Router, subscriber base and continuity | Для live tick/bar subscriptions, history prefill and routed delivery |
 | `optionx_cpp/platforms.hpp` | Base platform и Intrade Bar platform | Для клиентского кода платформ |
-| `optionx_cpp/storages.hpp` | `ServiceSessionDB` | Для session storage |
+| `optionx_cpp/storages.hpp` | `TradeRecordDB`, `SignalRecordDB`, `ServiceSessionDB` | Для generic/session storage; не включает trading-system storage |
 | `optionx_cpp/bridges.hpp` | `BaseBridge` | Для внешних bridge integrations |
 
 Внутренние файлы из `include/optionx_cpp/platforms/<Platform>/...` подключай

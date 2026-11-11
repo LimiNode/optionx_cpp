@@ -12,16 +12,18 @@ latest operation state is rebuilt by operation ID only after validating the
 complete revision chain; an invalid or unreadable chain is a recovery error,
 not an empty recovery result.
 
-`ExecutionRecovery.hpp` is an explicit public include:
+The complete trading-system domain, including storage and recovery, is exposed
+through one public aggregate:
 
 ```cpp
-#include <optionx_cpp/trading_system_storage.hpp>
-#include <optionx_cpp/trading_system/ExecutionRecovery.hpp>
+#include <optionx_cpp/trading_system.hpp>
 ```
 
-The storage aggregate intentionally does not include the recovery layer. This
-keeps the storage boundary lightweight and makes the optional recovery surface
-visible to consumers.
+`TradingSystemStorage.hpp` and `ExecutionRecovery.hpp` remain implementation
+headers inside the `trading_system` family. The separate
+`trading_system_storage.hpp` aggregate was removed to avoid two public entry
+points for one domain. `storages.hpp` remains reserved for generic/session
+storage and does not include this domain.
 
 The recovery layer owns:
 

@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include <optionx_cpp/trading_system_storage.hpp>
+#include <optionx_cpp/trading_system.hpp>
 
 #include <chrono>
 #include <filesystem>
