@@ -501,6 +501,178 @@ public:
     }
 
 private:
+    static bool same_money(const MoneyAmount& lhs, const MoneyAmount& rhs) noexcept {
+        return lhs.units == rhs.units && lhs.precision == rhs.precision &&
+               lhs.currency == rhs.currency;
+    }
+
+    static bool same_group(const ExecutionGroupIdentity& lhs,
+                           const ExecutionGroupIdentity& rhs) noexcept {
+        return lhs.group_id == rhs.group_id &&
+               lhs.expected_members == rhs.expected_members;
+    }
+
+    static StorageResult validate_preparation_bindings(
+        const TradeIntent& intent,
+        const ExecutionRosterRecord& roster,
+        const std::vector<ReservationRecord>& reservations,
+        const std::vector<PhysicalTradeRecord>& physical_trades) {
+        if (!same_group(intent.execution_group,
+                        {roster.group_id, roster.expected_members}) ||
+            intent.intent_id != roster.intent_id) {
+            return {StorageResultKind::CONFLICT,
+                    "intent identity conflicts with execution roster"};
+        }
+
+        for (const auto& member : roster.members) {
+            const auto physical_count = std::count_if(
+                physical_trades.begin(), physical_trades.end(),
+                [&member](const PhysicalTradeRecord& value) {
+                    return value.trade_id == member.trade_id;
+                });
+            if (physical_count != 1) {
+                return {StorageResultKind::CONFLICT,
+                        "physical trade roster identity is missing or duplicated"};
+            }
+            const auto physical = std::find_if(
+                physical_trades.begin(), physical_trades.end(),
+                [&member](const PhysicalTradeRecord& value) {
+                    return value.trade_id == member.trade_id;
+                });
+            if (physical->intent_id != roster.intent_id ||
+                physical->group_id != roster.group_id ||
+                physical->account_id != member.account_id ||
+                physical->risk_scope_id != member.risk_scope_id) {
+                return {StorageResultKind::CONFLICT,
+                        "physical trade does not belong to its roster member"};
+            }
+
+            const auto binding = std::find_if(
+                roster.reservation_bindings.begin(),
+                roster.reservation_bindings.end(),
+                [&member](const RosterReservationBinding& value) {
+                    return value.trade_id == member.trade_id;
+                });
+            if (binding == roster.reservation_bindings.end()) {
+                return {StorageResultKind::CONFLICT,
+                        "roster reservation binding is missing"};
+            }
+            const auto reservation_count = std::count_if(
+                reservations.begin(), reservations.end(),
+                [binding](const ReservationRecord& value) {
+                    return value.reservation_id == binding->reservation_id;
+                });
+            if (reservation_count != 1) {
+                return {StorageResultKind::CONFLICT,
+                        "reservation roster identity is missing or duplicated"};
+            }
+            const auto reservation = std::find_if(
+                reservations.begin(), reservations.end(),
+                [binding](const ReservationRecord& value) {
+                    return value.reservation_id == binding->reservation_id;
+                });
+            if (reservation->state != RiskReservationState::RESERVED ||
+                reservation->intent_id != roster.intent_id ||
+                !same_group(reservation->execution_group,
+                            {roster.group_id, roster.expected_members}) ||
+                reservation->cardinality != intent.cardinality ||
+                reservation->risk_scope_id != member.risk_scope_id ||
+                !same_money(reservation->stake, binding->stake) ||
+                !same_money(reservation->potential_risk, binding->potential_risk) ||
+                reservation->idempotency_key != binding->idempotency_key) {
+                return {StorageResultKind::CONFLICT,
+                        "reservation does not belong to its roster member"};
+            }
+        }
+        return {StorageResultKind::APPLIED, {}};
+    }
+
+    StorageResult validate_new_admission(
+        const TradingSystemStorage& storage,
+        const ExecutionRosterRecord& roster) const {
+        const auto existing = storage.roster(roster.group_id);
+        if (existing.kind != StorageResultKind::NOT_FOUND && !existing.found()) {
+            return {existing.kind, existing.message};
+        }
+        const bool is_existing_group = existing.found() &&
+            detail::roster_to_json(*existing.value) == detail::roster_to_json(roster);
+        if (is_existing_group) return {StorageResultKind::APPLIED, {}};
+
+        const auto readiness = admission_readiness(storage, true);
+        if (!readiness.journal_valid || readiness.global_block) {
+            return {StorageResultKind::INVALID_STATE,
+                    readiness.diagnostic.empty()
+                        ? "durable recovery is not ready for admission"
+                        : readiness.diagnostic};
+        }
+        for (const auto& member : roster.members) {
+            if (readiness.blocked_risk_scopes.count(member.risk_scope_id) != 0) {
+                return {StorageResultKind::INVALID_STATE,
+                        "risk scope is blocked by unresolved durable execution"};
+            }
+        }
+        return {StorageResultKind::APPLIED, {}};
+    }
+
+    StorageResult validate_prepared_admission(
+        const TradingSystemStorage& storage,
+        const ExecutionOperationRecord& operation) const {
+        const auto recovered = recover(storage);
+        if (!recovered.succeeded()) {
+            return {StorageResultKind::INVALID_STATE,
+                    "execution journal recovery failed: " + recovered.diagnostic};
+        }
+        const auto found = recovered.operations.find(operation.operation_id);
+        if (found == recovered.operations.end() ||
+            found->second.state != ExecutionOperationState::PREPARED ||
+            !same_identity(found->second, operation)) {
+            return {StorageResultKind::CONFLICT,
+                    "execution operation has no verified durable admission"};
+        }
+        const auto roster = storage.roster(operation.group_id);
+        const auto physical = storage.physical_trade(operation.trade_id);
+        if (!roster.found()) return {roster.kind, roster.message};
+        if (!physical.found()) return {physical.kind, physical.message};
+        if (!roster.value->valid() ||
+            roster.value->intent_id != operation.intent_id) {
+            return {StorageResultKind::CONFLICT,
+                    "prepared operation roster identity is invalid"};
+        }
+        const auto member = std::find_if(
+            roster.value->members.begin(), roster.value->members.end(),
+            [&operation](const RosterMemberRecord& value) {
+                return value.trade_id == operation.trade_id;
+            });
+        const auto binding = std::find_if(
+            roster.value->reservation_bindings.begin(),
+            roster.value->reservation_bindings.end(),
+            [&operation](const RosterReservationBinding& value) {
+                return value.trade_id == operation.trade_id;
+            });
+        if (member == roster.value->members.end() ||
+            binding == roster.value->reservation_bindings.end() ||
+            physical.value->intent_id != roster.value->intent_id ||
+            physical.value->group_id != roster.value->group_id ||
+            physical.value->account_id != operation.account_id ||
+            physical.value->risk_scope_id != operation.risk_scope_id ||
+            member->account_id != operation.account_id ||
+            member->risk_scope_id != operation.risk_scope_id) {
+            return {StorageResultKind::CONFLICT,
+                    "prepared operation is not bound to its physical roster member"};
+        }
+        const auto reservation = storage.reservation(binding->reservation_id);
+        if (!reservation.found()) return {reservation.kind, reservation.message};
+        if (reservation.value->state != RiskReservationState::RESERVED ||
+            reservation.value->intent_id != operation.intent_id ||
+            reservation.value->risk_scope_id != operation.risk_scope_id ||
+            reservation.value->execution_group.group_id != operation.group_id ||
+            reservation.value->execution_group.expected_members != roster.value->expected_members) {
+            return {StorageResultKind::INVALID_STATE,
+                    "prepared operation reservation is not an admitted reservation"};
+        }
+        return {StorageResultKind::APPLIED, {}};
+    }
+
     StorageResult persist_state(TradingSystemStorage& storage,
                                 ExecutionOperationRecord operation) const {
         if (!operation.valid()) return {StorageResultKind::INVALID_ARGUMENT, "invalid execution operation"};
@@ -623,6 +795,40 @@ public:
             physical_trades.size() != roster.members.size()) {
             return {StorageResultKind::INVALID_ARGUMENT, "invalid durable execution preparation"};
         }
+        if (auto result = validate_preparation_bindings(
+                intent, roster, reservations, physical_trades);
+            result.kind != StorageResultKind::APPLIED) {
+            return result;
+        }
+        if (auto result = validate_new_admission(storage, roster);
+            result.kind != StorageResultKind::APPLIED) {
+            return result;
+        }
+        std::set<std::string> existing_operation_keys;
+        for (const auto& physical : physical_trades) {
+            const ExecutionOperationRecord operation{
+                "group-" + std::to_string(roster.group_id) + ":trade-" +
+                    std::to_string(physical.trade_id),
+                intent.idempotency_key + ":trade-" + std::to_string(physical.trade_id),
+                intent.intent_id, roster.group_id, physical.trade_id,
+                physical.account_id, physical.risk_scope_id,
+                ExecutionOperationState::PREPARED, 0, {}, m_clock.now_ms()};
+            const auto existing = storage.journal_by_key(operation_key(operation));
+            if (existing.kind != StorageResultKind::NOT_FOUND && !existing.found()) {
+                return {existing.kind, existing.message};
+            }
+            if (existing.found()) {
+                if (existing.value->event_type != "EXECUTION_OPERATION" ||
+                    existing.value->aggregate_id != "operation:" + operation.operation_id ||
+                    existing.value->state_revision != operation.state_revision ||
+                    existing.value->idempotency_key != operation_key(operation) ||
+                    existing.value->payload != nlohmann::json(operation)) {
+                    return {StorageResultKind::CONFLICT,
+                            "execution preparation journal identity conflicts"};
+                }
+                existing_operation_keys.insert(operation_key(operation));
+            }
+        }
         auto unit = storage.begin();
         if (auto result = unit.put_intent(intent); result.kind != StorageResultKind::APPLIED &&
             result.kind != StorageResultKind::DUPLICATE) return result;
@@ -648,6 +854,7 @@ public:
                 intent.intent_id, roster.group_id, physical_trades[i].trade_id,
                 physical_trades[i].account_id, physical_trades[i].risk_scope_id,
                 ExecutionOperationState::PREPARED, 0, {}, m_clock.now_ms()};
+            if (existing_operation_keys.count(operation_key(operation)) != 0) continue;
             const auto event_id = unit.next_journal_event_id_for_append();
             if (event_id.kind != StorageResultKind::APPLIED) return {event_id.kind, event_id.message};
             JournalEvent event{event_id.value, "EXECUTION_OPERATION",
@@ -724,6 +931,13 @@ public:
         if (current.state != ExecutionOperationState::PREPARED) {
             return {StorageResultKind::INVALID_STATE,
                     "only a prepared operation may be submitted"};
+        }
+        // A durable PREPARED operation plus its immutable roster/reservation
+        // is the admission permit. This deliberately permits already-admitted
+        // members of one group to continue while a different group is blocked.
+        if (auto admission = validate_prepared_admission(storage, current);
+            admission.kind != StorageResultKind::APPLIED) {
+            return admission;
         }
         std::uint64_t started_revision = 0;
         if (!next_revision_of(current.state_revision, started_revision)) {
@@ -844,17 +1058,32 @@ public:
         if (current->second.state == ExecutionOperationState::SETTLED) {
             const auto persisted = storage.settlements_for_group(current->second.group_id);
             if (!persisted.succeeded()) return {persisted.kind, persisted.message};
-            const auto existing = std::find_if(
-                persisted.values.begin(), persisted.values.end(),
-                [&settlement](const SettlementRecord& value) {
-                    return value.settlement.trade_id == settlement.trade_id;
-                });
-            if (existing != persisted.values.end() &&
-                same_terminal_evidence(existing->settlement, settlement)) {
+            std::vector<TradeSettlement> evidence;
+            for (const auto& value : persisted.values) {
+                if (value.settlement.trade_id == settlement.trade_id) {
+                    evidence.push_back(value.settlement);
+                }
+            }
+            std::stable_sort(evidence.begin(), evidence.end(), canonical_settlement_before);
+            std::optional<TradeSettlement> canonical_terminal;
+            for (const auto& value : evidence) {
+                if (!value.terminal()) continue;
+                if (!canonical_terminal) {
+                    canonical_terminal = value;
+                } else if (!same_terminal_evidence(*canonical_terminal, value)) {
+                    return {StorageResultKind::CONFLICT,
+                            "conflicting terminal settlement evidence"};
+                }
+            }
+            if (!canonical_terminal) {
+                return {StorageResultKind::INVALID_STATE,
+                        "settled operation has no canonical terminal evidence"};
+            }
+            if (same_terminal_evidence(*canonical_terminal, settlement)) {
                 if (logical_transition) {
-                    if (!(logical_transition->settlement.settlement == existing->settlement)) {
-                        return {StorageResultKind::CONFLICT,
-                                "logical completion must use the canonical physical settlement"};
+                    if (!(logical_transition->settlement.settlement == *canonical_terminal)) {
+                        return {StorageResultKind::DUPLICATE,
+                                "terminal evidence is already canonically settled"};
                     }
                     const auto physical = storage.physical_trade(operation.trade_id);
                     if (!physical.found()) return {physical.kind, physical.message};

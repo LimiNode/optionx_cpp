@@ -1304,9 +1304,39 @@ public:
             if (next == 0 || next == (std::numeric_limits<std::uint64_t>::max)()) {
                 return fail_sequence("durable identifier sequence exhausted");
             }
+            auto candidate = next;
+            if (sequence_name == "settlement") {
+                // Settlement IDs can arrive from an external broker/history
+                // import. Keep local allocation above every registered fact.
+                std::vector<std::pair<std::string, std::string>> settlements;
+                m_storage.m_settlements.load(settlements, m_transaction);
+                for (const auto& entry : settlements) {
+                    std::size_t length = 0;
+                    const auto used = std::stoull(entry.first, &length);
+                    if (length != entry.first.size() || used == 0) {
+                        return fail_sequence("settlement identity is malformed");
+                    }
+                    if (used >= candidate) {
+                        if (used == (std::numeric_limits<std::uint64_t>::max)()) {
+                            return fail_sequence("durable settlement identifier exhausted");
+                        }
+                        candidate = used + 1;
+                    }
+                }
+                while (m_storage.m_settlements.find(
+                           std::to_string(candidate), m_transaction)) {
+                    if (candidate == (std::numeric_limits<std::uint64_t>::max)()) {
+                        return fail_sequence("durable settlement identifier exhausted");
+                    }
+                    ++candidate;
+                }
+            }
+            if (candidate == (std::numeric_limits<std::uint64_t>::max)()) {
+                return fail_sequence("durable identifier sequence exhausted");
+            }
             m_storage.m_sequences.insert_or_assign(
-                sequence_name, std::to_string(next + 1), m_transaction);
-            return {StorageResultKind::APPLIED, next, {}};
+                sequence_name, std::to_string(candidate + 1), m_transaction);
+            return {StorageResultKind::APPLIED, candidate, {}};
         } catch (const std::exception& error) {
             m_failed = true;
             return {StorageResultKind::STORAGE_ERROR, 0, error.what()};
@@ -1474,8 +1504,33 @@ public:
         if (!valid_schema(value.schema_version) || !value.valid()) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid settlement record"});
         }
-        return put_immutable(m_storage.m_settlements, std::to_string(value.settlement.settlement_id),
-                             detail::settlement_record_to_json(value).dump());
+        try {
+            const auto current = m_storage.m_sequences.find("settlement", m_transaction);
+            std::size_t parsed_length = 0;
+            const auto current_next = current
+                ? std::stoull(*current, &parsed_length) : std::uint64_t{1};
+            if (current && parsed_length != current->size()) {
+                return fail({StorageResultKind::STORAGE_ERROR,
+                             "settlement identifier sequence is malformed"});
+            }
+            if (current_next == 0) {
+                return fail({StorageResultKind::STORAGE_ERROR,
+                             "settlement identifier sequence is invalid"});
+            }
+            const auto settlement_id = value.settlement.settlement_id;
+            const auto required_next = settlement_id ==
+                (std::numeric_limits<std::uint64_t>::max)()
+                ? settlement_id : settlement_id + 1;
+            if (!current || current_next < required_next) {
+                m_storage.m_sequences.insert_or_assign(
+                    "settlement", std::to_string(required_next), m_transaction);
+            }
+            return put_immutable(
+                m_storage.m_settlements, std::to_string(settlement_id),
+                detail::settlement_record_to_json(value).dump());
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
     }
 
     /// \brief Rebuilds the derived group index from canonical settlement facts.

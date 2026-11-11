@@ -112,6 +112,35 @@ void prepare(ts::TradingSystemStorage& storage) {
               ts::StorageResultKind::APPLIED);
 }
 
+void record_physical_evidence(
+    ts::TradingSystemStorage& storage, const ts::TradeSettlement& settlement) {
+    ASSERT_EQ(storage.journal_by_key(
+                  "settlement:" + std::to_string(settlement.settlement_id)).kind,
+              ts::StorageResultKind::NOT_FOUND);
+    ASSERT_EQ(storage.settlement(settlement.settlement_id).kind,
+              ts::StorageResultKind::NOT_FOUND);
+    const auto physical = storage.physical_trade(settlement.trade_id);
+    ASSERT_TRUE(physical.value);
+    auto unit = storage.begin();
+    const auto event_id = unit.next_journal_event_id_for_append();
+    ASSERT_EQ(event_id.kind, ts::StorageResultKind::APPLIED);
+    ts::SettlementTransition transition;
+    transition.journal = {event_id.value, "EXECUTION_SETTLED",
+                          "trade:" + std::to_string(settlement.trade_id), 0,
+                          ts::trading_storage_schema_version,
+                          "settlement:" + std::to_string(settlement.settlement_id),
+                          1000, {}};
+    transition.settlement = {settlement, money(0), std::nullopt, true,
+                             ts::trading_storage_schema_version};
+    transition.physical_trade = *physical.value;
+    transition.physical_trade->lifecycle_state = "EXECUTION_UNKNOWN";
+    ++transition.physical_trade->state_revision;
+    transition.expected_physical_trade_revision = physical.value->state_revision;
+    const auto recorded = unit.record_physical_settlement(transition);
+    ASSERT_EQ(recorded.kind, ts::StorageResultKind::APPLIED) << recorded.message;
+    ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+}
+
 TEST(TradingSystemBatch5C, PreparationSurvivesRestartAndJsonRoundTrip) {
     TestDatabase database;
     {
@@ -356,6 +385,251 @@ TEST(TradingSystemBatch5C, ReconciledSettlementAndOperationAreCommittedTogether)
               ts::StorageResultKind::DUPLICATE);
 }
 
+TEST(TradingSystemBatch5C, RecoveryBlocksNewAdmissionButAllowsPreparedGroupMembers) {
+    TestDatabase database;
+    ts::FakeExecutionClock clock(1000);
+    ts::ExecutionRecoveryManager manager(clock);
+    ts::SimulatedExecutionAdapter adapter;
+    ts::TradingSystemStorage storage(database.config());
+
+    auto admitted = intent();
+    admitted.execution_group = {81, 2};
+    admitted.cardinality = ts::ExecutionCardinality::MULTIPLE;
+    const ts::ExecutionRosterRecord group_a{
+        81, 41, 2,
+        {{701, 11, 1000, money(25)}, {702, 12, 1000, money(25)}},
+        {{701, 501, 1000, money(25), money(25), "risk-a1"},
+         {702, 502, 1000, money(25), money(25), "risk-a2"}},
+        ts::trading_storage_schema_version};
+    auto reservation_a = reservation();
+    reservation_a.reservation_id = 501;
+    reservation_a.risk_scope_id = 1000;
+    reservation_a.execution_group = {81, 2};
+    reservation_a.cardinality = ts::ExecutionCardinality::MULTIPLE;
+    reservation_a.stake = money(25);
+    reservation_a.potential_risk = money(25);
+    reservation_a.idempotency_key = "risk-a1";
+    auto reservation_b = reservation_a;
+    reservation_b.reservation_id = 502;
+    reservation_b.idempotency_key = "risk-a2";
+    const std::vector<ts::PhysicalTradeRecord> physical_trades{
+        {701, 41, 81, 11, 1000, "ADMITTED", {}, 0,
+         ts::trading_storage_schema_version},
+        {702, 41, 81, 12, 1000, "ADMITTED", {}, 0,
+         ts::trading_storage_schema_version}};
+    ASSERT_EQ(manager.prepare(storage, admitted, group_a,
+                              {reservation_a, reservation_b}, physical_trades).kind,
+              ts::StorageResultKind::APPLIED);
+
+    const auto first = operation_for_trade(storage, 701);
+    adapter.set_plan(first.operation_id, ts::SimulatedSubmissionPlan::TIMEOUT);
+    ASSERT_EQ(manager.submit(storage, first, adapter).kind,
+              ts::StorageResultKind::APPLIED);
+    const auto second = operation_for_trade(storage, 702);
+    EXPECT_EQ(manager.submit(storage, second, adapter).kind,
+              ts::StorageResultKind::APPLIED);
+
+    auto new_intent = intent();
+    new_intent.execution_group = {82, 1};
+    new_intent.cardinality = ts::ExecutionCardinality::EXACTLY_ONE;
+    const ts::ExecutionRosterRecord group_b{
+        82, 41, 1, {{703, 13, 1000, money(25)}},
+        {{703, 600, 1000, money(25), money(25), "risk-b"}},
+        ts::trading_storage_schema_version};
+    auto reservation_c = reservation();
+    reservation_c.reservation_id = 600;
+    reservation_c.risk_scope_id = 1000;
+    reservation_c.execution_group = {82, 1};
+    reservation_c.cardinality = ts::ExecutionCardinality::EXACTLY_ONE;
+    reservation_c.stake = money(25);
+    reservation_c.potential_risk = money(25);
+    reservation_c.idempotency_key = "risk-b";
+    auto physical_c = physical_trade();
+    physical_c.trade_id = 703;
+    physical_c.group_id = 82;
+    physical_c.account_id = 13;
+    physical_c.risk_scope_id = 1000;
+    EXPECT_EQ(manager.prepare(storage, new_intent, group_b,
+                              {reservation_c}, {physical_c}).kind,
+              ts::StorageResultKind::INVALID_STATE);
+    EXPECT_EQ(storage.roster(82).kind, ts::StorageResultKind::NOT_FOUND);
+}
+
+TEST(TradingSystemBatch5C, SettledReplayUsesCanonicalTerminalEvidence) {
+    TestDatabase database;
+    auto terminal = terminal_settlement();
+    terminal.settlement_id = 900;
+    {
+        ts::FakeExecutionClock clock(1000);
+        ts::ExecutionRecoveryManager manager(clock);
+        ts::SimulatedExecutionAdapter adapter;
+        ts::TradingSystemStorage storage(database.config());
+        prepare(storage);
+        const auto prepared = operation_from(storage);
+        ASSERT_EQ(manager.mark_submission_started(storage, prepared).kind,
+                  ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(manager.mark_unknown(storage, operation_from(storage)).kind,
+                  ts::StorageResultKind::APPLIED);
+
+        const auto unknown = group_evidence(
+            901, 700, ts::OutcomeKind::UNKNOWN,
+            ts::ExecutionEvidence::MAY_HAVE_EXECUTED);
+        record_physical_evidence(storage, unknown);
+        adapter.add_history_entry({operation_from(storage).operation_id,
+                                   operation_from(storage).client_operation_id,
+                                   "broker-900", 11, 700, terminal});
+        ASSERT_EQ(manager.reconcile(storage, operation_from(storage), adapter).kind,
+                  ts::ReconciliationKind::MATCH_CONFIRMED);
+        ASSERT_EQ(manager.settle_reconciled(
+                      storage, operation_from(storage), terminal).kind,
+                  ts::StorageResultKind::APPLIED);
+        const auto reservation_before = storage.reservation(500);
+        ASSERT_TRUE(reservation_before.value);
+        const auto completions_before = storage.journal_events("GROUP_COMPLETION");
+        ASSERT_TRUE(completions_before.succeeded());
+
+        auto same_outcome_new_id = terminal;
+        same_outcome_new_id.settlement_id = 902;
+        EXPECT_EQ(manager.settle_reconciled(
+                      storage, operation_from(storage), same_outcome_new_id).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        const auto facts = storage.settlements_for_group(80);
+        ASSERT_TRUE(facts.succeeded());
+        EXPECT_EQ(facts.values.size(), 2U);
+        EXPECT_EQ(storage.reservation(500).value->state,
+                  reservation_before.value->state);
+        EXPECT_EQ(storage.reservation(500).value->state_revision,
+                  reservation_before.value->state_revision);
+        EXPECT_EQ(storage.journal_events("GROUP_COMPLETION").values.size(),
+                  completions_before.values.size());
+    }
+
+    {
+        ts::FakeExecutionClock clock(2000);
+        ts::ExecutionRecoveryManager manager(clock);
+        ts::TradingSystemStorage reopened(database.config());
+        const auto operation = operation_from(reopened);
+        EXPECT_EQ(manager.settle_reconciled(
+                      reopened, operation, terminal).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        const auto conflicting = group_evidence(
+            903, 700, ts::OutcomeKind::LOSS,
+            ts::ExecutionEvidence::EXECUTED, -100);
+        EXPECT_EQ(manager.settle_reconciled(
+                      reopened, operation, conflicting).kind,
+                  ts::StorageResultKind::CONFLICT);
+        const auto facts = reopened.settlements_for_group(80);
+        ASSERT_TRUE(facts.succeeded());
+        EXPECT_EQ(facts.values.size(), 2U);
+        EXPECT_EQ(reopened.reservation(500).value->state,
+                  ts::RiskReservationState::RESERVED);
+        EXPECT_TRUE(reopened.journal_events("GROUP_COMPLETION").values.empty());
+    }
+}
+
+TEST(TradingSystemBatch5C, PreparationMatchesRosterByIdentityNotVectorPosition) {
+    TestDatabase database;
+    ts::FakeExecutionClock clock(1000);
+    ts::ExecutionRecoveryManager manager(clock);
+    auto admitted = intent();
+    admitted.execution_group = {81, 2};
+    admitted.cardinality = ts::ExecutionCardinality::MULTIPLE;
+    const ts::ExecutionRosterRecord group{
+        81, 41, 2,
+        {{701, 11, 1000, money(25)}, {702, 12, 2000, money(25)}},
+        {{701, 501, 1000, money(25), money(25), "risk-1"},
+         {702, 502, 2000, money(25), money(25), "risk-2"}},
+        ts::trading_storage_schema_version};
+    auto first = reservation();
+    first.reservation_id = 501;
+    first.risk_scope_id = 1000;
+    first.execution_group = {81, 2};
+    first.cardinality = ts::ExecutionCardinality::MULTIPLE;
+    first.stake = money(25);
+    first.potential_risk = money(25);
+    first.idempotency_key = "risk-1";
+    auto second = first;
+    second.reservation_id = 502;
+    second.risk_scope_id = 2000;
+    second.idempotency_key = "risk-2";
+    const ts::PhysicalTradeRecord physical_first{
+        701, 41, 81, 11, 1000, "ADMITTED", {}, 0,
+        ts::trading_storage_schema_version};
+    const ts::PhysicalTradeRecord physical_second{
+        702, 41, 81, 12, 2000, "ADMITTED", {}, 0,
+        ts::trading_storage_schema_version};
+    {
+        ts::TradingSystemStorage storage(database.config());
+        ASSERT_EQ(manager.prepare(storage, admitted, group,
+                                  {second, first}, {physical_second, physical_first}).kind,
+                  ts::StorageResultKind::APPLIED);
+    }
+    {
+        ts::TradingSystemStorage reopened(database.config());
+        const auto reopened_result = manager.prepare(
+            reopened, admitted, group, {first, second},
+            {physical_first, physical_second});
+        EXPECT_EQ(reopened_result.kind, ts::StorageResultKind::APPLIED)
+            << reopened_result.message;
+    }
+
+    TestDatabase mismatch_database;
+    ts::TradingSystemStorage mismatch_storage(mismatch_database.config());
+    auto forged = physical_first;
+    forged.account_id = 99;
+    EXPECT_EQ(manager.prepare(mismatch_storage, admitted, group,
+                              {first, second}, {forged, physical_second}).kind,
+              ts::StorageResultKind::CONFLICT);
+    EXPECT_EQ(mismatch_storage.roster(81).kind, ts::StorageResultKind::NOT_FOUND);
+}
+
+TEST(TradingSystemBatch5C, ExternalSettlementIdsAdvanceLocalAllocation) {
+    TestDatabase database;
+    {
+        ts::FakeExecutionClock clock(1000);
+        ts::ExecutionRecoveryManager manager(clock);
+        ts::SimulatedExecutionAdapter adapter;
+        ts::TradingSystemStorage storage(database.config());
+        prepare(storage);
+
+        const auto external = group_evidence(
+            1, 700, ts::OutcomeKind::UNKNOWN,
+            ts::ExecutionEvidence::MAY_HAVE_EXECUTED);
+        record_physical_evidence(storage, external);
+
+        const auto operation = operation_from(storage);
+        adapter.set_plan(operation.operation_id,
+                         ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION);
+        ASSERT_EQ(manager.submit(storage, operation, adapter).kind,
+                  ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(storage.settlement(1).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(storage.settlement(2).kind, ts::StorageResultKind::APPLIED);
+        const auto facts = storage.settlements_for_group(80);
+        ASSERT_TRUE(facts.succeeded());
+        EXPECT_EQ(facts.values.size(), 2U);
+    }
+
+    {
+        ts::TradingSystemStorage reopened(database.config());
+        EXPECT_EQ(reopened.settlement(1).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(reopened.settlement(2).kind, ts::StorageResultKind::APPLIED);
+        auto unit = reopened.begin();
+        EXPECT_EQ(unit.next_id("settlement").value, 3U);
+        unit.rollback();
+    }
+
+    TestDatabase overflow_database;
+    ts::TradingSystemStorage overflow_storage(overflow_database.config());
+    mdbxc::KeyValueTable<std::string, std::string> sequences(
+        overflow_storage.connection(), "ts_sequences");
+    sequences.insert_or_assign(
+        "settlement", std::to_string((std::numeric_limits<std::uint64_t>::max)()));
+    auto unit = overflow_storage.begin();
+    EXPECT_EQ(unit.next_id("settlement").kind,
+              ts::StorageResultKind::INVALID_ARGUMENT);
+    unit.rollback();
+}
+
 TEST(TradingSystemBatch5C, MultiAccountRosterKeepsPhysicalAndRiskIdentitiesSeparate) {
     TestDatabase database;
     ts::FakeExecutionClock clock(1000);
@@ -386,6 +660,7 @@ TEST(TradingSystemBatch5C, MultiAccountRosterKeepsPhysicalAndRiskIdentitiesSepar
     second.idempotency_key = "risk-502";
     auto physical_first = physical_trade();
     physical_first.trade_id = 701;
+    physical_first.group_id = 81;
     physical_first.risk_scope_id = 1000;
     auto physical_second = physical_first;
     physical_second.trade_id = 702;
