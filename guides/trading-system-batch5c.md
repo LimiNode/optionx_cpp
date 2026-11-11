@@ -8,8 +8,20 @@ submit to a live broker and does not introduce another storage engine.
 
 `TradingSystemStorage::UnitOfWork` remains the only local transaction owner.
 Execution recovery stores immutable `EXECUTION_OPERATION` journal events. The
-latest operation state is rebuilt by operation ID and state revision; the event
-ID is used as a deterministic tie-breaker.
+latest operation state is rebuilt by operation ID only after validating the
+complete revision chain; an invalid or unreadable chain is a recovery error,
+not an empty recovery result.
+
+`ExecutionRecovery.hpp` is an explicit public include:
+
+```cpp
+#include <optionx_cpp/trading_system_storage.hpp>
+#include <optionx_cpp/trading_system/ExecutionRecovery.hpp>
+```
+
+The storage aggregate intentionally does not include the recovery layer. This
+keeps the storage boundary lightweight and makes the optional recovery surface
+visible to consumers.
 
 The recovery layer owns:
 
@@ -23,6 +35,12 @@ The recovery layer does not guess series, reservation, or money-management
 projections. A caller that has those projections supplies the existing
 `SettlementTransition`; the transition is then applied through the Batch 5B
 atomic path in the same local transaction.
+
+`ExecutionRecoveryManager::recover()` returns a typed result. It rejects
+malformed payloads, unsupported schemas, revision gaps or overflow, immutable
+identity changes, and invalid state transitions. Callers must block admission
+when recovery is not `READY`; they must not interpret an empty operation map as
+proof that no operations exist.
 
 ## Lifecycle
 
@@ -41,14 +59,25 @@ resend. `submit()` accepts only `PREPARED`, and therefore a restarted runtime
 must reconcile an unresolved operation before progression.
 
 `REJECTED` is terminal only when the broker model proves that no side effect
-occurred. An ambiguous or unavailable history remains unresolved and blocks
-the affected risk scope. `UNKNOWN` is never rewritten to `CANCELLED` merely
-because reconciliation did not find a record.
+occurred. That transition atomically appends the terminal operation event,
+records `NOT_SUBMITTED` evidence, marks the physical trade rejected, and
+releases its reservation. An ambiguous or unavailable history remains
+unresolved and blocks the affected risk scope. `UNKNOWN` is never rewritten to
+`CANCELLED` merely because reconciliation did not find a record.
 
 Repeated reconciliation of the same authoritative result is idempotent: it
 returns the observation without advancing the operation revision a second
-time. Repeated terminal settlement is also a duplicate, not a second physical
-settlement.
+time. Repeated terminal settlement with identical terminal evidence returns
+`DUPLICATE`; conflicting terminal evidence returns `CONFLICT`. A physical
+`SETTLED` state is not by itself an admission-ready signal: unresolved
+operations, active reservations, durable risk-scope gates, incomplete group
+completion, or an invalid journal continue to block admission.
+
+`admission_readiness()` also requires the caller to state that series, risk,
+and money-management owners have been hydrated after restart; the default is
+fail closed. `blocked_risk_scopes()` is retained as a compatibility projection
+of those durable facts, while new admission code should consume the typed
+readiness result.
 
 ## Crash boundaries
 
@@ -62,7 +91,7 @@ settlement.
 | Accepted without broker ID | Accepted evidence without local broker ID | Reconcile authoritative history |
 | Ambiguous history | `RECONCILIATION_REQUIRED` | Keep scope blocked; no resend |
 | History unavailable | `RECONCILIATION_REQUIRED` | Fail closed and retry reconciliation later |
-| Proven pre-submit rejection | `REJECTED` | Release/advance risk through the owning runtime policy |
+| Proven pre-submit rejection | `REJECTED` | Release reservation and physical trade atomically |
 | Physical settlement commit | Immutable settlement and physical projection | Apply logical projections exactly once |
 | Logical completion commit | Existing Batch 5B completion event | Duplicate callbacks are ignored |
 
@@ -80,7 +109,11 @@ physical roster member to another account.
 
 A roster can contain multiple accounts and risk scopes. Account aliases and
 shared risk scopes remain governed by the Batch 5B account registry and risk
-gate contracts; Batch 5C does not silently merge or duplicate them.
+gate contracts; Batch 5C does not silently merge or duplicate them. The
+multi-account crash test covers three physical members, a WIN, proven
+no-submission rejection, timeout, restart/reopen, independent broker history
+reconciliation, physical settlement, shared-scope reservation state, and
+exactly-once logical group completion.
 
 ## Valuation and logical projections
 
@@ -100,9 +133,17 @@ quote is fetched by Batch 5C.
 - no-resend behavior;
 - ambiguous and unavailable history;
 - proven pre-submit rejection;
+- corrupted-journal fail-closed admission;
+- public transition and revision-overflow guards;
 - idempotent reconciliation;
 - operation plus physical settlement atomicity;
-- multi-account roster identity preservation.
+- settlement replay conflict detection;
+- multi-account roster identity preservation and restart/reopen completion.
+
+The simulated broker state is explicitly owned outside the OptionX runtime
+object. A new adapter can therefore reopen against the same broker state in a
+crash/restart test; this models an external side effect without tying it to the
+short-lived runtime instance.
 
 The simulated adapter is deliberately not a broker integration. Live platform
 retry behavior, broker-specific history heuristics, external scheduling, and

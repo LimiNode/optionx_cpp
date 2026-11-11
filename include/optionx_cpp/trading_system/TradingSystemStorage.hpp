@@ -1064,6 +1064,12 @@ public:
             });
     }
 
+    StorageCollectionResult<ReservationRecord> reservations() const {
+        return read_all_json<ReservationRecord>(
+            m_reservations, detail::reservation_from_json,
+            [](const ReservationRecord&) { return true; });
+    }
+
     StorageReadResult<PhysicalTradeRecord> physical_trade(std::uint64_t id) const {
         return read_json<PhysicalTradeRecord>(m_physical_trades, std::to_string(id),
                                               detail::physical_trade_from_json);
@@ -1077,6 +1083,12 @@ public:
     StorageReadResult<RiskScopeGateRecord> risk_scope_gate(std::uint64_t id) const {
         return read_json<RiskScopeGateRecord>(m_risk_scope_gates, std::to_string(id),
                                               detail::risk_scope_gate_from_json);
+    }
+
+    StorageCollectionResult<RiskScopeGateRecord> risk_scope_gates() const {
+        return read_all_json<RiskScopeGateRecord>(
+            m_risk_scope_gates, detail::risk_scope_gate_from_json,
+            [](const RiskScopeGateRecord&) { return true; });
     }
 
     StorageCollectionResult<AccountIdentityRecord> accounts_for_scope(
@@ -1641,6 +1653,8 @@ public:
                     completion->event_id = sequence.value;
                 }
                 completion->event_type = "GROUP_COMPLETION";
+                completion->aggregate_id = "group:" +
+                    std::to_string(transition.settlement.settlement.execution_group_id);
                 completion->state_revision = transition.series->series.state_revision;
                 completion->idempotency_key = transition.journal.idempotency_key + ":logical";
                 completion->payload = detail::group_outcome_to_json(outcome);
@@ -2331,7 +2345,8 @@ private:
             for (const auto& binding : transition.group_reservation_bindings) {
                 if (binding.reservation.reservation_id == transition.reservation->reservation_id) continue;
                 const auto result = put_reservation(binding.reservation, binding.expected_revision);
-                if (result.kind != StorageResultKind::APPLIED) return result;
+                if (result.kind != StorageResultKind::APPLIED &&
+                    result.kind != StorageResultKind::DUPLICATE) return result;
             }
             return {StorageResultKind::APPLIED, {}};
         }
@@ -2344,7 +2359,8 @@ private:
             const auto result = put_reservation(
                 transition.group_reservations[index],
                 transition.expected_group_reservation_revisions[index]);
-            if (result.kind != StorageResultKind::APPLIED) return result;
+            if (result.kind != StorageResultKind::APPLIED &&
+                result.kind != StorageResultKind::DUPLICATE) return result;
         }
         return {StorageResultKind::APPLIED, {}};
     }
