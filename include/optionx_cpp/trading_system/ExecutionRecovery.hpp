@@ -16,6 +16,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -608,6 +609,13 @@ private:
             MoneyAmount stake;
             MoneyAmount potential_risk;
         };
+        using OwnerKey = std::pair<RiskScopeKind, std::uint64_t>;
+        struct OwnerKeyLess {
+            bool operator()(const OwnerKey& lhs, const OwnerKey& rhs) const noexcept {
+                return std::tie(lhs.first, lhs.second) < std::tie(rhs.first, rhs.second);
+            }
+        };
+        std::map<OwnerKey, const RiskAdmission*, OwnerKeyLess> owners_by_scope;
         std::map<const RiskAdmission*, Aggregate> aggregates;
         for (std::size_t index = 0; index < reservations.size(); ++index) {
             const auto* owner = admission_owners[index];
@@ -621,6 +629,14 @@ private:
                 owner_scope.scope_id != reservation.risk_scope_id) {
                 return {StorageResultKind::CONFLICT,
                         "RiskAdmission owner does not own reservation risk scope"};
+            }
+            const OwnerKey owner_key{owner_scope.kind, owner_scope.scope_id};
+            const auto owner_for_scope = owners_by_scope.find(owner_key);
+            if (owner_for_scope == owners_by_scope.end()) {
+                owners_by_scope.emplace(owner_key, owner);
+            } else if (owner_for_scope->second != owner) {
+                return {StorageResultKind::CONFLICT,
+                        "multiple RiskAdmission owners claim one risk scope"};
             }
             auto found = aggregates.find(owner);
             if (found == aggregates.end()) {

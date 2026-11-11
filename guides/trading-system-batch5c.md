@@ -98,9 +98,26 @@ but a new group cannot bypass the owner check or the fail-closed recovery
 facts. The owner reservation must remain in `RESERVED` state until preparation
 returns; a failed preparation is released by the caller. Concurrent risk
 decisions remain serialized by the existing `RiskAdmission` owner; Batch 5C
-does not create a second risk state machine. Preparation repeats the durable
-risk-scope check inside the same MDBX write transaction, closing the race
-between the diagnostic readiness projection and the durable write.
+does not create a second risk state machine. A preparation request has exactly
+one authoritative owner for each canonical `(RiskScopeKind, RiskScopeId)` key.
+Reusing the same owner for several physical members is valid; passing two
+independently constructed owners for one key is a `CONFLICT` and produces no
+durable writes. Preparation repeats the durable risk-scope check inside the
+same MDBX write transaction, closing the race between the diagnostic readiness
+projection and the durable write.
+
+The transaction-side admission check reads the materialized
+`ts_admission_scope_index` by scope range. Active reservations, non-terminal
+execution operations and durable account-identity gates are projection entries
+maintained in the same Unit of Work as their canonical facts. It does not scan
+the complete journal or reservation table for every new group. The projection
+has a schema marker; a database created before this index is fail-closed until
+`UnitOfWork::rebuild_admission_scope_index()` is run as an explicit maintenance
+operation. Full recovery/integrity scans remain startup or maintenance work.
+Write UnitOfWork instances owned by one `TradingSystemStorage` are serialized,
+and release their writer guard immediately after commit or rollback. This
+provides a bounded concurrent-admission contract without permitting partial
+rosters or two concurrent writers to bypass the scope projection.
 
 Preparation replay compares immutable operation payload while ignoring only
 the newly observed wall-clock timestamp. The original `occurred_at_ms` remains
@@ -182,6 +199,8 @@ quote is fetched by Batch 5C.
 - preparation replay with different restart timestamps;
 - late logical completion after physical settlement;
 - bounded settlement ID allocation and explicit legacy sequence rebuild;
+- canonical one-owner-per-risk-scope rejection;
+- concurrent admission serialization without partial roster persistence;
 - multi-account roster identity preservation and restart/reopen completion.
 
 The simulated broker state is explicitly owned outside the OptionX runtime

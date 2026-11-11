@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -844,6 +845,156 @@ TEST(TradingSystemBatch5C, ExternalSettlementIdsAdvanceLocalAllocation) {
         EXPECT_EQ(rebuild.next_id("settlement").value, 2U);
         rebuild.rollback();
     }
+}
+
+TEST(TradingSystemBatch5C, RejectsMultipleOwnersForOneRiskScope) {
+    TestDatabase database;
+    ts::FakeExecutionClock clock(1000);
+    ts::ExecutionRecoveryManager manager(clock);
+    ts::TradingSystemStorage storage(database.config());
+
+    auto admitted = intent();
+    admitted.execution_group = {180, 2};
+    admitted.cardinality = ts::ExecutionCardinality::MULTIPLE;
+    ts::ExecutionRosterRecord group{
+        180, admitted.intent_id, 2,
+        {{801, 11, 1000, money(25)}, {802, 12, 1000, money(25)}},
+        {{801, 801, 1000, money(25), money(25), "duplicate-owner-a"},
+         {802, 802, 1000, money(25), money(25), "duplicate-owner-b"}},
+        ts::trading_storage_schema_version};
+    auto first = reservation();
+    first.reservation_id = 801;
+    first.intent_id = admitted.intent_id;
+    first.execution_group = {180, 2};
+    first.cardinality = ts::ExecutionCardinality::MULTIPLE;
+    first.stake = money(25);
+    first.potential_risk = money(25);
+    first.idempotency_key = "duplicate-owner-a";
+    auto second = first;
+    second.reservation_id = 802;
+    second.idempotency_key = "duplicate-owner-b";
+    const std::vector<ts::ReservationRecord> reservations{first, second};
+    const std::vector<ts::PhysicalTradeRecord> physical{
+        {801, admitted.intent_id, 180, 11, 1000, "ADMITTED", {}, 0,
+         ts::trading_storage_schema_version},
+        {802, admitted.intent_id, 180, 12, 1000, "ADMITTED", {}, 0,
+         ts::trading_storage_schema_version}};
+
+    auto make_owner = [](const ts::ReservationRecord& value) {
+        ts::RiskAdmissionConfig config;
+        config.scope = {value.risk_scope_kind, value.risk_scope_id};
+        config.max_snapshot_age_ms = 60'000;
+        config.max_reserved_risk = value.potential_risk;
+        auto owner = std::make_unique<ts::RiskAdmission>(config);
+        ts::RiskAccountSnapshot snapshot;
+        snapshot.availability = ts::RiskAvailability::SUPPORTED;
+        snapshot.available_balance = value.potential_risk;
+        snapshot.captured_at_ms = 1000;
+        snapshot.revision = 7;
+        EXPECT_EQ(owner->hydrate(snapshot, {value.to_risk_reservation()},
+                                value.reservation_id + 1).kind,
+                  ts::RiskAdmissionKind::APPLIED);
+        return owner;
+    };
+    auto owner_a = make_owner(first);
+    auto owner_b = make_owner(second);
+    const std::vector<const ts::RiskAdmission*> owners{owner_a.get(), owner_b.get()};
+
+    EXPECT_EQ(manager.prepare(storage, admitted, group, reservations, physical, owners).kind,
+              ts::StorageResultKind::CONFLICT);
+    EXPECT_EQ(storage.roster(180).kind, ts::StorageResultKind::NOT_FOUND);
+}
+
+TEST(TradingSystemBatch5C, ConcurrentAdmissionsSerializeWithoutPartialRoster) {
+    TestDatabase database;
+    ts::TradingSystemStorage storage(database.config());
+    const auto run = [&storage](std::uint64_t group_id,
+                                 std::uint64_t intent_id,
+                                 std::uint64_t reservation_id,
+                                 std::uint64_t trade_id,
+                                 std::uint64_t account_id) {
+        ts::FakeExecutionClock clock(1000);
+        ts::ExecutionRecoveryManager manager(clock);
+        auto admitted = intent();
+        admitted.intent_id = intent_id;
+        admitted.idempotency_key = "intent-" + std::to_string(intent_id);
+        admitted.execution_group = {group_id, 1};
+        admitted.cardinality = ts::ExecutionCardinality::EXACTLY_ONE;
+        auto group = roster();
+        group.group_id = group_id;
+        group.intent_id = intent_id;
+        group.members.front() = {trade_id, account_id, 1000, money(50)};
+        group.reservation_bindings.front() = {
+            trade_id, reservation_id, 1000, money(50), money(50),
+            "concurrent-risk-" + std::to_string(reservation_id)};
+        auto reserved = reservation();
+        reserved.reservation_id = reservation_id;
+        reserved.intent_id = intent_id;
+        reserved.execution_group = {group_id, 1};
+        reserved.idempotency_key = group.reservation_bindings.front().idempotency_key;
+        auto physical = physical_trade();
+        physical.trade_id = trade_id;
+        physical.intent_id = intent_id;
+        physical.group_id = group_id;
+        physical.account_id = account_id;
+        const auto owners = authoritative_owners({reserved});
+        if (!owners.valid) {
+            return ts::StorageResult{ts::StorageResultKind::INVALID_STATE,
+                                     owners.message};
+        }
+        return manager.prepare(storage, admitted, group, {reserved}, {physical},
+                               owners.references);
+    };
+
+    auto first = std::async(std::launch::async, run, 181, 181, 811, 811, 21);
+    auto second = std::async(std::launch::async, run, 182, 182, 812, 812, 22);
+    ASSERT_EQ(first.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    ASSERT_EQ(second.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    const auto first_result = first.get();
+    const auto second_result = second.get();
+    EXPECT_TRUE((first_result.kind == ts::StorageResultKind::APPLIED) !=
+                (second_result.kind == ts::StorageResultKind::APPLIED))
+        << ts::to_string(first_result.kind) << ", " << first_result.message
+        << "; " << ts::to_string(second_result.kind) << ", " << second_result.message;
+    const auto& rejected = first_result.kind == ts::StorageResultKind::APPLIED
+        ? second_result : first_result;
+    EXPECT_EQ(rejected.kind, ts::StorageResultKind::INVALID_STATE);
+
+    const auto first_roster = storage.roster(181);
+    const auto second_roster = storage.roster(182);
+    EXPECT_TRUE(first_roster.found() != second_roster.found());
+    const auto persisted = first_roster.found() ? first_roster : second_roster;
+    ASSERT_TRUE(persisted.found());
+    EXPECT_EQ(persisted.value->members.size(), 1U);
+    EXPECT_EQ(persisted.value->reservation_bindings.size(), 1U);
+}
+
+TEST(TradingSystemBatch5C, LegacyAdmissionIndexRequiresExplicitRebuild) {
+    TestDatabase database;
+    ts::TradingSystemStorage storage(database.config());
+    prepare(storage);
+
+    mdbxc::KeyValueTable<std::string, std::string> index(
+        storage.connection(), "ts_admission_scope_index");
+    std::vector<std::pair<std::string, std::string>> entries;
+    ASSERT_NO_THROW(index.load(entries));
+    for (const auto& entry : entries) index.erase(entry.first);
+
+    ts::FakeExecutionClock clock(1000);
+    ts::ExecutionRecoveryManager manager(clock);
+    const auto owners = authoritative_owners({reservation()});
+    ASSERT_TRUE(owners.valid) << owners.message;
+    EXPECT_EQ(manager.prepare(storage, intent(), roster(), {reservation()},
+                              {physical_trade()}, owners.references).kind,
+              ts::StorageResultKind::INVALID_STATE);
+
+    auto rebuild = storage.begin();
+    ASSERT_EQ(rebuild.rebuild_admission_scope_index().kind,
+              ts::StorageResultKind::APPLIED);
+    ASSERT_EQ(rebuild.commit().kind, ts::StorageResultKind::APPLIED);
+    EXPECT_EQ(manager.prepare(storage, intent(), roster(), {reservation()},
+                              {physical_trade()}, owners.references).kind,
+              ts::StorageResultKind::APPLIED);
 }
 
 TEST(TradingSystemBatch5C, MultiAccountRosterKeepsPhysicalAndRiskIdentitiesSeparate) {

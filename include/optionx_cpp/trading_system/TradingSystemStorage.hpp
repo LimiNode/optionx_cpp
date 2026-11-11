@@ -16,6 +16,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <numeric>
 #include <set>
@@ -396,6 +397,19 @@ namespace detail {
 inline std::pair<std::string, std::string> group_index_bounds(ExecutionGroupId group_id) {
     const auto prefix = std::to_string(group_id) + ":";
     return {prefix, std::to_string(group_id) + ";"};
+}
+
+inline constexpr const char* admission_scope_index_marker = "@schema";
+
+inline std::pair<std::string, std::string> admission_scope_index_bounds(
+    std::uint64_t risk_scope_id) {
+    const auto prefix = "scope:" + std::to_string(risk_scope_id) + ":";
+    return {prefix, "scope:" + std::to_string(risk_scope_id) + ";"};
+}
+
+inline std::string admission_scope_index_key(
+    std::uint64_t risk_scope_id, const char* category, const std::string& identity) {
+    return "scope:" + std::to_string(risk_scope_id) + ":" + category + ":" + identity;
 }
 
 inline nlohmann::json money_to_json(const MoneyAmount& value) {
@@ -940,6 +954,7 @@ public:
           m_physical_trades(m_connection, "ts_physical_trades"),
           m_accounts(m_connection, "ts_accounts"),
           m_risk_scope_gates(m_connection, "ts_risk_scope_gates"),
+          m_admission_scope_index(m_connection, "ts_admission_scope_index"),
           m_settlements(m_connection, "ts_settlements"),
           m_group_settlement_index(m_connection, "ts_group_settlement_index"),
           m_valuation_resolutions(m_connection, "ts_valuation_resolutions"),
@@ -1170,15 +1185,17 @@ private:
     mutable mdbxc::KeyValueTable<std::string, std::string> m_physical_trades;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_accounts;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_risk_scope_gates;
+    mutable mdbxc::KeyValueTable<std::string, std::string> m_admission_scope_index;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_settlements;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_group_settlement_index;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_valuation_resolutions;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_series;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_mm_state;
     mutable mdbxc::KeyValueTable<std::string, std::string> m_sequences;
+    mutable std::mutex m_write_mutex;
 
     static mdbxc::Config normalize_config(mdbxc::Config config) {
-        if (config.max_dbs < 17) config.max_dbs = 17;
+        if (config.max_dbs < 18) config.max_dbs = 18;
         return config;
     }
 
@@ -1246,7 +1263,8 @@ private:
 class TradingSystemStorage::UnitOfWork {
 public:
     explicit UnitOfWork(TradingSystemStorage& storage)
-        : m_storage(storage), m_transaction(storage.m_connection->transaction(mdbxc::TransactionMode::WRITABLE)) {}
+        : m_storage(storage), m_write_lock(storage.m_write_mutex),
+          m_transaction(storage.m_connection->transaction(mdbxc::TransactionMode::WRITABLE)) {}
 
     ~UnitOfWork() {
         if (!m_closed) m_transaction.rollback();
@@ -1261,6 +1279,11 @@ public:
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid journal identity or schema"});
         }
         try {
+            if (event.event_type == "EXECUTION_OPERATION" ||
+                event.event_type == "GROUP_COMPLETION") {
+                const auto index_ready = ensure_admission_scope_index_ready();
+                if (index_ready.kind != StorageResultKind::APPLIED) return index_ready;
+            }
             const auto encoded = detail::journal_to_json(event).dump();
             const auto existing = m_storage.m_journal.find(event.idempotency_key, m_transaction);
             if (existing) {
@@ -1276,6 +1299,13 @@ public:
             if (sequence.kind != StorageResultKind::APPLIED) return sequence;
             m_storage.m_journal.insert(event.idempotency_key, encoded, m_transaction);
             m_storage.m_journal_ids.insert(event_key, event.idempotency_key, m_transaction);
+            if (event.event_type == "EXECUTION_OPERATION") {
+                const auto indexed = sync_operation_scope_index(event);
+                if (indexed.kind != StorageResultKind::APPLIED) return indexed;
+            } else if (event.event_type == "GROUP_COMPLETION") {
+                const auto indexed = clear_group_scope_index(event);
+                if (indexed.kind != StorageResultKind::APPLIED) return indexed;
+            }
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
             return fail({StorageResultKind::STORAGE_ERROR, error.what()});
@@ -1300,76 +1330,31 @@ public:
         ExecutionGroupId replay_group_id = 0) {
         if (risk_scopes.empty()) return {StorageResultKind::APPLIED, {}};
         try {
-            std::vector<std::pair<std::string, std::string>> encoded_journal;
-            m_storage.m_journal.load(encoded_journal, m_transaction);
-            std::map<std::string, JournalEvent> latest_operations;
-            std::set<ExecutionGroupId> completed_groups;
-            for (const auto& entry : encoded_journal) {
-                const auto event = detail::journal_from_json(
-                    nlohmann::json::parse(entry.second));
-                if (event.event_type == "GROUP_COMPLETION") {
-                    constexpr const char* prefix = "group:";
-                    if (event.aggregate_id.compare(0, 6, prefix) == 0) {
-                        std::size_t length = 0;
-                        const auto group_id = std::stoull(
-                            event.aggregate_id.substr(6), &length);
-                        if (length != event.aggregate_id.size() - 6 || group_id == 0) {
-                            return fail({StorageResultKind::STORAGE_ERROR,
-                                         "group completion identity is malformed"});
-                        }
-                        completed_groups.insert(group_id);
+            const auto ready = ensure_admission_scope_index_ready();
+            if (ready.kind != StorageResultKind::APPLIED) return ready;
+            for (const auto risk_scope_id : risk_scopes) {
+                const auto bounds = detail::admission_scope_index_bounds(risk_scope_id);
+                const auto entries = m_storage.m_admission_scope_index.range<std::vector>(
+                    bounds.first, bounds.second, m_transaction);
+                for (const auto& entry : entries) {
+                    if (entry.first.rfind(bounds.first, 0) != 0) {
+                        return fail({StorageResultKind::STORAGE_ERROR,
+                                     "admission scope index contains an invalid key"});
                     }
-                } else if (event.event_type == "EXECUTION_OPERATION") {
-                    const auto current = latest_operations.find(event.aggregate_id);
-                    if (current == latest_operations.end() ||
-                        current->second.state_revision < event.state_revision) {
-                        latest_operations[event.aggregate_id] = event;
+                    const auto projection = nlohmann::json::parse(entry.second);
+                    if (projection.value("schema_version", std::uint32_t{0}) !=
+                        trading_storage_schema_version) {
+                        return fail({StorageResultKind::UNSUPPORTED_SCHEMA,
+                                     "unsupported admission scope index schema"});
                     }
-                }
-            }
-            for (const auto& item : latest_operations) {
-                const auto risk_scope_id = item.second.payload.value(
-                    "risk_scope_id", std::uint64_t{0});
-                const auto group_id = item.second.payload.value(
-                    "group_id", ExecutionGroupId{0});
-                if (!risk_scopes.count(risk_scope_id) || group_id == replay_group_id) {
-                    continue;
-                }
-                const auto state = item.second.payload.value("state", std::string{});
-                const bool unresolved = state == "SUBMISSION_STARTED" ||
-                    state == "BROKER_ACCEPTED" || state == "BROKER_ID_PERSISTED" ||
-                    state == "EXECUTION_UNKNOWN" ||
-                    state == "RECONCILIATION_REQUIRED";
-                if (!completed_groups.count(group_id) || unresolved) {
-                    return fail({StorageResultKind::INVALID_STATE,
-                                 "risk scope became blocked during admission"});
-                }
-            }
-
-            std::vector<std::pair<std::string, std::string>> encoded_reservations;
-            m_storage.m_reservations.load(encoded_reservations, m_transaction);
-            for (const auto& entry : encoded_reservations) {
-                const auto reservation = detail::reservation_from_json(
-                    nlohmann::json::parse(entry.second));
-                const bool active = reservation.state == RiskReservationState::RESERVED ||
-                    reservation.state == RiskReservationState::SUBMITTED ||
-                    reservation.state == RiskReservationState::EXECUTION_UNKNOWN;
-                if (active && risk_scopes.count(reservation.risk_scope_id) &&
-                    reservation.execution_group.group_id != replay_group_id) {
-                    return fail({StorageResultKind::INVALID_STATE,
-                                 "risk scope has a reservation outside the prepared group"});
-                }
-            }
-
-            std::vector<std::pair<std::string, std::string>> encoded_gates;
-            m_storage.m_risk_scope_gates.load(encoded_gates, m_transaction);
-            for (const auto& entry : encoded_gates) {
-                const auto gate = detail::risk_scope_gate_from_json(
-                    nlohmann::json::parse(entry.second));
-                if (risk_scopes.count(gate.risk_scope_id) ||
-                    risk_scopes.count(gate.related_scope_id)) {
-                    return fail({StorageResultKind::INVALID_STATE,
-                                 "risk scope is blocked by a durable gate"});
+                    if (projection.value("kind", std::string{}) == "GATE") {
+                        return fail({StorageResultKind::INVALID_STATE,
+                                     "risk scope is blocked by a durable gate"});
+                    }
+                    if (projection.value("group_id", ExecutionGroupId{0}) != replay_group_id) {
+                        return fail({StorageResultKind::INVALID_STATE,
+                                     "risk scope became blocked during admission"});
+                    }
                 }
             }
             return {StorageResultKind::APPLIED, {}};
@@ -1451,6 +1436,80 @@ public:
         }
     }
 
+    /// \brief Rebuilds the admission-scope projection from canonical facts.
+    ///
+    /// This is an explicit maintenance operation for databases created before
+    /// `ts_admission_scope_index` existed. Normal admissions never scan the
+    /// journal or reservation history and never perform this rebuild.
+    StorageResult rebuild_admission_scope_index() {
+        try {
+            std::vector<std::pair<std::string, std::string>> current;
+            m_storage.m_admission_scope_index.load(current, m_transaction);
+            for (const auto& entry : current) {
+                m_storage.m_admission_scope_index.erase(entry.first, m_transaction);
+            }
+            m_storage.m_admission_scope_index.insert_or_assign(
+                detail::admission_scope_index_marker,
+                nlohmann::json{{"schema_version", trading_storage_schema_version}}.dump(),
+                m_transaction);
+
+            std::vector<std::pair<std::string, std::string>> encoded_reservations;
+            m_storage.m_reservations.load(encoded_reservations, m_transaction);
+            for (const auto& entry : encoded_reservations) {
+                const auto reservation = detail::reservation_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (!reservation.valid()) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "cannot rebuild admission index from invalid reservation"});
+                }
+                if (auto result = sync_reservation_scope_index(std::nullopt, reservation);
+                    result.kind != StorageResultKind::APPLIED) return result;
+            }
+
+            std::vector<std::pair<std::string, std::string>> encoded_journal;
+            m_storage.m_journal.load(encoded_journal, m_transaction);
+            std::map<std::string, JournalEvent> latest_operations;
+            std::vector<JournalEvent> completions;
+            for (const auto& entry : encoded_journal) {
+                const auto event = detail::journal_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (event.event_type == "EXECUTION_OPERATION") {
+                    const auto current = latest_operations.find(event.aggregate_id);
+                    if (current == latest_operations.end() ||
+                        current->second.state_revision < event.state_revision) {
+                        latest_operations[event.aggregate_id] = event;
+                    }
+                } else if (event.event_type == "GROUP_COMPLETION") {
+                    completions.push_back(event);
+                }
+            }
+            for (const auto& entry : latest_operations) {
+                if (auto result = sync_operation_scope_index(entry.second);
+                    result.kind != StorageResultKind::APPLIED) return result;
+            }
+            for (const auto& completion : completions) {
+                if (auto result = clear_group_scope_index(completion);
+                    result.kind != StorageResultKind::APPLIED) return result;
+            }
+
+            std::vector<std::pair<std::string, std::string>> encoded_gates;
+            m_storage.m_risk_scope_gates.load(encoded_gates, m_transaction);
+            for (const auto& entry : encoded_gates) {
+                const auto gate = detail::risk_scope_gate_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (!gate.valid()) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "cannot rebuild admission index from invalid gate"});
+                }
+                if (auto result = index_scope_gate(gate);
+                    result.kind != StorageResultKind::APPLIED) return result;
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     /// \brief Persists an account binding or its deactivated tombstone.
     ///
     /// A matching external identity may be represented by aliases only when
@@ -1505,6 +1564,8 @@ public:
         if (!valid_schema(roster.schema_version) || !roster.valid()) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid execution roster"});
         }
+        const auto index_ready = ensure_admission_scope_index_ready();
+        if (index_ready.kind != StorageResultKind::APPLIED) return index_ready;
         const auto result = put_immutable(
             m_storage.m_rosters, std::to_string(roster.group_id),
             detail::roster_to_json(roster).dump());
@@ -1533,12 +1594,20 @@ public:
                                  "reservation immutable identity changed"});
                 }
             }
+            const auto index_ready = ensure_admission_scope_index_ready();
+            if (index_ready.kind != StorageResultKind::APPLIED) return index_ready;
             const auto result = put_revisioned(
                 m_storage.m_reservations, std::to_string(value.reservation_id),
                 detail::reservation_to_json(value).dump(),
                 value.state_revision, expected_revision);
             if (result.kind == StorageResultKind::APPLIED ||
                 result.kind == StorageResultKind::DUPLICATE) {
+                const auto indexed = sync_reservation_scope_index(
+                    existing ? std::optional<ReservationRecord>(
+                        detail::reservation_from_json(nlohmann::json::parse(*existing)))
+                             : std::nullopt,
+                    value);
+                if (indexed.kind != StorageResultKind::APPLIED) return indexed;
                 m_touched_reservations.insert(value.reservation_id);
             }
             return result;
@@ -1994,6 +2063,7 @@ public:
             }
             m_transaction.commit();
             m_closed = true;
+            m_write_lock.unlock();
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
             m_failed = true;
@@ -2006,6 +2076,7 @@ public:
         if (m_closed) return;
         try { m_transaction.rollback(); } catch (...) {}
         m_closed = true;
+        if (m_write_lock.owns_lock()) m_write_lock.unlock();
     }
 
     /// \brief Returns the number of roster/reservation bindings checked by this Unit of Work.
@@ -2141,6 +2212,8 @@ private:
                                   RiskScopeGateState::BLOCKED, conflict_id, 0,
                                   trading_storage_schema_version};
         try {
+            const auto index_ready = ensure_admission_scope_index_ready();
+            if (index_ready.kind != StorageResultKind::APPLIED) return index_ready;
             const auto key = std::to_string(risk_scope_id);
             const auto existing = m_storage.m_risk_scope_gates.find(key, m_transaction);
             if (existing) {
@@ -2154,6 +2227,8 @@ private:
             }
             m_storage.m_risk_scope_gates.insert(
                 key, detail::risk_scope_gate_to_json(value).dump(), m_transaction);
+            const auto indexed = index_scope_gate(value);
+            if (indexed.kind != StorageResultKind::APPLIED) return indexed;
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
             return fail({StorageResultKind::STORAGE_ERROR, error.what()});
@@ -2737,6 +2812,168 @@ private:
         }
     }
 
+    static bool active_reservation_state(RiskReservationState state) noexcept {
+        return state == RiskReservationState::RESERVED ||
+               state == RiskReservationState::SUBMITTED ||
+               state == RiskReservationState::EXECUTION_UNKNOWN;
+    }
+
+    static bool blocking_operation_state(const std::string& state) noexcept {
+        return state == "PREPARED" || state == "SUBMISSION_STARTED" ||
+               state == "BROKER_ACCEPTED" || state == "BROKER_ID_PERSISTED" ||
+               state == "EXECUTED" || state == "EXECUTION_UNKNOWN" ||
+               state == "RECONCILIATION_REQUIRED";
+    }
+
+    StorageResult ensure_admission_scope_index_ready() {
+        try {
+            const auto marker = m_storage.m_admission_scope_index.find(
+                detail::admission_scope_index_marker, m_transaction);
+            if (marker) {
+                const auto document = nlohmann::json::parse(*marker);
+                if (document.value("schema_version", std::uint32_t{0}) !=
+                    trading_storage_schema_version) {
+                    return fail({StorageResultKind::UNSUPPORTED_SCHEMA,
+                                 "unsupported admission scope index schema"});
+                }
+                return {StorageResultKind::APPLIED, {}};
+            }
+
+            // A missing projection is safe only for a genuinely new empty
+            // database. Existing data requires the explicit maintenance pass.
+            if (!m_storage.m_journal.empty(m_transaction) ||
+                !m_storage.m_rosters.empty(m_transaction) ||
+                !m_storage.m_reservations.empty(m_transaction) ||
+                !m_storage.m_risk_scope_gates.empty(m_transaction)) {
+                return fail({StorageResultKind::INVALID_STATE,
+                             "admission scope index requires explicit rebuild"});
+            }
+            m_storage.m_admission_scope_index.insert_or_assign(
+                detail::admission_scope_index_marker,
+                nlohmann::json{{"schema_version", trading_storage_schema_version}}.dump(),
+                m_transaction);
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
+    StorageResult put_scope_index_entry(
+        std::uint64_t risk_scope_id, const char* category,
+        const std::string& identity, const nlohmann::json& projection) {
+        if (risk_scope_id == 0 || identity.empty()) {
+            return fail({StorageResultKind::INVALID_ARGUMENT,
+                         "invalid admission scope index identity"});
+        }
+        const auto key = detail::admission_scope_index_key(
+            risk_scope_id, category, identity);
+        const auto encoded = projection.dump();
+        const auto existing = m_storage.m_admission_scope_index.find(key, m_transaction);
+        if (existing) {
+            return *existing == encoded
+                ? StorageResult{StorageResultKind::APPLIED, {}}
+                : fail({StorageResultKind::CONFLICT,
+                        "admission scope index payload conflicts"});
+        }
+        m_storage.m_admission_scope_index.insert(key, encoded, m_transaction);
+        return {StorageResultKind::APPLIED, {}};
+    }
+
+    void erase_scope_index_entry(
+        std::uint64_t risk_scope_id, const char* category,
+        const std::string& identity) {
+        if (risk_scope_id != 0 && !identity.empty()) {
+            m_storage.m_admission_scope_index.erase(
+                detail::admission_scope_index_key(risk_scope_id, category, identity),
+                m_transaction);
+        }
+    }
+
+    StorageResult sync_reservation_scope_index(
+        const std::optional<ReservationRecord>& previous,
+        const ReservationRecord& current) {
+        if (previous && active_reservation_state(previous->state)) {
+            erase_scope_index_entry(previous->risk_scope_id, "reservation",
+                                    std::to_string(previous->reservation_id));
+        }
+        if (!active_reservation_state(current.state)) {
+            return {StorageResultKind::APPLIED, {}};
+        }
+        return put_scope_index_entry(
+            current.risk_scope_id, "reservation",
+            std::to_string(current.reservation_id),
+            nlohmann::json{{"schema_version", trading_storage_schema_version},
+                           {"kind", "RESERVATION"},
+                           {"group_id", current.execution_group.group_id},
+                           {"reservation_id", current.reservation_id}});
+    }
+
+    StorageResult sync_operation_scope_index(const JournalEvent& event) {
+        const auto risk_scope_id = event.payload.value(
+            "risk_scope_id", std::uint64_t{0});
+        const auto group_id = event.payload.value("group_id", ExecutionGroupId{0});
+        const auto operation_id = event.payload.value("operation_id", std::string{});
+        if (risk_scope_id == 0 || group_id == 0 || operation_id.empty()) {
+            return fail({StorageResultKind::STORAGE_ERROR,
+                         "execution operation has invalid admission index identity"});
+        }
+        const auto state = event.payload.value("state", std::string{});
+        erase_scope_index_entry(risk_scope_id, "operation", operation_id);
+        if (!blocking_operation_state(state)) {
+            return {StorageResultKind::APPLIED, {}};
+        }
+        return put_scope_index_entry(
+            risk_scope_id, "operation", operation_id,
+            nlohmann::json{{"schema_version", trading_storage_schema_version},
+                           {"kind", "OPERATION"},
+                           {"group_id", group_id},
+                           {"operation_id", operation_id},
+                           {"state", state}});
+    }
+
+    StorageResult index_scope_gate(const RiskScopeGateRecord& gate) {
+        const auto projection = nlohmann::json{
+            {"schema_version", trading_storage_schema_version},
+            {"kind", "GATE"},
+            {"group_id", ExecutionGroupId{0}},
+            {"risk_scope_id", gate.risk_scope_id},
+            {"related_scope_id", gate.related_scope_id},
+            {"conflict_id", gate.conflict_id}};
+        auto result = put_scope_index_entry(
+            gate.risk_scope_id, "gate", gate.conflict_id, projection);
+        if (result.kind != StorageResultKind::APPLIED) return result;
+        return put_scope_index_entry(
+            gate.related_scope_id, "gate", gate.conflict_id, projection);
+    }
+
+    StorageResult clear_group_scope_index(const JournalEvent& event) {
+        try {
+            std::vector<std::pair<std::string, std::string>> entries;
+            m_storage.m_admission_scope_index.load(entries, m_transaction);
+            if (event.aggregate_id.rfind("group:", 0) != 0) {
+                return fail({StorageResultKind::STORAGE_ERROR,
+                             "group completion identity is malformed"});
+            }
+            std::size_t length = 0;
+            const auto group_id = std::stoull(event.aggregate_id.substr(6), &length);
+            if (length != event.aggregate_id.size() - 6 || group_id == 0) {
+                return fail({StorageResultKind::STORAGE_ERROR,
+                             "group completion identity is malformed"});
+            }
+            for (const auto& entry : entries) {
+                if (entry.first == detail::admission_scope_index_marker) continue;
+                const auto projection = nlohmann::json::parse(entry.second);
+                if (projection.value("kind", std::string{}) == "OPERATION" &&
+                    projection.value("group_id", ExecutionGroupId{0}) == group_id) {
+                    m_storage.m_admission_scope_index.erase(entry.first, m_transaction);
+                }
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     static bool valid_schema(std::uint32_t value) noexcept {
         return value == trading_storage_schema_version;
     }
@@ -2752,6 +2989,7 @@ private:
     }
 
     TradingSystemStorage& m_storage;
+    std::unique_lock<std::mutex> m_write_lock;
     mdbxc::Transaction m_transaction;
     bool m_failed = false;
     bool m_closed = false;
