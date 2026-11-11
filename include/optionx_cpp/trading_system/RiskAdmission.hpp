@@ -310,6 +310,70 @@ public:
 
     bool valid() const noexcept { return m_config.valid() && m_id_sequence_valid; }
 
+    /// \brief Returns the immutable scope owned by this admission authority.
+    RiskScope scope() const noexcept {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_config.scope;
+    }
+
+    /// \brief Verifies that a reservation was admitted by this owner.
+    ///
+    /// A durable ReservationRecord is only a storage fact.  Callers that cross
+    /// into execution preparation must present the corresponding owner token;
+    /// this check is the narrow authority boundary and does not mutate state.
+    RiskAdmissionResult verify_admission(const RiskReservation& token) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!valid()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_CONFIGURATION);
+        }
+        const auto found = m_by_key.find(token.idempotency_key);
+        if (found == m_by_key.end()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::UNKNOWN_RESERVATION);
+        }
+        if (!matches(found->second, token)) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        if (found->second.state != RiskReservationState::RESERVED) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_TRANSITION);
+        }
+        return RiskAdmissionResult::admitted(found->second);
+    }
+
+    /// \brief Verifies a group-level admission owned by this scope.
+    ///
+    /// Durable execution may split one owner reservation across several
+    /// physical roster members.  In that case the owner token is the aggregate
+    /// reservation, while the storage records retain member-level identities.
+    RiskAdmissionResult verify_group_admission(const RiskRequest& request) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!valid() || !request.valid_identity()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_CONFIGURATION);
+        }
+        const auto found = m_by_intent.find(request.intent_id);
+        if (found == m_by_intent.end()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::UNKNOWN_RESERVATION);
+        }
+        const auto stored = m_by_key.find(found->second);
+        if (stored == m_by_key.end()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::UNKNOWN_RESERVATION);
+        }
+        if (stored->second.state != RiskReservationState::RESERVED) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_TRANSITION);
+        }
+        if (!same_request(stored->second, request) ||
+            stored->second.idempotency_key != request.idempotency_key) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        return RiskAdmissionResult::admitted(stored->second);
+    }
+
     /// \brief Restores durable fail-closed readiness before new admission.
     ///
     /// The storage layer supplies the typed gate state; this owner method only

@@ -1289,6 +1289,95 @@ public:
         return put_immutable(m_storage.m_intents, std::to_string(intent.intent_id), encoded.dump());
     }
 
+    /// \brief Rechecks risk-scope admission inside this write transaction.
+    ///
+    /// The caller-side readiness projection is useful for diagnostics, but it
+    /// cannot close a TOCTOU window by itself. This check observes the same
+    /// MDBX writer snapshot that will receive the preparation. An existing
+    /// group may be replayed; another group sharing the scope is blocked.
+    StorageResult validate_admission_scopes(
+        const std::set<std::uint64_t>& risk_scopes,
+        ExecutionGroupId replay_group_id = 0) {
+        if (risk_scopes.empty()) return {StorageResultKind::APPLIED, {}};
+        try {
+            std::vector<std::pair<std::string, std::string>> encoded_journal;
+            m_storage.m_journal.load(encoded_journal, m_transaction);
+            std::map<std::string, JournalEvent> latest_operations;
+            std::set<ExecutionGroupId> completed_groups;
+            for (const auto& entry : encoded_journal) {
+                const auto event = detail::journal_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (event.event_type == "GROUP_COMPLETION") {
+                    constexpr const char* prefix = "group:";
+                    if (event.aggregate_id.compare(0, 6, prefix) == 0) {
+                        std::size_t length = 0;
+                        const auto group_id = std::stoull(
+                            event.aggregate_id.substr(6), &length);
+                        if (length != event.aggregate_id.size() - 6 || group_id == 0) {
+                            return fail({StorageResultKind::STORAGE_ERROR,
+                                         "group completion identity is malformed"});
+                        }
+                        completed_groups.insert(group_id);
+                    }
+                } else if (event.event_type == "EXECUTION_OPERATION") {
+                    const auto current = latest_operations.find(event.aggregate_id);
+                    if (current == latest_operations.end() ||
+                        current->second.state_revision < event.state_revision) {
+                        latest_operations[event.aggregate_id] = event;
+                    }
+                }
+            }
+            for (const auto& item : latest_operations) {
+                const auto risk_scope_id = item.second.payload.value(
+                    "risk_scope_id", std::uint64_t{0});
+                const auto group_id = item.second.payload.value(
+                    "group_id", ExecutionGroupId{0});
+                if (!risk_scopes.count(risk_scope_id) || group_id == replay_group_id) {
+                    continue;
+                }
+                const auto state = item.second.payload.value("state", std::string{});
+                const bool unresolved = state == "SUBMISSION_STARTED" ||
+                    state == "BROKER_ACCEPTED" || state == "BROKER_ID_PERSISTED" ||
+                    state == "EXECUTION_UNKNOWN" ||
+                    state == "RECONCILIATION_REQUIRED";
+                if (!completed_groups.count(group_id) || unresolved) {
+                    return fail({StorageResultKind::INVALID_STATE,
+                                 "risk scope became blocked during admission"});
+                }
+            }
+
+            std::vector<std::pair<std::string, std::string>> encoded_reservations;
+            m_storage.m_reservations.load(encoded_reservations, m_transaction);
+            for (const auto& entry : encoded_reservations) {
+                const auto reservation = detail::reservation_from_json(
+                    nlohmann::json::parse(entry.second));
+                const bool active = reservation.state == RiskReservationState::RESERVED ||
+                    reservation.state == RiskReservationState::SUBMITTED ||
+                    reservation.state == RiskReservationState::EXECUTION_UNKNOWN;
+                if (active && risk_scopes.count(reservation.risk_scope_id) &&
+                    reservation.execution_group.group_id != replay_group_id) {
+                    return fail({StorageResultKind::INVALID_STATE,
+                                 "risk scope has a reservation outside the prepared group"});
+                }
+            }
+
+            std::vector<std::pair<std::string, std::string>> encoded_gates;
+            m_storage.m_risk_scope_gates.load(encoded_gates, m_transaction);
+            for (const auto& entry : encoded_gates) {
+                const auto gate = detail::risk_scope_gate_from_json(
+                    nlohmann::json::parse(entry.second));
+                if (risk_scopes.count(gate.risk_scope_id) ||
+                    risk_scopes.count(gate.related_scope_id)) {
+                    return fail({StorageResultKind::INVALID_STATE,
+                                 "risk scope is blocked by a durable gate"});
+                }
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     /// \brief Allocates the next durable identifier inside this transaction.
     SequenceResult next_id(const std::string& sequence_name) {
         if (sequence_name.empty()) return fail_sequence("sequence name is empty");
@@ -1306,29 +1395,18 @@ public:
             }
             auto candidate = next;
             if (sequence_name == "settlement") {
-                // Settlement IDs can arrive from an external broker/history
-                // import. Keep local allocation above every registered fact.
-                std::vector<std::pair<std::string, std::string>> settlements;
-                m_storage.m_settlements.load(settlements, m_transaction);
-                for (const auto& entry : settlements) {
-                    std::size_t length = 0;
-                    const auto used = std::stoull(entry.first, &length);
-                    if (length != entry.first.size() || used == 0) {
-                        return fail_sequence("settlement identity is malformed");
-                    }
-                    if (used >= candidate) {
-                        if (used == (std::numeric_limits<std::uint64_t>::max)()) {
-                            return fail_sequence("durable settlement identifier exhausted");
-                        }
-                        candidate = used + 1;
-                    }
+                // put_settlement() maintains this high-water mark atomically.
+                // A missing sequence on a non-empty legacy table requires the
+                // explicit rebuild_settlement_sequence() maintenance pass;
+                // ordinary allocation must never scan the full history.
+                if (!current && !m_storage.m_settlements.empty(m_transaction)) {
+                    return fail_sequence(
+                        "settlement sequence requires explicit rebuild");
                 }
-                while (m_storage.m_settlements.find(
-                           std::to_string(candidate), m_transaction)) {
-                    if (candidate == (std::numeric_limits<std::uint64_t>::max)()) {
-                        return fail_sequence("durable settlement identifier exhausted");
-                    }
-                    ++candidate;
+                if (m_storage.m_settlements.find(
+                        std::to_string(candidate), m_transaction)) {
+                    return fail_sequence(
+                        "settlement sequence collides; rebuild is required");
                 }
             }
             if (candidate == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -1340,6 +1418,36 @@ public:
         } catch (const std::exception& error) {
             m_failed = true;
             return {StorageResultKind::STORAGE_ERROR, 0, error.what()};
+        }
+    }
+
+    /// \brief Rebuilds the settlement high-water mark for legacy databases.
+    ///
+    /// This is an explicit maintenance operation. Normal SettlementId
+    /// allocation remains O(1) and never scans historical settlement facts.
+    StorageResult rebuild_settlement_sequence() {
+        try {
+            std::vector<std::pair<std::string, std::string>> settlements;
+            m_storage.m_settlements.load(settlements, m_transaction);
+            std::uint64_t maximum = 0;
+            for (const auto& entry : settlements) {
+                std::size_t length = 0;
+                const auto used = std::stoull(entry.first, &length);
+                if (length != entry.first.size() || used == 0) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "settlement identity is malformed"});
+                }
+                if (used > maximum) maximum = used;
+            }
+            if (maximum == (std::numeric_limits<std::uint64_t>::max)()) {
+                return fail({StorageResultKind::INVALID_ARGUMENT,
+                             "durable settlement identifier exhausted"});
+            }
+            m_storage.m_sequences.insert_or_assign(
+                "settlement", std::to_string(maximum + 1), m_transaction);
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
         }
     }
 

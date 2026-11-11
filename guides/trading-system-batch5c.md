@@ -79,7 +79,45 @@ completion, or an invalid journal continue to block admission.
 and money-management owners have been hydrated after restart; the default is
 fail closed. `blocked_risk_scopes()` is retained as a compatibility projection
 of those durable facts, while new admission code should consume the typed
-readiness result.
+readiness result. `prepare()` additionally requires one or more references to
+the authoritative `RiskAdmission` owners. It verifies the owner reservation
+before opening the storage Unit of Work; an `ADMITTED` intent or a caller-built
+`ReservationRecord` is not an admission proof. When one owner reservation is
+split across physical members, the member records are aggregated by owner and
+matched against the owner's group-level reservation. The order is therefore:
+
+```text
+RiskAdmission::reserve()
+    -> durable ReservationRecord / roster preparation
+    -> ExecutionRecoveryManager::prepare(..., owners)
+```
+
+The durable readiness check and the owner proof are separate boundaries. A
+durable `PREPARED` operation may be continued after restart from its journal,
+but a new group cannot bypass the owner check or the fail-closed recovery
+facts. The owner reservation must remain in `RESERVED` state until preparation
+returns; a failed preparation is released by the caller. Concurrent risk
+decisions remain serialized by the existing `RiskAdmission` owner; Batch 5C
+does not create a second risk state machine. Preparation repeats the durable
+risk-scope check inside the same MDBX write transaction, closing the race
+between the diagnostic readiness projection and the durable write.
+
+Preparation replay compares immutable operation payload while ignoring only
+the newly observed wall-clock timestamp. The original `occurred_at_ms` remains
+the durable creation fact and no new journal revision is written.
+
+Physical terminal evidence and logical group completion are separate idempotent
+steps. If physical evidence is already settled but logical completion is still
+pending, a later equivalent callback may carry another `SettlementId`; the
+completion path normalizes it to the persisted canonical settlement and applies
+the existing Batch 5B atomic group-completion operation exactly once.
+
+`SettlementId` allocation uses the durable `ts_sequences` high-water mark and
+is O(1) in normal operation. External settlement writes advance that mark in
+the same Unit of Work. A legacy database with settlement facts but no valid
+sequence is deliberately blocked until the explicit
+`UnitOfWork::rebuild_settlement_sequence()` maintenance operation is run; the
+normal allocation path never scans the full settlement table.
 
 ## Crash boundaries
 
@@ -140,6 +178,10 @@ quote is fetched by Batch 5C.
 - idempotent reconciliation;
 - operation plus physical settlement atomicity;
 - settlement replay conflict detection;
+- authoritative `RiskAdmission` owner proof and rejection of unbound prepare;
+- preparation replay with different restart timestamps;
+- late logical completion after physical settlement;
+- bounded settlement ID allocation and explicit legacy sequence rebuild;
 - multi-account roster identity preservation and restart/reopen completion.
 
 The simulated broker state is explicitly owned outside the OptionX runtime

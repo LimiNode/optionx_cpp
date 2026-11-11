@@ -429,8 +429,11 @@ public:
         return result;
     }
 
-    RecoveryReadiness admission_readiness(const TradingSystemStorage& storage,
-                                          bool owners_hydrated = false) const {
+    /// \brief Reconstructs readiness from durable facts only.
+    ///
+    /// This does not claim that an in-memory RiskAdmission owner was hydrated;
+    /// new admission must supply and verify those owners separately.
+    RecoveryReadiness durable_readiness(const TradingSystemStorage& storage) const {
         const auto recovered = recover(storage);
         RecoveryReadiness result;
         result.recovery_kind = recovered.kind;
@@ -487,7 +490,13 @@ public:
                 result.blocked_risk_scopes.insert(item.second.risk_scope_id);
             }
         }
-        if (!owners_hydrated) {
+        return result;
+    }
+
+    RecoveryReadiness admission_readiness(const TradingSystemStorage& storage,
+                                          bool owners_hydrated = false) const {
+        auto result = durable_readiness(storage);
+        if (result.journal_valid && !owners_hydrated) {
             result.global_block = true;
             result.diagnostic = "series, risk and money-management owners are not hydrated";
         }
@@ -497,7 +506,7 @@ public:
     /// \brief Returns the durable risk scopes currently blocked by recovery facts.
     std::set<std::uint64_t> blocked_risk_scopes(
         const TradingSystemStorage& storage) const {
-        return admission_readiness(storage, true).blocked_risk_scopes;
+        return durable_readiness(storage).blocked_risk_scopes;
     }
 
 private:
@@ -587,9 +596,83 @@ private:
         return {StorageResultKind::APPLIED, {}};
     }
 
+    static StorageResult validate_owner_admissions(
+        const TradeIntent& intent,
+        const std::vector<ReservationRecord>& reservations,
+        const std::vector<const RiskAdmission*>& admission_owners) {
+        if (reservations.size() != admission_owners.size()) {
+            return {StorageResultKind::INVALID_ARGUMENT,
+                    "one authoritative RiskAdmission owner is required per reservation"};
+        }
+        struct Aggregate {
+            MoneyAmount stake;
+            MoneyAmount potential_risk;
+        };
+        std::map<const RiskAdmission*, Aggregate> aggregates;
+        for (std::size_t index = 0; index < reservations.size(); ++index) {
+            const auto* owner = admission_owners[index];
+            if (!owner) {
+                return {StorageResultKind::INVALID_ARGUMENT,
+                        "RiskAdmission owner is missing"};
+            }
+            const auto& reservation = reservations[index];
+            const auto owner_scope = owner->scope();
+            if (owner_scope.kind != reservation.risk_scope_kind ||
+                owner_scope.scope_id != reservation.risk_scope_id) {
+                return {StorageResultKind::CONFLICT,
+                        "RiskAdmission owner does not own reservation risk scope"};
+            }
+            auto found = aggregates.find(owner);
+            if (found == aggregates.end()) {
+                found = aggregates.emplace(owner,
+                    Aggregate{reservation.stake, reservation.potential_risk}).first;
+            } else {
+                auto& aggregate = found->second;
+                if (aggregate.stake.currency != reservation.stake.currency ||
+                    aggregate.stake.precision != reservation.stake.precision ||
+                    aggregate.potential_risk.currency != reservation.potential_risk.currency ||
+                    aggregate.potential_risk.precision != reservation.potential_risk.precision ||
+                    aggregate.stake.units >
+                        (std::numeric_limits<std::int64_t>::max)() - reservation.stake.units ||
+                    aggregate.potential_risk.units >
+                        (std::numeric_limits<std::int64_t>::max)() -
+                            reservation.potential_risk.units) {
+                    return {StorageResultKind::CONFLICT,
+                            "RiskAdmission owner reservations have incompatible money metadata"};
+                }
+                aggregate.stake.units += reservation.stake.units;
+                aggregate.potential_risk.units += reservation.potential_risk.units;
+            }
+        }
+        for (const auto& entry : aggregates) {
+            RiskRequest request;
+            request.intent_id = intent.intent_id;
+            request.execution_group = intent.execution_group;
+            request.cardinality = intent.cardinality;
+            request.intent_status = intent.status;
+            request.idempotency_key = intent.idempotency_key;
+            request.stake = entry.second.stake;
+            request.potential_risk = entry.second.potential_risk;
+            const auto verified = entry.first->verify_group_admission(request);
+            if (!verified.succeeded() || !verified.is_submission_admission()) {
+                return {StorageResultKind::INVALID_STATE,
+                        "reservation was not admitted by its RiskAdmission owner"};
+            }
+        }
+        return {StorageResultKind::APPLIED, {}};
+    }
+
     StorageResult validate_new_admission(
         const TradingSystemStorage& storage,
-        const ExecutionRosterRecord& roster) const {
+        const TradeIntent& intent,
+        const ExecutionRosterRecord& roster,
+        const std::vector<ReservationRecord>& reservations,
+        const std::vector<const RiskAdmission*>& admission_owners) const {
+        if (auto result = validate_owner_admissions(
+                intent, reservations, admission_owners);
+            result.kind != StorageResultKind::APPLIED) {
+            return result;
+        }
         const auto existing = storage.roster(roster.group_id);
         if (existing.kind != StorageResultKind::NOT_FOUND && !existing.found()) {
             return {existing.kind, existing.message};
@@ -598,7 +681,7 @@ private:
             detail::roster_to_json(*existing.value) == detail::roster_to_json(roster);
         if (is_existing_group) return {StorageResultKind::APPLIED, {}};
 
-        const auto readiness = admission_readiness(storage, true);
+        const auto readiness = durable_readiness(storage);
         if (!readiness.journal_valid || readiness.global_block) {
             return {StorageResultKind::INVALID_STATE,
                     readiness.diagnostic.empty()
@@ -785,11 +868,25 @@ private:
     }
 
 public:
+    /// \brief Rejects the legacy unbound preparation form.
+    ///
+    /// A caller-constructed ADMITTED intent and ReservationRecord are not
+    /// evidence that RiskAdmission::reserve() succeeded.
+    StorageResult prepare(TradingSystemStorage&,
+                          const TradeIntent&,
+                          const ExecutionRosterRecord&,
+                          const std::vector<ReservationRecord>&,
+                          const std::vector<PhysicalTradeRecord>&) const {
+        return {StorageResultKind::INVALID_STATE,
+                "prepare requires authoritative RiskAdmission owners"};
+    }
+
     StorageResult prepare(TradingSystemStorage& storage,
                           const TradeIntent& intent,
                           const ExecutionRosterRecord& roster,
                           const std::vector<ReservationRecord>& reservations,
-                          const std::vector<PhysicalTradeRecord>& physical_trades) const {
+                          const std::vector<PhysicalTradeRecord>& physical_trades,
+                          const std::vector<const RiskAdmission*>& admission_owners) const {
         if (!intent.valid() || intent.status != IntentStatus::ADMITTED || !roster.valid() ||
             reservations.size() != roster.members.size() ||
             physical_trades.size() != roster.members.size()) {
@@ -800,7 +897,8 @@ public:
             result.kind != StorageResultKind::APPLIED) {
             return result;
         }
-        if (auto result = validate_new_admission(storage, roster);
+        if (auto result = validate_new_admission(
+                storage, intent, roster, reservations, admission_owners);
             result.kind != StorageResultKind::APPLIED) {
             return result;
         }
@@ -818,11 +916,19 @@ public:
                 return {existing.kind, existing.message};
             }
             if (existing.found()) {
+                ExecutionOperationRecord persisted;
+                try {
+                    persisted = existing.value->payload.get<ExecutionOperationRecord>();
+                } catch (const std::exception&) {
+                    return {StorageResultKind::CONFLICT,
+                            "execution preparation journal payload is malformed"};
+                }
                 if (existing.value->event_type != "EXECUTION_OPERATION" ||
                     existing.value->aggregate_id != "operation:" + operation.operation_id ||
                     existing.value->state_revision != operation.state_revision ||
                     existing.value->idempotency_key != operation_key(operation) ||
-                    existing.value->payload != nlohmann::json(operation)) {
+                    existing.value->occurred_at_ms != persisted.occurred_at_ms ||
+                    !same_preparation_payload(persisted, operation)) {
                     return {StorageResultKind::CONFLICT,
                             "execution preparation journal identity conflicts"};
                 }
@@ -830,6 +936,15 @@ public:
             }
         }
         auto unit = storage.begin();
+        std::set<std::uint64_t> admission_scopes;
+        for (const auto& reservation : reservations) {
+            admission_scopes.insert(reservation.risk_scope_id);
+        }
+        if (auto result = unit.validate_admission_scopes(
+                admission_scopes, roster.group_id);
+            result.kind != StorageResultKind::APPLIED) {
+            return result;
+        }
         if (auto result = unit.put_intent(intent); result.kind != StorageResultKind::APPLIED &&
             result.kind != StorageResultKind::DUPLICATE) return result;
         if (auto result = unit.put_roster(roster); result.kind != StorageResultKind::APPLIED &&
@@ -1081,16 +1196,32 @@ public:
             }
             if (same_terminal_evidence(*canonical_terminal, settlement)) {
                 if (logical_transition) {
-                    if (!(logical_transition->settlement.settlement == *canonical_terminal)) {
-                        return {StorageResultKind::DUPLICATE,
-                                "terminal evidence is already canonically settled"};
+                    if (!same_terminal_evidence(
+                            logical_transition->settlement.settlement,
+                            *canonical_terminal)) {
+                        return {StorageResultKind::CONFLICT,
+                                "logical transition does not match terminal evidence"};
                     }
                     const auto physical = storage.physical_trade(operation.trade_id);
                     if (!physical.found()) return {physical.kind, physical.message};
-                    logical_transition->physical_trade = *physical.value;
-                    logical_transition->expected_physical_trade_revision = physical.value->state_revision;
+                    auto normalized = *logical_transition;
+                    // The physical fact is canonical by durable SettlementId;
+                    // a late callback may carry an equivalent broker event ID.
+                    normalized.settlement.settlement = *canonical_terminal;
+                    normalized.journal.idempotency_key =
+                        "settlement:" + std::to_string(canonical_terminal->settlement_id);
+                    if (normalized.money_management) {
+                        normalized.money_management->last_settlement_id =
+                            canonical_terminal->settlement_id;
+                    }
+                    if (normalized.completion_journal) {
+                        normalized.completion_journal->idempotency_key =
+                            normalized.journal.idempotency_key + ":logical";
+                    }
+                    normalized.physical_trade = *physical.value;
+                    normalized.expected_physical_trade_revision = physical.value->state_revision;
                     auto unit = storage.begin();
-                    const auto completed = unit.apply_group_completion_atomic(*logical_transition);
+                    const auto completed = unit.apply_group_completion_atomic(normalized);
                     if (!completed.succeeded()) return completed;
                     const auto committed = unit.commit();
                     return committed.succeeded() ? completed : committed;
@@ -1188,6 +1319,18 @@ private:
                lhs.intent_id == rhs.intent_id && lhs.group_id == rhs.group_id &&
                lhs.trade_id == rhs.trade_id && lhs.account_id == rhs.account_id &&
                lhs.risk_scope_id == rhs.risk_scope_id;
+    }
+
+    static bool same_preparation_payload(
+        const ExecutionOperationRecord& lhs,
+        const ExecutionOperationRecord& rhs) {
+        auto left = lhs;
+        auto right = rhs;
+        // Creation time is durable evidence, but not preparation identity when
+        // the same request is replayed after a restart.
+        left.occurred_at_ms = 0;
+        right.occurred_at_ms = 0;
+        return nlohmann::json(left) == nlohmann::json(right);
     }
 
     static RecoveryResult corrupted(RecoveryResult result,
