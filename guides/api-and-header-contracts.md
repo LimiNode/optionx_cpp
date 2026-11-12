@@ -45,6 +45,13 @@
 - Public aggregate headers (`optionx.hpp`, `data.hpp`, `trading_system.hpp`,
   `market_data.hpp`, `platforms.hpp`, `storages.hpp`, `components.hpp`,
   `utils.hpp`, `bridges.hpp`) задают публичные точки подключения.
+- `trading_system.hpp` is the single public entry point for the complete
+  trading-system domain. It includes the domain contracts, trading-specific
+  MDBX storage, and execution recovery. Consumers that need only the pure
+  domain contracts therefore still use the same aggregate and accept its MDBX
+  dependency; no second `trading_system_storage.hpp` aggregate is supported.
+- `storages.hpp` remains a separate aggregate for generic/session/record
+  storage and must not include `trading_system/TradingSystemStorage.hpp`.
 - Bridge families are public only through `bridges.hpp` or the family umbrella
   headers: `bridges/metatrader_file.hpp`, `bridges/legacy_trading.hpp`,
   `bridges/named_pipe.hpp` and `bridges/trading_view.hpp`.

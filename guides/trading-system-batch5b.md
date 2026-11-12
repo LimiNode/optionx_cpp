@@ -7,11 +7,16 @@ architecture. It provides a narrow shared MDBX environment and a transaction
 adapter for local facts. It does not submit broker commands, reconcile unknown
 execution, or provide a `TradingSystem` runtime.
 
-The storage API is exposed through
-`<optionx_cpp/trading_system_storage.hpp>`. The existing
-`<optionx_cpp/trading_system.hpp>` remains a lightweight aggregate for the
-pure Batch 1-4 contracts and does not impose an MDBX link requirement on those
-consumers.
+The trading-system domain is exposed through the single aggregate
+`<optionx_cpp/trading_system.hpp>`. It includes the domain contracts,
+`TradingSystemStorage`, and execution recovery. This is an intentional
+boundary: the complete trading-system module now requires the MDBX dependency.
+The storage implementation remains under `trading_system/` because it owns
+trading-specific persistence, rather than generic session or record storage.
+
+`<optionx_cpp/storages.hpp>` remains the separate aggregate for
+`TradeRecordDB`, `SignalRecordDB`, and `ServiceSessionDB`; it does not include
+the trading-system storage domain.
 
 ## Transaction ownership
 

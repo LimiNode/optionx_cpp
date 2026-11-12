@@ -301,6 +301,40 @@ struct RiskAdmissionResult {
 /// owners do not coordinate; the host must create one owner per risk scope.
 class RiskAdmission {
 public:
+    /// \brief Holds this owner's mutex across durable preparation.
+    ///
+    /// A preparation lease is the authority boundary between in-memory risk
+    /// verification and the storage commit. Risk transitions block until the
+    /// lease is released. The owner must outlive the lease. Acquire, use and
+    /// release it on the same thread; do not call locking owner methods while
+    /// holding it. Multiple owners are leased in (scope kind, scope ID) order,
+    /// before acquiring a TradingSystemStorage writer guard.
+    class PreparationLease {
+    public:
+        PreparationLease() = default;
+        PreparationLease(PreparationLease&&) noexcept = default;
+        PreparationLease& operator=(PreparationLease&&) noexcept = default;
+        PreparationLease(const PreparationLease&) = delete;
+        PreparationLease& operator=(const PreparationLease&) = delete;
+
+        RiskAdmissionResult verify_group_admission(
+            const RiskRequest& request) const {
+            if (!m_owner || !m_lock.owns_lock()) {
+                return RiskAdmissionResult::invalid_state(
+                    RiskAdmissionReason::INVALID_CONFIGURATION);
+            }
+            return m_owner->verify_group_admission_locked(request);
+        }
+
+    private:
+        friend class RiskAdmission;
+        explicit PreparationLease(const RiskAdmission& owner)
+            : m_owner(&owner), m_lock(owner.m_mutex) {}
+
+        const RiskAdmission* m_owner = nullptr;
+        std::unique_lock<std::mutex> m_lock;
+    };
+
     explicit RiskAdmission(
         RiskAdmissionConfig config,
         std::uint64_t first_reservation_id = 1)
@@ -310,6 +344,85 @@ public:
 
     bool valid() const noexcept { return m_config.valid() && m_id_sequence_valid; }
 
+    /// \brief Acquires the authority lease used by durable preparation.
+    PreparationLease acquire_preparation_lease() const {
+        return PreparationLease(*this);
+    }
+
+    /// \brief Returns the immutable scope owned by this admission authority.
+    RiskScope scope() const noexcept {
+        return m_config.scope;
+    }
+
+    /// \brief Verifies that a reservation was admitted by this owner.
+    ///
+    /// A durable ReservationRecord is only a storage fact.  Callers that cross
+    /// into execution preparation must present the corresponding owner token;
+    /// this check is the narrow authority boundary and does not mutate state.
+    RiskAdmissionResult verify_admission(const RiskReservation& token) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!valid()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_CONFIGURATION);
+        }
+        const auto found = m_by_key.find(token.idempotency_key);
+        if (found == m_by_key.end()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::UNKNOWN_RESERVATION);
+        }
+        if (!matches(found->second, token)) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        if (found->second.state != RiskReservationState::RESERVED) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_TRANSITION);
+        }
+        return RiskAdmissionResult::admitted(found->second);
+    }
+
+    /// \brief Verifies a group-level admission owned by this scope.
+    ///
+    /// Durable execution may split one owner reservation across several
+    /// physical roster members.  In that case the owner token is the aggregate
+    /// reservation, while the storage records retain member-level identities.
+    RiskAdmissionResult verify_group_admission(const RiskRequest& request) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return verify_group_admission_locked(request);
+    }
+
+private:
+    RiskAdmissionResult verify_group_admission_locked(
+        const RiskRequest& request) const {
+        if (!valid() || !request.valid_identity()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_CONFIGURATION);
+        }
+        if (m_config.admission_blocked) {
+            return RiskAdmissionResult::unavailable(
+                RiskAdmissionReason::RISK_SCOPE_BLOCKED);
+        }
+        const auto found = m_by_intent.find(request.intent_id);
+        if (found == m_by_intent.end()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::UNKNOWN_RESERVATION);
+        }
+        const auto stored = m_by_key.find(found->second);
+        if (stored == m_by_key.end()) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::UNKNOWN_RESERVATION);
+        }
+        if (stored->second.state != RiskReservationState::RESERVED) {
+            return RiskAdmissionResult::invalid_state(
+                RiskAdmissionReason::INVALID_TRANSITION);
+        }
+        if (!same_request(stored->second, request) ||
+            stored->second.idempotency_key != request.idempotency_key) {
+            return RiskAdmissionResult::conflict(RiskAdmissionReason::PAYLOAD_CONFLICT);
+        }
+        return RiskAdmissionResult::admitted(stored->second);
+    }
+
+public:
     /// \brief Restores durable fail-closed readiness before new admission.
     ///
     /// The storage layer supplies the typed gate state; this owner method only
