@@ -218,6 +218,7 @@ public:
     /// \brief State that belongs to the simulated external broker, not OptionX.
     struct State {
         std::uint64_t next_broker_id = 0;
+        std::uint64_t next_settlement_id = 0;
         std::map<std::string, std::size_t> submission_counts;
         std::vector<HistoryEntry> history;
     };
@@ -255,6 +256,20 @@ public:
         if (!match) return false;
         match->settlement = std::move(settlement);
         return true;
+    }
+
+    std::optional<TradeSettlement> settlement_for(const std::string& operation_id) const {
+        const auto matches = matching_entries(operation_id);
+        if (matches.size() != 1 || !matches.front()->settlement) return std::nullopt;
+        return matches.front()->settlement;
+    }
+
+    SettlementId next_settlement_id() noexcept {
+        if (m_state->next_settlement_id ==
+            (std::numeric_limits<std::uint64_t>::max)() - 1) return 0;
+        // The high bit identifies the simulated broker namespace. Local MDBX
+        // settlement sequences therefore cannot collide in ordinary operation.
+        return external_settlement_namespace_bit + ++m_state->next_settlement_id;
     }
 
     SimulatedSubmissionResult submit(const SimulatedExecutionCommand& command) {

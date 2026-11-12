@@ -219,11 +219,27 @@ public:
 
     ts::StorageResult submit(ts::ExecutionGroupId group,
                             ts::SimulatedSubmissionPlan plan = ts::SimulatedSubmissionPlan::SUCCESS) {
-        for (const auto& operation : operations(group)) {
-            m_broker.set_plan(operation.operation_id, plan);
+        std::vector<ts::SimulatedSubmissionPlan> plans;
+        plans.push_back(plan);
+        const auto grouped = operations(group);
+        plans.resize(grouped.size(), plan);
+        return submit_plans(group, plans);
+    }
+
+    ts::StorageResult submit_plans(
+        ts::ExecutionGroupId group,
+        const std::vector<ts::SimulatedSubmissionPlan>& plans) {
+        const auto grouped = operations(group);
+        if (plans.size() != grouped.size()) {
+            return {ts::StorageResultKind::INVALID_ARGUMENT, "submission plan count does not match roster"};
+        }
+        for (std::size_t index = 0; index < grouped.size(); ++index) {
+            const auto& operation = grouped[index];
+            m_broker.set_plan(operation.operation_id, plans[index]);
             const auto result = m_manager.submit(m_storage, operation, m_broker);
             if (!result.succeeded()) return result;
         }
+        reload();
         return {ts::StorageResultKind::APPLIED, {}};
     }
 
@@ -231,9 +247,12 @@ public:
     ts::TradeSettlement broker_result(ts::ExecutionGroupId group, std::size_t member,
                                      std::int64_t net_units) {
         const auto operation = operations(group).at(member);
+        if (const auto existing = m_broker.settlement_for(operation.operation_id)) {
+            return *existing;
+        }
         ts::TradeSettlement settlement;
-        // Synthetic broker IDs are from the immutable physical trade sequence.
-        settlement.settlement_id = operation.trade_id;
+        settlement.settlement_id = m_broker.next_settlement_id();
+        if (settlement.settlement_id == 0) throw std::runtime_error("simulated settlement sequence exhausted");
         settlement.intent_id = operation.intent_id;
         settlement.execution_group_id = group;
         settlement.trade_id = operation.trade_id;
@@ -251,8 +270,11 @@ public:
     /// \brief Reconciles without submission, then persists available physical facts only.
     ts::StorageResult observe(ts::ExecutionGroupId group) {
         for (auto operation : operations(group)) {
-            if (operation.state == ts::ExecutionOperationState::SETTLED) continue;
+            if (operation.state == ts::ExecutionOperationState::SETTLED ||
+                operation.state == ts::ExecutionOperationState::REJECTED ||
+                operation.state == ts::ExecutionOperationState::CANCELLED) continue;
             const auto evidence = m_manager.reconcile(m_storage, operation, m_broker);
+            if (evidence.kind == ts::ReconciliationKind::NOT_EXECUTED_PROVEN) continue;
             if (evidence.kind != ts::ReconciliationKind::MATCH_CONFIRMED) {
                 return {ts::StorageResultKind::INVALID_STATE, evidence.diagnostic};
             }
@@ -261,14 +283,19 @@ public:
                 if (!result.succeeded()) return result;
             }
         }
+        reload();
         return {ts::StorageResultKind::APPLIED, {}};
     }
 
     /// \brief Canonical group completion + series/MM + all reservation releases, one UOW.
     ts::StorageResult complete(ts::ExecutionGroupId group) {
         const auto roster = read(m_storage.roster(group));
-        const auto records = m_storage.settlements_for_group(group);
+        auto records = m_storage.settlements_for_group(group);
         if (!records.succeeded()) return {records.kind, records.message};
+        std::stable_sort(records.values.begin(), records.values.end(),
+            [](const ts::SettlementRecord& lhs, const ts::SettlementRecord& rhs) {
+                return ts::canonical_settlement_before(lhs.settlement, rhs.settlement);
+            });
         std::vector<std::uint64_t> ids;
         for (const auto& member : roster.members) ids.push_back(member.trade_id);
         ts::ExecutionGroupAggregator aggregate(roster.intent_id, {group, roster.expected_members},
@@ -281,8 +308,8 @@ public:
             }
             receipts.push_back(record.settlement);
         }
-        if (!aggregate.outcome().final || !aggregate.outcome().net_profit) {
-            return {ts::StorageResultKind::INVALID_STATE, "group is not terminal and valued"};
+        if (!aggregate.outcome().final || aggregate.outcome().aggregation_status != ts::AggregationStatus::READY) {
+            return {ts::StorageResultKind::INVALID_STATE, "group is not terminal"};
         }
         auto candidate = *m_series;
         const auto progressed = candidate.apply_group_completion(receipts, m_checkpoint.series.state_revision);
@@ -311,7 +338,20 @@ public:
         for (const auto& binding : roster.reservation_bindings) {
             auto reservation = read(m_storage.reservation(binding.reservation_id));
             const auto revision = reservation.state_revision++;
-            reservation.state = ts::RiskReservationState::SETTLED;
+            const auto terminal = std::find_if(
+                records.values.begin(), records.values.end(),
+                [&binding](const ts::SettlementRecord& record) {
+                    return record.settlement.trade_id == binding.trade_id &&
+                           record.settlement.terminal();
+                });
+            if (terminal == records.values.end()) {
+                return {ts::StorageResultKind::INVALID_STATE,
+                        "logical completion lacks terminal member evidence"};
+            }
+            reservation.state = terminal->settlement.kind == ts::OutcomeKind::REJECTED ||
+                terminal->settlement.kind == ts::OutcomeKind::CANCELLED
+                ? ts::RiskReservationState::RELEASED
+                : ts::RiskReservationState::SETTLED;
             if (binding.trade_id == transition.settlement.settlement.trade_id) {
                 transition.reservation = reservation;
                 transition.expected_reservation_revision = revision;
@@ -416,13 +456,45 @@ private:
                 const auto found = by_intent.find(token.intent_id);
                 if (found == by_intent.end()) by_intent.emplace(token.intent_id, token);
                 else {
-                    if (found->second.state != token.state ||
-                        found->second.account_revision != token.account_revision ||
-                        !add_units(found->second.stake, token.stake) ||
-                        !add_units(found->second.potential_risk, token.potential_risk)) {
+                    auto& aggregate = found->second;
+                    if (aggregate.account_revision != token.account_revision ||
+                        aggregate.stake.currency != token.stake.currency ||
+                        aggregate.stake.precision != token.stake.precision ||
+                        aggregate.potential_risk.currency != token.potential_risk.currency ||
+                        aggregate.potential_risk.precision != token.potential_risk.precision) {
                         throw std::runtime_error("inconsistent shared-scope reservation projection");
                     }
-                    found->second.reservation_id = (std::min)(found->second.reservation_id, token.reservation_id);
+                    const auto active = [](ts::RiskReservationState state) {
+                        return state != ts::RiskReservationState::RELEASED &&
+                               state != ts::RiskReservationState::SETTLED;
+                    };
+                    if (active(token.state)) {
+                        if (!active(aggregate.state)) {
+                            aggregate.stake.units = 0;
+                            aggregate.potential_risk.units = 0;
+                        }
+                        if (!add_units(aggregate.stake, token.stake) ||
+                            !add_units(aggregate.potential_risk, token.potential_risk)) {
+                            throw std::runtime_error("shared-scope reservation aggregation overflow");
+                        }
+                    }
+                    if (active(aggregate.state) && active(token.state)) {
+                        const auto rank = [](ts::RiskReservationState state) {
+                            switch (state) {
+                                case ts::RiskReservationState::RESERVED: return 1;
+                                case ts::RiskReservationState::SUBMITTED: return 2;
+                                case ts::RiskReservationState::EXECUTION_UNKNOWN: return 3;
+                                default: return 0;
+                            }
+                        };
+                        if (rank(token.state) > rank(aggregate.state)) aggregate.state = token.state;
+                    } else if (!active(aggregate.state) && active(token.state)) {
+                        aggregate.state = token.state;
+                    } else if (!active(aggregate.state) && !active(token.state) &&
+                               token.state == ts::RiskReservationState::SETTLED) {
+                        aggregate.state = ts::RiskReservationState::SETTLED;
+                    }
+                    aggregate.reservation_id = (std::min)(aggregate.reservation_id, token.reservation_id);
                 }
             }
             std::vector<ts::RiskReservation> tokens;

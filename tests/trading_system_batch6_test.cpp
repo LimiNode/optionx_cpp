@@ -160,7 +160,8 @@ TEST(TradingSystemBatch6, OneLossStepSurvivesReopenAndWinResetsStake) {
         EXPECT_TRUE(host.mm_state().payload.at("after_loss").get<bool>());
     }
     ex::SyntheticHost host(db.config(), config, noon, broker);
-    EXPECT_EQ(host.mm_state().last_settlement_id, 1U);
+    EXPECT_NE(host.mm_state().last_settlement_id, 1U);
+    EXPECT_NE((host.mm_state().last_settlement_id & (std::uint64_t{1} << 63)), 0U);
     ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
     const auto group = host.series().current_group_id;
     EXPECT_EQ(ex::read(host.storage().roster(group)).members.front().stake.units, 200);
@@ -196,6 +197,131 @@ TEST(TradingSystemBatch6, IncreasedStakeStillRequiresRiskAdmission) {
     EXPECT_EQ(host.reserved(1000), 0);
     EXPECT_EQ(host.mm_state().state_revision, 1U);
     EXPECT_EQ(submissions(broker), 1U);
+}
+
+TEST(TradingSystemBatch6, AllRejectedGroupReleasesRiskAndCompletesWithoutProgression) {
+    Database db;
+    auto broker = std::make_shared<Broker::State>();
+    ex::SyntheticHost host(db.config(), configuration(), noon, broker);
+    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+    const auto group = host.series().current_group_id;
+    ASSERT_TRUE(host.submit(group, ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION).succeeded());
+    EXPECT_EQ(host.reserved(1000), 0);
+    ASSERT_TRUE(host.observe(group).succeeded());
+    ASSERT_TRUE(host.complete(group).succeeded());
+    EXPECT_EQ(host.series().series.next_step, 0U);
+    EXPECT_EQ(host.series().current_outcome.kind, ts::OutcomeKind::REJECTED);
+    const auto reservations = host.storage().reservations();
+    ASSERT_EQ(reservations.values.size(), 1U);
+    EXPECT_EQ(reservations.values.front().state, ts::RiskReservationState::RELEASED);
+    EXPECT_EQ(host.complete(group).kind, ts::StorageResultKind::DUPLICATE);
+    EXPECT_EQ(submissions(broker), 1U);
+    const auto evidence = host.storage().settlements_for_group(group);
+    ASSERT_EQ(evidence.values.size(), 1U);
+    EXPECT_EQ(evidence.values.front().settlement.kind, ts::OutcomeKind::REJECTED);
+    EXPECT_NE(evidence.values.front().settlement.settlement_id, 700U);
+}
+
+TEST(TradingSystemBatch6, MixedExecutionAndRejectionUsesPerMemberReservationStates) {
+    Database db;
+    auto config = configuration();
+    config.targets = {{11, 1000}, {12, 1000}};
+    auto broker = std::make_shared<Broker::State>();
+    ex::SyntheticHost host(db.config(), config, noon, broker);
+    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+    const auto group = host.series().current_group_id;
+    ASSERT_TRUE(host.submit_plans(group, {
+        ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION,
+        ts::SimulatedSubmissionPlan::SUCCESS}).succeeded());
+    host.broker_result(group, 1, 80);
+    ASSERT_TRUE(host.observe(group).succeeded());
+    ASSERT_TRUE(host.complete(group).succeeded());
+    EXPECT_EQ(host.series().current_outcome.kind, ts::OutcomeKind::WIN);
+    EXPECT_EQ(host.series().current_outcome.net_profit->units, 80);
+    const auto reservations = host.storage().reservations();
+    ASSERT_EQ(reservations.values.size(), 2U);
+    EXPECT_EQ(reservations.values[0].state, ts::RiskReservationState::RELEASED);
+    EXPECT_EQ(reservations.values[1].state, ts::RiskReservationState::SETTLED);
+    EXPECT_EQ(host.reserved(1000), 0);
+}
+
+TEST(TradingSystemBatch6, BrokerAndLocalSettlementNamespacesDoNotCollide) {
+    Database db;
+    auto config = configuration();
+    config.targets = {{11, 1000}, {12, 1000}};
+    auto broker = std::make_shared<Broker::State>();
+    ex::SyntheticHost host(db.config(), config, noon, broker);
+    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+    const auto first_group = host.series().current_group_id;
+    ASSERT_TRUE(host.submit_plans(first_group, {
+        ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION,
+        ts::SimulatedSubmissionPlan::SUCCESS}).succeeded());
+    const auto broker_settlement = host.broker_result(first_group, 1, 80);
+    ASSERT_TRUE(host.observe(first_group).succeeded());
+    ASSERT_TRUE(host.complete(first_group).succeeded());
+
+    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+    const auto second_group = host.series().current_group_id;
+    ASSERT_TRUE(host.submit(second_group, ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION).succeeded());
+    ASSERT_TRUE(host.observe(second_group).succeeded());
+    ASSERT_TRUE(host.complete(second_group).succeeded());
+
+    const auto first_evidence = host.storage().settlements_for_group(first_group);
+    const auto second_evidence = host.storage().settlements_for_group(second_group);
+    ASSERT_EQ(first_evidence.values.size(), 2U);
+    ASSERT_EQ(second_evidence.values.size(), 2U);
+    EXPECT_NE(first_evidence.values[0].settlement.settlement_id,
+              first_evidence.values[1].settlement.settlement_id);
+    EXPECT_EQ(first_evidence.values[1].settlement.settlement_id, broker_settlement.settlement_id);
+    for (const auto& evidence : second_evidence.values) {
+        EXPECT_LT(evidence.settlement.settlement_id, ts::external_settlement_namespace_bit);
+        EXPECT_NE(evidence.settlement.settlement_id, broker_settlement.settlement_id);
+    }
+}
+
+TEST(TradingSystemBatch6, ReorderedBrokerResultsReplayCanonically) {
+    Database db;
+    auto config = configuration();
+    config.targets = {{11, 1000}, {12, 1000}};
+    auto broker = std::make_shared<Broker::State>();
+    ex::SyntheticHost host(db.config(), config, noon, broker);
+    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+    const auto group = host.series().current_group_id;
+    ASSERT_TRUE(host.submit(group).succeeded());
+    const auto second = host.broker_result(group, 1, -20);
+    const auto first = host.broker_result(group, 0, 80);
+    EXPECT_LT(second.settlement_id, first.settlement_id);
+    ASSERT_TRUE(host.observe(group).succeeded());
+    ASSERT_TRUE(host.complete(group).succeeded());
+    EXPECT_EQ(host.series().current_outcome.kind, ts::OutcomeKind::WIN);
+    EXPECT_EQ(host.series().current_outcome.net_profit->units, 60);
+}
+
+TEST(TradingSystemBatch6, MixedScopeStatesHydrateConservativelyAfterRestart) {
+    Database db;
+    auto config = configuration();
+    config.targets = {{11, 1000}, {12, 1000}, {13, 1000}};
+    auto broker = std::make_shared<Broker::State>();
+    ts::ExecutionGroupId group;
+    {
+        ex::SyntheticHost host(db.config(), config, noon, broker);
+        ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+        group = host.series().current_group_id;
+        ASSERT_TRUE(host.submit_plans(group, {
+            ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION,
+            ts::SimulatedSubmissionPlan::SUCCESS,
+            ts::SimulatedSubmissionPlan::TIMEOUT}).succeeded());
+        host.broker_result(group, 1, 80);
+        EXPECT_FALSE(host.observe(group).succeeded());
+    }
+    ex::SyntheticHost reopened(db.config(), config, noon, broker);
+    EXPECT_EQ(reopened.reserved(1000), 200);
+    EXPECT_EQ(reopened.series().status, ts::SeriesStatus::WAITING_OUTCOME);
+    const auto durable = reopened.storage().reservations();
+    ASSERT_EQ(durable.values.size(), 3U);
+    EXPECT_EQ(durable.values[0].state, ts::RiskReservationState::RELEASED);
+    EXPECT_EQ(durable.values[1].state, ts::RiskReservationState::RESERVED);
+    EXPECT_EQ(durable.values[2].state, ts::RiskReservationState::RESERVED);
 }
 
 TEST(TradingSystemBatch6, LossStepPolicyRejectsInvalidMultiplierAndOverflow) {

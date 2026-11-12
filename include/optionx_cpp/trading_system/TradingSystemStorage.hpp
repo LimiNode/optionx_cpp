@@ -27,6 +27,9 @@
 namespace optionx::trading_system {
 
 inline constexpr std::uint32_t trading_storage_schema_version = 1;
+/// \brief Reserved high-bit namespace for externally assigned settlement IDs.
+inline constexpr std::uint64_t external_settlement_namespace_bit =
+    std::uint64_t{1} << 63;
 
 enum class StorageResultKind {
     APPLIED,
@@ -1405,6 +1408,9 @@ public:
             }
             auto candidate = next;
             if (sequence_name == "settlement") {
+                if (candidate >= external_settlement_namespace_bit) {
+                    return fail_sequence("local settlement namespace exhausted");
+                }
                 // put_settlement() maintains this high-water mark atomically.
                 // A missing sequence on a non-empty legacy table requires the
                 // explicit rebuild_settlement_sequence() maintenance pass;
@@ -1848,7 +1854,9 @@ public:
             const auto required_next = settlement_id ==
                 (std::numeric_limits<std::uint64_t>::max)()
                 ? settlement_id : settlement_id + 1;
-            if (!current || current_next < required_next) {
+            const bool external_namespace =
+                (settlement_id & external_settlement_namespace_bit) != 0;
+            if (!external_namespace && (!current || current_next < required_next)) {
                 m_storage.m_sequences.insert_or_assign(
                     "settlement", std::to_string(required_next), m_transaction);
             }

@@ -38,15 +38,27 @@ series with an outstanding operation.
 
 Broker state is held by `SimulatedExecutionAdapter::State`, outside the host and
 outside MDBX. A lost response is reconciled against that independent state; the
-host never resends a possibly submitted operation. Physical settlement and
-logical group completion remain separate durable transitions. Group completion
-updates the series, MM payload and every member reservation in the existing
-atomic Batch 5B path.
+host never resends a possibly submitted operation. Proven no-submission
+rejection is persisted as `REJECTED` and releases only that member's
+reservation. `WIN`, `LOSS` and `DRAW` settle their member; an all-rejected group
+completes without advancing the financial series step. Mixed groups preserve
+the per-member terminal states. Physical settlement and logical group
+completion remain separate durable transitions. Group completion updates the
+series, MM payload and every member reservation in the existing atomic Batch 5B
+path.
 
 The example is single-threaded. `RiskAdmission` owners are authoritative for
 one risk scope and are recreated only after durable facts are read. Shared-scope
 members are aggregated into one in-memory reservation token for admission while
 their physical reservation records remain separate in the roster and storage.
+Hydration uses a conservative group projection: any active member contributes
+its risk, and the projection takes the strongest unresolved state. Released or
+settled members contribute no active risk. Thus mixed physical states cannot
+erase unresolved exposure or overwrite individual durable states.
+
+Simulated broker settlement IDs use an independent high-bit namespace and a
+broker-state high-water counter. They are never derived from `TradeId`; local
+rejection evidence continues to use the storage settlement sequence.
 
 ## Scenarios and guarantees
 
