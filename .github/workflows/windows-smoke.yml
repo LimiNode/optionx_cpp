@@ -115,6 +115,7 @@ jobs:
           trading_system_batch3_test trading_system_batch3_consumer_test
           trading_system_batch4_test trading_system_batch4_consumer_test
           trading_system_batch5b_test trading_system_batch5c_test
+          trading_system_batch6_test trading_system_batch6_consumer_test
 
       - name: Build TradingView extension bridge smoke example
         run: cmake --build build-windows --config Debug --target tradingview_extension_bridge_smoke
@@ -154,6 +155,10 @@ jobs:
           .\build-windows\Debug\trading_system_batch5b_test.exe --gtest_brief=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\build-windows\Debug\trading_system_batch5c_test.exe --gtest_brief=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-windows\Debug\trading_system_batch6_test.exe --gtest_brief=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-windows\Debug\trading_system_batch6_consumer_test.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\build-windows\Debug\metatrader_file_bridge_smoke.exe --self-test
           .\build-windows\Debug\metatrader_file_command_writer_smoke.exe --self-test

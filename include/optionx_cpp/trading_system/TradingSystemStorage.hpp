@@ -27,6 +27,9 @@
 namespace optionx::trading_system {
 
 inline constexpr std::uint32_t trading_storage_schema_version = 1;
+/// \brief Reserved high-bit namespace for externally assigned settlement IDs.
+inline constexpr std::uint64_t external_settlement_namespace_bit =
+    std::uint64_t{1} << 63;
 
 enum class StorageResultKind {
     APPLIED,
@@ -1405,6 +1408,9 @@ public:
             }
             auto candidate = next;
             if (sequence_name == "settlement") {
+                if (candidate >= external_settlement_namespace_bit) {
+                    return fail_sequence("local settlement namespace exhausted");
+                }
                 // put_settlement() maintains this high-water mark atomically.
                 // A missing sequence on a non-empty legacy table requires the
                 // explicit rebuild_settlement_sequence() maintenance pass;
@@ -1727,6 +1733,91 @@ public:
         }
     }
 
+    /// \brief Begins a series in the same transaction as execution preparation.
+    /// \details Uses canonical progression, not a caller-fabricated waiting checkpoint.
+    /// Only an identical still-waiting preparation may be replayed.
+    StorageResult begin_prepared_series(const TradeIntent& intent,
+                                       const ExecutionRosterRecord& roster,
+                                       std::uint64_t expected_revision) {
+        if (!intent.series_id || !roster.valid() || roster.intent_id != intent.intent_id ||
+            roster.group_id != intent.execution_group.group_id ||
+            roster.expected_members != intent.execution_group.expected_members) {
+            return fail({StorageResultKind::INVALID_ARGUMENT, "invalid series preparation binding"});
+        }
+        try {
+            const auto stored_roster = m_storage.m_rosters.find(
+                std::to_string(roster.group_id), m_transaction);
+            const auto stored_intent = m_storage.m_intents.find(
+                std::to_string(intent.intent_id), m_transaction);
+            if (!stored_roster || !stored_intent ||
+                *stored_roster != detail::roster_to_json(roster).dump() ||
+                *stored_intent != nlohmann::json{{"schema_version", trading_storage_schema_version},
+                                               {"intent", nlohmann::json(intent)}}.dump()) {
+                return fail({StorageResultKind::CONFLICT, "series preparation lacks durable intent/roster"});
+            }
+            const auto encoded = m_storage.m_series.find(
+                std::to_string(intent.series_id), m_transaction);
+            if (!encoded) return fail({StorageResultKind::NOT_FOUND, "series checkpoint is missing"});
+            auto checkpoint = detail::checkpoint_from_json(nlohmann::json::parse(*encoded));
+            if (!detail::durable_record_valid(checkpoint)) {
+                return fail({StorageResultKind::INVALID_STATE, "invalid durable series checkpoint"});
+            }
+            if (expected_revision != (std::numeric_limits<std::uint64_t>::max)() &&
+                checkpoint.series.state_revision == expected_revision + 1 &&
+                checkpoint.status == SeriesStatus::WAITING_OUTCOME &&
+                checkpoint.current_intent_id == intent.intent_id &&
+                checkpoint.current_group_id == roster.group_id &&
+                checkpoint.series.origin_signal_id == intent.origin_signal_id &&
+                intent.series_step >= 0 &&
+                checkpoint.current_step == static_cast<std::uint32_t>(intent.series_step) &&
+                std::find(checkpoint.used_intent_keys.begin(), checkpoint.used_intent_keys.end(),
+                          intent.idempotency_key) != checkpoint.used_intent_keys.end()) {
+                return {StorageResultKind::DUPLICATE, {}};
+            }
+            if (checkpoint.series.state_revision != expected_revision) {
+                return fail({StorageResultKind::REVISION_CONFLICT, "stale series preparation revision"});
+            }
+            if (checkpoint.status != SeriesStatus::ACTIVE) {
+                return fail({StorageResultKind::INVALID_STATE, "series is not idle"});
+            }
+            const auto currency = roster.members.front().stake.currency;
+            const auto precision = roster.members.front().stake.precision;
+            std::vector<std::uint64_t> trade_ids;
+            for (const auto& member : roster.members) {
+                if (member.stake.currency != currency ||
+                    member.stake.precision != precision) {
+                    return fail({StorageResultKind::INVALID_ARGUMENT,
+                                 "series preparation requires a single valuation currency"});
+                }
+                trade_ids.push_back(member.trade_id);
+            }
+            SeriesSnapshot before{checkpoint.series, checkpoint.status,
+                checkpoint.current_intent_id, checkpoint.current_group_id,
+                checkpoint.current_step, checkpoint.current_outcome};
+            SeriesProgression owner(checkpoint.series);
+            if (owner.hydrate(before, {}, checkpoint.receipts,
+                    {checkpoint.used_intents.begin(), checkpoint.used_intents.end()},
+                    {checkpoint.used_intent_keys.begin(), checkpoint.used_intent_keys.end()}) !=
+                    ProgressionResult::APPLIED ||
+                owner.begin(intent, trade_ids, currency, precision, expected_revision) !=
+                    ProgressionResult::APPLIED) {
+                return fail({StorageResultKind::INVALID_STATE, "canonical series begin rejected preparation"});
+            }
+            const auto waiting = owner.snapshot();
+            checkpoint.series = waiting.series;
+            checkpoint.status = waiting.status;
+            checkpoint.current_intent_id = waiting.current_intent_id;
+            checkpoint.current_group_id = waiting.current_group_id;
+            checkpoint.current_step = waiting.current_step;
+            checkpoint.current_outcome = waiting.outcome;
+            checkpoint.used_intents.push_back(intent.intent_id);
+            checkpoint.used_intent_keys.push_back(intent.idempotency_key);
+            return put_series(checkpoint, expected_revision);
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     StorageResult put_money_management(const MoneyManagementStateRecord& value,
                                        std::uint64_t expected_revision) {
         if (!valid_schema(value.schema_version)) {
@@ -1763,7 +1854,9 @@ public:
             const auto required_next = settlement_id ==
                 (std::numeric_limits<std::uint64_t>::max)()
                 ? settlement_id : settlement_id + 1;
-            if (!current || current_next < required_next) {
+            const bool external_namespace =
+                (settlement_id & external_settlement_namespace_bit) != 0;
+            if (!external_namespace && (!current || current_next < required_next)) {
                 m_storage.m_sequences.insert_or_assign(
                     "settlement", std::to_string(required_next), m_transaction);
             }

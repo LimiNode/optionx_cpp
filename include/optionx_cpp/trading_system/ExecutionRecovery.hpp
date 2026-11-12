@@ -218,6 +218,7 @@ public:
     /// \brief State that belongs to the simulated external broker, not OptionX.
     struct State {
         std::uint64_t next_broker_id = 0;
+        std::uint64_t next_settlement_id = 0;
         std::map<std::string, std::size_t> submission_counts;
         std::vector<HistoryEntry> history;
     };
@@ -255,6 +256,20 @@ public:
         if (!match) return false;
         match->settlement = std::move(settlement);
         return true;
+    }
+
+    std::optional<TradeSettlement> settlement_for(const std::string& operation_id) const {
+        const auto matches = matching_entries(operation_id);
+        if (matches.size() != 1 || !matches.front()->settlement) return std::nullopt;
+        return matches.front()->settlement;
+    }
+
+    SettlementId next_settlement_id() noexcept {
+        if (m_state->next_settlement_id ==
+            (std::numeric_limits<std::uint64_t>::max)() - 1) return 0;
+        // The high bit identifies the simulated broker namespace. Local MDBX
+        // settlement sequences therefore cannot collide in ordinary operation.
+        return external_settlement_namespace_bit + ++m_state->next_settlement_id;
     }
 
     SimulatedSubmissionResult submit(const SimulatedExecutionCommand& command) {
@@ -879,7 +894,8 @@ public:
                           const ExecutionRosterRecord& roster,
                           const std::vector<ReservationRecord>& reservations,
                           const std::vector<PhysicalTradeRecord>& physical_trades,
-                          const std::vector<const RiskAdmission*>& admission_owners) const {
+                          const std::vector<const RiskAdmission*>& admission_owners,
+                          std::optional<std::uint64_t> expected_series_revision = std::nullopt) const {
         if (!intent.valid() || intent.status != IntentStatus::ADMITTED || !roster.valid() ||
             reservations.size() != roster.members.size() ||
             physical_trades.size() != roster.members.size()) {
@@ -966,6 +982,10 @@ public:
             result.kind != StorageResultKind::DUPLICATE) return result;
         if (auto result = unit.put_roster(roster); result.kind != StorageResultKind::APPLIED &&
             result.kind != StorageResultKind::DUPLICATE) return result;
+        if (expected_series_revision) {
+            const auto result = unit.begin_prepared_series(intent, roster, *expected_series_revision);
+            if (!result.succeeded()) return result;
+        }
         for (std::size_t i = 0; i < reservations.size(); ++i) {
             if (reservations[i].state_revision != 0 || physical_trades[i].state_revision != 0) {
                 return {StorageResultKind::INVALID_ARGUMENT,
