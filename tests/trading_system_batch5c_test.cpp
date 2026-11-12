@@ -905,6 +905,125 @@ TEST(TradingSystemBatch5C, RejectsMultipleOwnersForOneRiskScope) {
     EXPECT_EQ(storage.roster(180).kind, ts::StorageResultKind::NOT_FOUND);
 }
 
+TEST(TradingSystemBatch5C, PreparationLeaseBlocksOwnerCancellation) {
+    const std::vector<ts::ReservationRecord> reservations{reservation()};
+    auto owners = authoritative_owners(reservations);
+    ASSERT_TRUE(owners.valid) << owners.message;
+    auto* owner = owners.owners.front().get();
+    auto token = reservation().to_risk_reservation();
+    token.idempotency_key = "intent-41";
+    const auto request = ts::RiskRequest::from_intent(
+        intent(), money(50), money(50));
+
+    auto lease = owner->acquire_preparation_lease();
+    ASSERT_TRUE(lease.verify_group_admission(request).is_submission_admission());
+    std::promise<void> cancellation_started;
+    auto cancellation = std::async(std::launch::async, [owner, token, &cancellation_started] {
+        cancellation_started.set_value();
+        return owner->release(token);
+    });
+    cancellation_started.get_future().wait();
+    EXPECT_EQ(cancellation.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+    TestDatabase database;
+    ts::TradingSystemStorage storage(database.config());
+    {
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.put_intent(intent()).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.put_roster(roster()).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.put_reservation(reservation(), 0).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    EXPECT_EQ(cancellation.wait_for(std::chrono::milliseconds(0)),
+              std::future_status::timeout);
+    lease = ts::RiskAdmission::PreparationLease{};
+    EXPECT_EQ(cancellation.get().kind, ts::RiskAdmissionKind::APPLIED);
+}
+
+TEST(TradingSystemBatch5C, ClosedOwnerGateRejectsPreviouslyAdmittedPreparation) {
+    TestDatabase database;
+    ts::TradingSystemStorage storage(database.config());
+    ts::FakeExecutionClock clock(1000);
+    ts::ExecutionRecoveryManager manager(clock);
+    auto owners = authoritative_owners({reservation()});
+    ASSERT_TRUE(owners.valid);
+    ASSERT_EQ(owners.owners.front()->restore_admission_gate(true).kind,
+              ts::RiskAdmissionKind::APPLIED);
+    EXPECT_EQ(manager.prepare(storage, intent(), roster(), {reservation()},
+                              {physical_trade()}, owners.references).kind,
+              ts::StorageResultKind::INVALID_STATE);
+    EXPECT_EQ(storage.roster(80).kind, ts::StorageResultKind::NOT_FOUND);
+}
+
+TEST(TradingSystemBatch5C, FabricatedCompletionCannotClearUnfinishedRiskEvenDuringRebuild) {
+    TestDatabase database;
+    ts::JournalEvent fabricated{999, "GROUP_COMPLETION", "group:80", 1,
+        ts::trading_storage_schema_version, "fake-completion", 1000, {}};
+    {
+        ts::TradingSystemStorage storage(database.config());
+        prepare(storage);
+        {
+            auto unit = storage.begin();
+            EXPECT_EQ(unit.append_journal(fabricated).kind, ts::StorageResultKind::INVALID_STATE);
+            EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+        }
+        EXPECT_EQ(storage.journal_by_key(fabricated.idempotency_key).kind,
+                  ts::StorageResultKind::NOT_FOUND);
+        {
+            auto unit = storage.begin();
+            EXPECT_EQ(unit.validate_admission_scopes({1000}).kind,
+                      ts::StorageResultKind::INVALID_STATE);
+        }
+        // Model out-of-band corruption, bypassing the supported write boundary.
+        mdbxc::KeyValueTable<std::string, std::string> journal(storage.connection(), "ts_journal");
+        journal.insert(fabricated.idempotency_key, ts::detail::journal_to_json(fabricated).dump());
+    }
+    ts::TradingSystemStorage reopened(database.config());
+    EXPECT_FALSE(reopened.admission_scope_index_verified());
+    {
+        auto unit = reopened.begin();
+        EXPECT_NE(unit.rebuild_admission_scope_index().kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+    mdbxc::KeyValueTable<std::string, std::string> index(reopened.connection(), "ts_admission_scope_index");
+    EXPECT_TRUE(index.find(ts::detail::admission_scope_index_key(
+        1000, "operation", "group-80:trade-700")));
+}
+
+TEST(TradingSystemBatch5C, StartupAuditFindsMissingAndCorruptedEntriesDespiteValidMarker) {
+    for (const bool remove_entry : {false, true}) {
+        SCOPED_TRACE(remove_entry);
+        TestDatabase database;
+        {
+            ts::TradingSystemStorage storage(database.config());
+            prepare(storage);
+            mdbxc::KeyValueTable<std::string, std::string> index(storage.connection(), "ts_admission_scope_index");
+            const auto key = ts::detail::admission_scope_index_key(1000, "reservation", "500");
+            if (remove_entry) index.erase(key);
+            else index.insert_or_assign(key, "{}");
+        }
+        ts::TradingSystemStorage reopened(database.config());
+        EXPECT_FALSE(reopened.admission_scope_index_verified());
+        ts::FakeExecutionClock clock(1000);
+        ts::ExecutionRecoveryManager manager(clock);
+        EXPECT_TRUE(manager.admission_readiness(reopened, true).global_block);
+        const auto owners = authoritative_owners({reservation()});
+        EXPECT_EQ(manager.prepare(reopened, intent(), roster(), {reservation()},
+                                  {physical_trade()}, owners.references).kind,
+                  ts::StorageResultKind::INVALID_STATE);
+        {
+            auto unit = reopened.begin();
+            ASSERT_EQ(unit.rebuild_admission_scope_index().kind, ts::StorageResultKind::APPLIED);
+            ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+        }
+        EXPECT_TRUE(reopened.admission_scope_index_verified());
+        EXPECT_EQ(reopened.audit_admission_scope_index().kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(manager.prepare(reopened, intent(), roster(), {reservation()},
+                                  {physical_trade()}, owners.references).kind,
+                  ts::StorageResultKind::APPLIED);
+    }
+}
+
 TEST(TradingSystemBatch5C, ConcurrentAdmissionsSerializeWithoutPartialRoster) {
     TestDatabase database;
     ts::TradingSystemStorage storage(database.config());

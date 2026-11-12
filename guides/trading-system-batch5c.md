@@ -81,7 +81,8 @@ fail closed. `blocked_risk_scopes()` is retained as a compatibility projection
 of those durable facts, while new admission code should consume the typed
 readiness result. `prepare()` additionally requires one or more references to
 the authoritative `RiskAdmission` owners. It verifies the owner reservation
-before opening the storage Unit of Work; an `ADMITTED` intent or a caller-built
+under a preparation lease before opening the storage Unit of Work and holds
+that lease through commit or rollback; an `ADMITTED` intent or a caller-built
 `ReservationRecord` is not an admission proof. When one owner reservation is
 split across physical members, the member records are aggregated by owner and
 matched against the owner's group-level reservation. The order is therefore:
@@ -95,16 +96,24 @@ RiskAdmission::reserve()
 The durable readiness check and the owner proof are separate boundaries. A
 durable `PREPARED` operation may be continued after restart from its journal,
 but a new group cannot bypass the owner check or the fail-closed recovery
-facts. The owner reservation must remain in `RESERVED` state until preparation
-returns; a failed preparation is released by the caller. Concurrent risk
+facts. Owner cancellation, settlement, hydration and gate changes cannot
+invalidate the proof between verification and durable commit: they wait for
+the owner's preparation lease. A closed gate rejects even a previously
+admitted reservation. A failed preparation is released by the caller. Concurrent risk
 decisions remain serialized by the existing `RiskAdmission` owner; Batch 5C
 does not create a second risk state machine. A preparation request has exactly
 one authoritative owner for each canonical `(RiskScopeKind, RiskScopeId)` key.
 Reusing the same owner for several physical members is valid; passing two
 independently constructed owners for one key is a `CONFLICT` and produces no
-durable writes. Preparation repeats the durable risk-scope check inside the
-same MDBX write transaction, closing the race between the diagnostic readiness
-projection and the durable write.
+durable writes. Preparation acquires unique owner leases in canonical
+`(RiskScopeKind, RiskScopeId)` order, then the storage writer guard, then the
+MDBX transaction. All paths release the guards with RAII. Do not call
+`prepare()` or acquire owner leases while holding a storage writer guard, and
+do not call locking owner methods while holding its lease. Scope metadata is
+immutable and can be read without relocking. Owners outlive preparation and
+leases are confined to the acquiring thread. The durable risk-scope check runs
+inside the same MDBX transaction as preparation; the writer mutex alone is not
+the owner-authority protocol.
 
 The transaction-side admission check reads the materialized
 `ts_admission_scope_index` by scope range. Active reservations, non-terminal
@@ -113,7 +122,44 @@ maintained in the same Unit of Work as their canonical facts. It does not scan
 the complete journal or reservation table for every new group. The projection
 has a schema marker; a database created before this index is fail-closed until
 `UnitOfWork::rebuild_admission_scope_index()` is run as an explicit maintenance
-operation. Full recovery/integrity scans remain startup or maintenance work.
+operation. The marker is not an integrity proof: opening storage automatically
+compares the index with a canonical rebuild in a transaction that is always
+rolled back. Missing, extra or changed entries block admission globally until
+an explicit successful rebuild commits. The same comparison can be requested
+with `audit_admission_scope_index()` during quiescent maintenance. Audit never
+silently repairs data. Full execution-chain recovery remains a separate startup
+check through `recover()` / `admission_readiness()`; the projection audit does
+not replace it. Ordinary `prepare()` does not invoke the full readiness scan.
+
+Canonical tables and projections must be written only through UnitOfWork.
+Direct writes through `connection()` are a maintenance/corruption-testing
+escape hatch, not a supported concurrent runtime writer. After such writes,
+quiesce execution and rerun both audits or reopen storage before admission;
+no bounded lookup can detect arbitrary out-of-band deletion by itself.
+
+Gate projections use the identical `(min(scope_a, scope_b), max(scope_a,
+scope_b), conflict_id)` payload under both scope keys. Symmetric conflict
+insertion and duplicates are idempotent. A different conflict identity aborts
+the UnitOfWork. The existing `put_account(CONFLICT)` path still permits commit
+of protective gates, but a failed projection write aborts canonical facts too.
+
+Generic `append_journal()` rejects `GROUP_COMPLETION`. Operation-index cleanup
+runs only after validated Batch 5B logical progression and all associated
+projection writes succeed. Rebuild also requires a terminal valued aggregate
+matching the completion payload and terminal roster-bound reservations;
+fabricated/incomplete completions cannot clear risk, including after reopen.
+Cleanup reads only the roster's scopes, not the whole admission index.
+
+For `S` selected scopes, normal validation visits only their index ranges;
+cleanup visits the group's scopes plus its own roster/settlement facts. It is
+independent of unrelated history, but can scale with active entries in a shared
+scope. `UnitOfWork::admission_scope_index_visits()` counts entries actually
+visited by validation/cleanup. The scaling regression uses 1,000 historical
+reservations and 1,000 unrelated operation entries in one other scope: target
+admission visits 2 entries, completion cleanup visits 1, and subsequent
+admission visits 0. These counts exclude the deliberately full startup audit
+and the separate group-local settlement aggregation.
+
 Write UnitOfWork instances owned by one `TradingSystemStorage` are serialized,
 and release their writer guard immediately after commit or rollback. This
 provides a bounded concurrent-admission contract without permitting partial
@@ -183,6 +229,7 @@ quote is fetched by Batch 5C.
 
 ## Offline verification
 
+The corrective suite contains 43 Batch 5B tests and 24 Batch 5C tests.
 `tests/trading_system_batch5c_test.cpp` covers:
 
 - durable preparation and JSON round-trip after reopen;
@@ -201,6 +248,10 @@ quote is fetched by Batch 5C.
 - bounded settlement ID allocation and explicit legacy sequence rebuild;
 - canonical one-owner-per-risk-scope rejection;
 - concurrent admission serialization without partial roster persistence;
+- owner cancellation blocked across verification and durable commit;
+- closed owner gates rejecting earlier admission proofs;
+- fabricated completion rejection and fail-closed rebuild after corruption;
+- startup index corruption detection despite a valid schema marker;
 - multi-account roster identity preservation and restart/reopen completion.
 
 The simulated broker state is explicitly owned outside the OptionX runtime

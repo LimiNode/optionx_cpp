@@ -443,6 +443,11 @@ public:
         result.blocked_risk_scopes = recovered.affected_risk_scopes;
         result.diagnostic = recovered.diagnostic;
         if (!recovered.succeeded()) return result;
+        if (!storage.admission_scope_index_verified()) {
+            result.global_block = true;
+            result.diagnostic = "admission scope index failed startup integrity audit";
+            return result;
+        }
 
         for (const auto& item : recovered.operations) {
             if (unresolved(item.second.state)) {
@@ -600,7 +605,9 @@ private:
     static StorageResult validate_owner_admissions(
         const TradeIntent& intent,
         const std::vector<ReservationRecord>& reservations,
-        const std::vector<const RiskAdmission*>& admission_owners) {
+        const std::vector<const RiskAdmission*>& admission_owners,
+        const std::map<const RiskAdmission*,
+                       const RiskAdmission::PreparationLease*>& locked_owners) {
         if (reservations.size() != admission_owners.size()) {
             return {StorageResultKind::INVALID_ARGUMENT,
                     "one authoritative RiskAdmission owner is required per reservation"};
@@ -669,45 +676,15 @@ private:
             request.idempotency_key = intent.idempotency_key;
             request.stake = entry.second.stake;
             request.potential_risk = entry.second.potential_risk;
-            const auto verified = entry.first->verify_group_admission(request);
+            const auto locked = locked_owners.find(entry.first);
+            if (locked == locked_owners.end() || !locked->second) {
+                return {StorageResultKind::INVALID_STATE,
+                        "RiskAdmission owner lease is missing"};
+            }
+            const auto verified = locked->second->verify_group_admission(request);
             if (!verified.succeeded() || !verified.is_submission_admission()) {
                 return {StorageResultKind::INVALID_STATE,
                         "reservation was not admitted by its RiskAdmission owner"};
-            }
-        }
-        return {StorageResultKind::APPLIED, {}};
-    }
-
-    StorageResult validate_new_admission(
-        const TradingSystemStorage& storage,
-        const TradeIntent& intent,
-        const ExecutionRosterRecord& roster,
-        const std::vector<ReservationRecord>& reservations,
-        const std::vector<const RiskAdmission*>& admission_owners) const {
-        if (auto result = validate_owner_admissions(
-                intent, reservations, admission_owners);
-            result.kind != StorageResultKind::APPLIED) {
-            return result;
-        }
-        const auto existing = storage.roster(roster.group_id);
-        if (existing.kind != StorageResultKind::NOT_FOUND && !existing.found()) {
-            return {existing.kind, existing.message};
-        }
-        const bool is_existing_group = existing.found() &&
-            detail::roster_to_json(*existing.value) == detail::roster_to_json(roster);
-        if (is_existing_group) return {StorageResultKind::APPLIED, {}};
-
-        const auto readiness = durable_readiness(storage);
-        if (!readiness.journal_valid || readiness.global_block) {
-            return {StorageResultKind::INVALID_STATE,
-                    readiness.diagnostic.empty()
-                        ? "durable recovery is not ready for admission"
-                        : readiness.diagnostic};
-        }
-        for (const auto& member : roster.members) {
-            if (readiness.blocked_risk_scopes.count(member.risk_scope_id) != 0) {
-                return {StorageResultKind::INVALID_STATE,
-                        "risk scope is blocked by unresolved durable execution"};
             }
         }
         return {StorageResultKind::APPLIED, {}};
@@ -913,8 +890,32 @@ public:
             result.kind != StorageResultKind::APPLIED) {
             return result;
         }
-        if (auto result = validate_new_admission(
-                storage, intent, roster, reservations, admission_owners);
+        using OwnerOrderKey = std::pair<int, std::uint64_t>;
+        std::map<OwnerOrderKey, const RiskAdmission*> ordered_owners;
+        for (const auto* owner : admission_owners) {
+            if (!owner) {
+                return {StorageResultKind::INVALID_ARGUMENT,
+                        "RiskAdmission owner is missing"};
+            }
+            const auto scope = owner->scope();
+            const OwnerOrderKey key{static_cast<int>(scope.kind), scope.scope_id};
+            const auto found = ordered_owners.find(key);
+            if (found != ordered_owners.end() && found->second != owner) {
+                return {StorageResultKind::CONFLICT,
+                        "multiple RiskAdmission owners claim one risk scope"};
+            }
+            ordered_owners.emplace(key, owner);
+        }
+        std::vector<RiskAdmission::PreparationLease> owner_leases;
+        owner_leases.reserve(ordered_owners.size());
+        std::map<const RiskAdmission*,
+                 const RiskAdmission::PreparationLease*> locked_owners;
+        for (const auto& entry : ordered_owners) {
+            owner_leases.push_back(entry.second->acquire_preparation_lease());
+            locked_owners.emplace(entry.second, &owner_leases.back());
+        }
+        if (auto result = validate_owner_admissions(
+                intent, reservations, admission_owners, locked_owners);
             result.kind != StorageResultKind::APPLIED) {
             return result;
         }

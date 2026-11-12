@@ -1991,6 +1991,129 @@ TEST(TradingSystemBatch5B, AccountIdentityTombstoneAndRiskScopeConflictAreDurabl
               ts::RiskAdmissionReason::RISK_SCOPE_BLOCKED);
 }
 
+TEST(TradingSystemBatch5B, SymmetricScopeGatesAreIdempotentInBothOrdersAndAfterRebuild) {
+    for (const auto first_scope : {1000U, 2000U}) {
+        SCOPED_TRACE(first_scope);
+        TestDatabase database;
+        const auto second_scope = first_scope == 1000 ? 2000U : 1000U;
+        ts::AccountIdentityRecord first{11, "IntradeBar", "same-account", "DEMO",
+            11, first_scope, 0, true, ts::trading_storage_schema_version};
+        auto second = first;
+        second.account_id = second.canonical_account_id = 12;
+        second.risk_scope_id = second_scope;
+        {
+            ts::TradingSystemStorage storage(database.config());
+            auto unit = storage.begin();
+            ASSERT_EQ(unit.put_account(first).kind, ts::StorageResultKind::APPLIED);
+            EXPECT_EQ(unit.put_account(second).kind, ts::StorageResultKind::CONFLICT);
+            EXPECT_EQ(unit.put_account(second).kind, ts::StorageResultKind::CONFLICT);
+            ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+        }
+        ts::TradingSystemStorage reopened(database.config());
+        ASSERT_TRUE(reopened.admission_scope_index_verified());
+        ASSERT_TRUE(reopened.risk_scope_gate(first_scope).found());
+        EXPECT_EQ(reopened.risk_scope_gate(first_scope).value->related_scope_id, second_scope);
+        EXPECT_EQ(reopened.risk_scope_gate(second_scope).value->related_scope_id, first_scope);
+        EXPECT_EQ(reopened.account(12).kind, ts::StorageResultKind::NOT_FOUND);
+        {
+            auto unit = reopened.begin();
+            ASSERT_EQ(unit.rebuild_admission_scope_index().kind, ts::StorageResultKind::APPLIED);
+            ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+        }
+        EXPECT_EQ(reopened.audit_admission_scope_index().kind, ts::StorageResultKind::APPLIED);
+        for (const auto scope : {first_scope, second_scope}) {
+            auto unit = reopened.begin();
+            EXPECT_EQ(unit.validate_admission_scopes({scope}).kind, ts::StorageResultKind::INVALID_STATE);
+        }
+        auto another = first;
+        another.account_id = another.canonical_account_id = 13;
+        another.risk_scope_id = 3000;
+        {
+            auto unit = reopened.begin();
+            EXPECT_EQ(unit.put_account(another).kind, ts::StorageResultKind::CONFLICT);
+            EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+        }
+        EXPECT_EQ(reopened.risk_scope_gate(3000).kind, ts::StorageResultKind::NOT_FOUND);
+    }
+}
+
+TEST(TradingSystemBatch5B, ProjectionFailureRollsBackCanonicalGates) {
+    TestDatabase database;
+    ts::TradingSystemStorage storage(database.config());
+    ts::AccountIdentityRecord first{11, "IntradeBar", "same-account", "DEMO",
+        11, 1000, 0, true, ts::trading_storage_schema_version};
+    {
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_account(first).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    mdbxc::KeyValueTable<std::string, std::string> index(storage.connection(), "ts_admission_scope_index");
+    index.insert(ts::detail::admission_scope_index_key(
+        2000, "gate", "account-scope:1000:2000:same-account"), "{}");
+    auto second = first;
+    second.account_id = second.canonical_account_id = 12;
+    second.risk_scope_id = 2000;
+    {
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.put_account(second).kind, ts::StorageResultKind::CONFLICT);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+    EXPECT_EQ(storage.risk_scope_gate(1000).kind, ts::StorageResultKind::NOT_FOUND);
+    EXPECT_EQ(storage.risk_scope_gate(2000).kind, ts::StorageResultKind::NOT_FOUND);
+    EXPECT_EQ(storage.account(12).kind, ts::StorageResultKind::NOT_FOUND);
+}
+
+TEST(TradingSystemBatch5B, AdmissionAndCompletionVisitOnlyTheTargetScopeOnLargeHistory) {
+    TestDatabase database;
+    seed(database);
+    ts::TradingSystemStorage storage(database.config());
+    {
+        auto unit = storage.begin();
+        for (std::uint64_t id = 10000; id != 11000; ++id) {
+            auto history = reservation();
+            history.reservation_id = history.intent_id = id;
+            history.risk_scope_id = id;
+            history.execution_group = {id, 1};
+            history.state = ts::RiskReservationState::SETTLED;
+            history.idempotency_key = "historical-risk-" + std::to_string(id);
+            ASSERT_EQ(unit.put_reservation(history, 0).kind, ts::StorageResultKind::APPLIED);
+            ts::ExecutionOperationRecord operation{
+                "history-" + std::to_string(id), "client-" + std::to_string(id),
+                id, id, id, id, 2000, ts::ExecutionOperationState::PREPARED, 0, {}, 1000};
+            ts::JournalEvent event{id, "EXECUTION_OPERATION", "operation:" + operation.operation_id,
+                0, ts::trading_storage_schema_version, operation.operation_id, 1000, operation};
+            ASSERT_EQ(unit.append_journal(event).kind, ts::StorageResultKind::APPLIED);
+        }
+        ts::ExecutionOperationRecord operation{
+            "target-operation", "target-client", 41, 80, 700, 11, 1000,
+            ts::ExecutionOperationState::PREPARED, 0, {}, 1000};
+        ts::JournalEvent event{11000, "EXECUTION_OPERATION", "operation:target-operation", 0,
+            ts::trading_storage_schema_version, "target-operation", 1000, operation};
+        ASSERT_EQ(unit.append_journal(event).kind, ts::StorageResultKind::APPLIED);
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.validate_admission_scopes({1000}, 80).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.admission_scope_index_visits(), 2U);
+        RecordProperty("admission_index_visits", static_cast<int>(unit.admission_scope_index_visits()));
+    }
+    {
+        auto unit = storage.begin();
+        const auto result = unit.apply_settlement_atomic(transition());
+        ASSERT_EQ(result.kind, ts::StorageResultKind::APPLIED) << result.message;
+        EXPECT_EQ(unit.admission_scope_index_visits(), 1U);
+        RecordProperty("completion_index_visits", static_cast<int>(unit.admission_scope_index_visits()));
+        ASSERT_EQ(unit.commit().kind, ts::StorageResultKind::APPLIED);
+    }
+    {
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.validate_admission_scopes({1000}).kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.admission_scope_index_visits(), 0U);
+    }
+    EXPECT_EQ(storage.audit_admission_scope_index().kind, ts::StorageResultKind::APPLIED);
+}
+
 TEST(TradingSystemBatch5B, SeriesOwnerHydratesReceiptAndIdempotencyHistory) {
     ts::TradeSettlement first = settlement(901, 700);
     ts::TradeSettlement second = settlement(902, 701);
