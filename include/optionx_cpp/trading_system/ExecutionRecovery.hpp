@@ -879,7 +879,8 @@ public:
                           const ExecutionRosterRecord& roster,
                           const std::vector<ReservationRecord>& reservations,
                           const std::vector<PhysicalTradeRecord>& physical_trades,
-                          const std::vector<const RiskAdmission*>& admission_owners) const {
+                          const std::vector<const RiskAdmission*>& admission_owners,
+                          std::optional<std::uint64_t> expected_series_revision = std::nullopt) const {
         if (!intent.valid() || intent.status != IntentStatus::ADMITTED || !roster.valid() ||
             reservations.size() != roster.members.size() ||
             physical_trades.size() != roster.members.size()) {
@@ -966,6 +967,10 @@ public:
             result.kind != StorageResultKind::DUPLICATE) return result;
         if (auto result = unit.put_roster(roster); result.kind != StorageResultKind::APPLIED &&
             result.kind != StorageResultKind::DUPLICATE) return result;
+        if (expected_series_revision) {
+            const auto result = unit.begin_prepared_series(intent, roster, *expected_series_revision);
+            if (!result.succeeded()) return result;
+        }
         for (std::size_t i = 0; i < reservations.size(); ++i) {
             if (reservations[i].state_revision != 0 || physical_trades[i].state_revision != 0) {
                 return {StorageResultKind::INVALID_ARGUMENT,
