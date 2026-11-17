@@ -44,6 +44,19 @@ std::size_t submissions(const std::shared_ptr<Broker::State>& broker) {
     return count;
 }
 
+ts::SettlementRecord stored_settlement(ts::SettlementId id) {
+    ts::TradeSettlement settlement;
+    settlement.settlement_id = id;
+    settlement.intent_id = 1;
+    settlement.execution_group_id = 1;
+    settlement.trade_id = 1;
+    settlement.kind = ts::OutcomeKind::WIN;
+    settlement.evidence = ts::ExecutionEvidence::EXECUTED;
+    settlement.net_profit = ex::usd(1);
+    return {settlement, ex::usd(1), std::nullopt, true,
+            ts::trading_storage_schema_version};
+}
+
 void expect_no_execution(ex::SyntheticHost& host, const std::shared_ptr<Broker::State>& broker) {
     EXPECT_TRUE(host.storage().reservations().values.empty());
     EXPECT_TRUE(host.storage().journal_events().values.empty());
@@ -279,6 +292,117 @@ TEST(TradingSystemBatch6, BrokerAndLocalSettlementNamespacesDoNotCollide) {
     }
 }
 
+TEST(TradingSystemBatch6, SettlementSequenceRebuildIgnoresExternalNamespace) {
+    Database db;
+    {
+        ts::TradingSystemStorage storage(db.config());
+        auto unit = storage.begin();
+        ASSERT_TRUE(unit.put_settlement(stored_settlement(
+            ts::external_settlement_namespace_bit + 1)).succeeded());
+        ASSERT_TRUE(unit.put_settlement(stored_settlement(1)).succeeded());
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+    {
+        ts::TradingSystemStorage storage(db.config());
+        auto unit = storage.begin();
+        ASSERT_TRUE(unit.rebuild_settlement_sequence().succeeded());
+        const auto next = unit.next_id("settlement");
+        ASSERT_EQ(next.kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(next.value, 2U);
+        ASSERT_TRUE(unit.put_settlement(stored_settlement(next.value)).succeeded());
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+    {
+        ts::TradingSystemStorage reopened(db.config());
+        auto unit = reopened.begin();
+        ASSERT_TRUE(unit.rebuild_settlement_sequence().succeeded());
+        const auto next = unit.next_id("settlement");
+        EXPECT_EQ(next.kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(next.value, 3U);
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+}
+
+TEST(TradingSystemBatch6, ExternalOnlyHistoryRebuildsLocalSequence) {
+    Database db;
+    ts::TradingSystemStorage storage(db.config());
+    {
+        auto unit = storage.begin();
+        ASSERT_TRUE(unit.put_settlement(stored_settlement(
+            ts::external_settlement_namespace_bit + 7)).succeeded());
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+    auto unit = storage.begin();
+    ASSERT_TRUE(unit.rebuild_settlement_sequence().succeeded());
+    const auto next = unit.next_id("settlement");
+    EXPECT_EQ(next.kind, ts::StorageResultKind::APPLIED);
+    EXPECT_EQ(next.value, 1U);
+    ASSERT_TRUE(unit.commit().succeeded());
+}
+
+TEST(TradingSystemBatch6, SettlementSequencePreservesHigherLocalCounterAndHandlesExhaustion) {
+    Database db;
+    ts::TradingSystemStorage storage(db.config());
+    {
+        auto unit = storage.begin();
+        ASSERT_TRUE(unit.put_settlement(stored_settlement(1)).succeeded());
+        ASSERT_EQ(unit.next_id("settlement").value, 2U);
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+    {
+        auto unit = storage.begin();
+        ASSERT_TRUE(unit.rebuild_settlement_sequence().succeeded());
+        const auto next = unit.next_id("settlement");
+        EXPECT_EQ(next.kind, ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(next.value, 3U);
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+
+    Database boundary;
+    ts::TradingSystemStorage exhausted(boundary.config());
+    {
+        auto unit = exhausted.begin();
+        ASSERT_TRUE(unit.put_settlement(stored_settlement(
+            ts::external_settlement_namespace_bit - 1)).succeeded());
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+    auto unit = exhausted.begin();
+    ASSERT_TRUE(unit.rebuild_settlement_sequence().succeeded());
+    EXPECT_NE(unit.next_id("settlement").kind, ts::StorageResultKind::APPLIED);
+    unit.rollback();
+}
+
+TEST(TradingSystemBatch6, SimulatedBrokerSettlementAllocatorStopsAtExternalBoundary) {
+    auto state = std::make_shared<Broker::State>();
+    ts::SimulatedExecutionAdapter adapter(state);
+    state->next_settlement_id = ts::external_settlement_namespace_bit - 2;
+    EXPECT_EQ(adapter.next_settlement_id(), (std::numeric_limits<std::uint64_t>::max)());
+    EXPECT_EQ(state->next_settlement_id, ts::external_settlement_namespace_bit - 1);
+    EXPECT_EQ(adapter.next_settlement_id(), 0U);
+    EXPECT_EQ(state->next_settlement_id, ts::external_settlement_namespace_bit - 1);
+    EXPECT_EQ(adapter.next_settlement_id(), 0U);
+
+    state->next_settlement_id = ts::external_settlement_namespace_bit - 1;
+    EXPECT_EQ(adapter.next_settlement_id(), 0U);
+    EXPECT_EQ(state->next_settlement_id, ts::external_settlement_namespace_bit - 1);
+}
+
+TEST(TradingSystemBatch6, ConflictingSimulatedTerminalEvidenceIsRejected) {
+    Database db;
+    auto broker = std::make_shared<Broker::State>();
+    ex::SyntheticHost host(db.config(), configuration(), noon, broker);
+    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+    const auto group = host.series().current_group_id;
+    ASSERT_TRUE(host.submit(group).succeeded());
+    const auto first = host.broker_result(group, 0, 80);
+    ASSERT_THROW(host.broker_result(group, 0, -80), std::runtime_error);
+    ASSERT_EQ(broker->history.size(), 1U);
+    ASSERT_TRUE(broker->history.front().settlement.has_value());
+    EXPECT_EQ(broker->history.front().settlement->settlement_id, first.settlement_id);
+    ASSERT_TRUE(host.observe(group).succeeded());
+    ASSERT_TRUE(host.complete(group).succeeded());
+}
+
 TEST(TradingSystemBatch6, ReorderedBrokerResultsReplayCanonically) {
     Database db;
     auto config = configuration();
@@ -310,18 +434,42 @@ TEST(TradingSystemBatch6, MixedScopeStatesHydrateConservativelyAfterRestart) {
         ASSERT_TRUE(host.submit_plans(group, {
             ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION,
             ts::SimulatedSubmissionPlan::SUCCESS,
-            ts::SimulatedSubmissionPlan::TIMEOUT}).succeeded());
+            ts::SimulatedSubmissionPlan::ACCEPTED_RESPONSE_LOST}).succeeded());
         host.broker_result(group, 1, 80);
-        EXPECT_FALSE(host.observe(group).succeeded());
+        ASSERT_TRUE(host.observe(group).succeeded());
     }
-    ex::SyntheticHost reopened(db.config(), config, noon, broker);
-    EXPECT_EQ(reopened.reserved(1000), 200);
-    EXPECT_EQ(reopened.series().status, ts::SeriesStatus::WAITING_OUTCOME);
-    const auto durable = reopened.storage().reservations();
-    ASSERT_EQ(durable.values.size(), 3U);
-    EXPECT_EQ(durable.values[0].state, ts::RiskReservationState::RELEASED);
-    EXPECT_EQ(durable.values[1].state, ts::RiskReservationState::RESERVED);
-    EXPECT_EQ(durable.values[2].state, ts::RiskReservationState::RESERVED);
+    std::size_t submissions_before_reopen = 0;
+    {
+        ex::SyntheticHost reopened(db.config(), config, noon, broker);
+        EXPECT_EQ(reopened.reserved(1000), 200);
+        EXPECT_EQ(reopened.series().status, ts::SeriesStatus::WAITING_OUTCOME);
+        const auto durable = reopened.storage().reservations();
+        ASSERT_EQ(durable.values.size(), 3U);
+        EXPECT_EQ(durable.values[0].state, ts::RiskReservationState::RELEASED);
+        EXPECT_EQ(durable.values[1].state, ts::RiskReservationState::RESERVED);
+        EXPECT_EQ(durable.values[2].state, ts::RiskReservationState::RESERVED);
+        reopened.broker_result(group, 2, 80);
+        ASSERT_TRUE(reopened.observe(group).succeeded());
+        ASSERT_TRUE(reopened.complete(group).succeeded());
+        EXPECT_EQ(reopened.reserved(1000), 0);
+        EXPECT_EQ(reopened.series().series.next_step, 1U);
+        EXPECT_EQ(reopened.mm_state().state_revision, 1U);
+        const auto completed = reopened.storage().reservations();
+        ASSERT_EQ(completed.values.size(), 3U);
+        EXPECT_EQ(completed.values[0].state, ts::RiskReservationState::RELEASED);
+        EXPECT_EQ(completed.values[1].state, ts::RiskReservationState::SETTLED);
+        EXPECT_EQ(completed.values[2].state, ts::RiskReservationState::SETTLED);
+        submissions_before_reopen = submissions(broker);
+        EXPECT_EQ(submissions_before_reopen, 3U);
+    }
+    {
+        ex::SyntheticHost reopened_again(db.config(), config, noon, broker);
+        EXPECT_EQ(reopened_again.reserved(1000), 0);
+        EXPECT_EQ(reopened_again.mm_state().state_revision, 1U);
+        EXPECT_EQ(reopened_again.complete(group).kind, ts::StorageResultKind::DUPLICATE);
+        EXPECT_EQ(reopened_again.mm_state().state_revision, 1U);
+        EXPECT_EQ(submissions(broker), submissions_before_reopen);
+    }
 }
 
 TEST(TradingSystemBatch6, LossStepPolicyRejectsInvalidMultiplierAndOverflow) {

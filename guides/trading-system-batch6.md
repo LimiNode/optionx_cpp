@@ -59,6 +59,10 @@ erase unresolved exposure or overwrite individual durable states.
 Simulated broker settlement IDs use an independent high-bit namespace and a
 broker-state high-water counter. They are never derived from `TradeId`; local
 rejection evidence continues to use the storage settlement sequence.
+The explicit settlement-sequence rebuild scans only the local namespace,
+preserves a valid higher local counter and repairs a legacy counter that was
+incorrectly advanced by external IDs. The external allocator stops without
+advancing when its low 63-bit counter is exhausted.
 
 ## Scenarios and guarantees
 
@@ -71,8 +75,12 @@ rejection evidence continues to use the storage settlement sequence.
 - one capped loss step with checked multiplier/overflow and durable restore;
 - crash/reopen after preparation, possible broker side effect, physical
   settlement and logical commit;
+- mixed-scope restart followed by broker-history reconciliation, logical
+  completion and a second reopen;
 - multi-account groups, shared scope aggregation, late member completion and
   immutable physical account identities;
+- rejected conflicting simulated terminal evidence and settlement namespace
+  boundary/rebuild cases;
 - durable policy/account-binding changes failing closed.
 
 The test uses deterministic synthetic time and a real MDBX environment. No live

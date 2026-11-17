@@ -247,12 +247,7 @@ public:
     ts::TradeSettlement broker_result(ts::ExecutionGroupId group, std::size_t member,
                                      std::int64_t net_units) {
         const auto operation = operations(group).at(member);
-        if (const auto existing = m_broker.settlement_for(operation.operation_id)) {
-            return *existing;
-        }
         ts::TradeSettlement settlement;
-        settlement.settlement_id = m_broker.next_settlement_id();
-        if (settlement.settlement_id == 0) throw std::runtime_error("simulated settlement sequence exhausted");
         settlement.intent_id = operation.intent_id;
         settlement.execution_group_id = group;
         settlement.trade_id = operation.trade_id;
@@ -261,6 +256,12 @@ public:
         settlement.evidence = ts::ExecutionEvidence::EXECUTED;
         settlement.net_profit = m_config.base_stake;
         settlement.net_profit->units = net_units;
+        if (const auto existing = m_broker.settlement_for(operation.operation_id)) {
+            if (ts::same_terminal_evidence(*existing, settlement)) return *existing;
+            throw std::runtime_error("conflicting simulated terminal evidence");
+        }
+        settlement.settlement_id = m_broker.next_settlement_id();
+        if (settlement.settlement_id == 0) throw std::runtime_error("simulated settlement sequence exhausted");
         if (!m_broker.attach_settlement(operation.operation_id, settlement)) {
             throw std::runtime_error("simulated execution not uniquely identified");
         }

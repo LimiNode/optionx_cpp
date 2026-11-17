@@ -254,6 +254,13 @@ public:
             match = &entry;
         }
         if (!match) return false;
+        if (!settlement.valid() || settlement.intent_id == 0 ||
+            settlement.execution_group_id == 0 || settlement.trade_id != match->trade_id) {
+            return false;
+        }
+        if (match->settlement) {
+            return same_terminal_evidence(*match->settlement, settlement);
+        }
         match->settlement = std::move(settlement);
         return true;
     }
@@ -265,8 +272,8 @@ public:
     }
 
     SettlementId next_settlement_id() noexcept {
-        if (m_state->next_settlement_id ==
-            (std::numeric_limits<std::uint64_t>::max)() - 1) return 0;
+        const auto maximum_counter = external_settlement_namespace_bit - 1;
+        if (m_state->next_settlement_id >= maximum_counter) return 0;
         // The high bit identifies the simulated broker namespace. Local MDBX
         // settlement sequences therefore cannot collide in ordinary operation.
         return external_settlement_namespace_bit + ++m_state->next_settlement_id;

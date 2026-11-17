@@ -1453,14 +1453,31 @@ public:
                     return fail({StorageResultKind::STORAGE_ERROR,
                                  "settlement identity is malformed"});
                 }
-                if (used > maximum) maximum = used;
+                if (used < external_settlement_namespace_bit && used > maximum) {
+                    maximum = used;
+                }
             }
-            if (maximum == (std::numeric_limits<std::uint64_t>::max)()) {
-                return fail({StorageResultKind::INVALID_ARGUMENT,
-                             "durable settlement identifier exhausted"});
+            const auto local_maximum = external_settlement_namespace_bit - 1;
+            const auto rebuilt_next = maximum == local_maximum
+                ? external_settlement_namespace_bit : maximum + 1;
+            const auto current = m_storage.m_sequences.find("settlement", m_transaction);
+            std::uint64_t next = rebuilt_next;
+            if (current) {
+                std::size_t length = 0;
+                const auto existing_next = std::stoull(*current, &length);
+                if (length != current->size() || existing_next == 0) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "settlement identifier sequence is malformed"});
+                }
+                // A previous maintenance run may have included external IDs.
+                // Repair that invalid local counter from local facts only.
+                if (existing_next < external_settlement_namespace_bit &&
+                    existing_next > next) {
+                    next = existing_next;
+                }
             }
             m_storage.m_sequences.insert_or_assign(
-                "settlement", std::to_string(maximum + 1), m_transaction);
+                "settlement", std::to_string(next), m_transaction);
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
             return fail({StorageResultKind::STORAGE_ERROR, error.what()});
