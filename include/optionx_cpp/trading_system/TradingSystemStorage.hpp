@@ -1491,6 +1491,8 @@ public:
     /// journal or reservation history and never perform this rebuild.
     StorageResult rebuild_admission_scope_index() {
         try {
+            const auto scope_kinds = validate_risk_scope_kind_consistency();
+            if (scope_kinds.kind != StorageResultKind::APPLIED) return scope_kinds;
             std::vector<std::pair<std::string, std::string>> current;
             m_storage.m_admission_scope_index.load(current, m_transaction);
             for (const auto& entry : current) {
@@ -1560,6 +1562,44 @@ public:
     }
 
 private:
+    StorageResult validate_risk_scope_kind_consistency(
+        const ReservationRecord* pending = nullptr) {
+        try {
+            if (!m_risk_scope_kinds_loaded) {
+                std::vector<std::pair<std::string, std::string>> encoded;
+                m_storage.m_reservations.load(encoded, m_transaction);
+                for (const auto& entry : encoded) {
+                    const auto reservation = detail::reservation_from_json(
+                        nlohmann::json::parse(entry.second));
+                    if (!reservation.valid()) {
+                        return {StorageResultKind::STORAGE_ERROR,
+                                "risk-scope identity audit found an invalid reservation"};
+                    }
+                    const auto found = m_risk_scope_kinds.emplace(
+                        reservation.risk_scope_id, reservation.risk_scope_kind);
+                    if (!found.second && found.first->second != reservation.risk_scope_kind) {
+                        return {StorageResultKind::INVALID_STATE,
+                                "risk scope ID is reused across RiskScopeKind values"};
+                    }
+                }
+                m_risk_scope_kinds_loaded = true;
+            }
+            if (pending) {
+                const auto found = m_risk_scope_kinds.find(pending->risk_scope_id);
+                if (found != m_risk_scope_kinds.end() &&
+                    found->second != pending->risk_scope_kind) {
+                    return {StorageResultKind::INVALID_STATE,
+                            "risk scope ID is reused across RiskScopeKind values"};
+                }
+                m_risk_scope_kinds.emplace(
+                    pending->risk_scope_id, pending->risk_scope_kind);
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return {StorageResultKind::STORAGE_ERROR, error.what()};
+        }
+    }
+
     friend class TradingSystemStorage;
 
     /// \brief Compares a full rebuild with the index, then rolls it back.
@@ -1682,6 +1722,8 @@ public:
                                  "reservation immutable identity changed"});
                 }
             }
+            const auto scope_kinds = validate_risk_scope_kind_consistency(&value);
+            if (scope_kinds.kind != StorageResultKind::APPLIED) return scope_kinds;
             const auto index_ready = ensure_admission_scope_index_ready();
             if (index_ready.kind != StorageResultKind::APPLIED) return index_ready;
             const auto result = put_revisioned(
@@ -3246,6 +3288,8 @@ private:
     std::size_t m_roster_validation_checks = 0;
     std::size_t m_admission_scope_index_visits = 0;
     bool m_rebuilt_admission_scope_index = false;
+    std::map<std::uint64_t, RiskScopeKind> m_risk_scope_kinds;
+    bool m_risk_scope_kinds_loaded = false;
 };
 
 inline TradingSystemStorage::UnitOfWork TradingSystemStorage::begin() {

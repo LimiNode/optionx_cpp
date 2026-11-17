@@ -101,6 +101,7 @@ public:
         reload();
     }
 
+    ts::TradingSystemStorage& storage() noexcept { return m_storage; }
     const ts::TradingSystemStorage& storage() const noexcept { return m_storage; }
     const ts::SeriesCheckpoint& series() const noexcept { return m_checkpoint; }
     const ts::MoneyManagementStateRecord& mm_state() const noexcept { return m_mm; }
@@ -213,9 +214,33 @@ public:
     std::vector<ts::ExecutionOperationRecord> operations(ts::ExecutionGroupId group) const {
         const auto recovered = ts::ExecutionRecoveryManager::recover(m_storage);
         if (!recovered.succeeded()) throw std::runtime_error(recovered.diagnostic);
-        std::vector<ts::ExecutionOperationRecord> result;
+        const auto stored_roster = m_storage.roster(group);
+        if (!stored_roster.found() || !stored_roster.value->valid()) {
+            throw std::runtime_error("missing or invalid execution roster");
+        }
+        const auto& roster = *stored_roster.value;
+        std::map<std::uint64_t, ts::ExecutionOperationRecord> by_trade;
         for (const auto& entry : recovered.operations) {
-            if (entry.second.group_id == group) result.push_back(entry.second);
+            const auto& operation = entry.second;
+            if (operation.group_id != group) continue;
+            if (!operation.valid() || operation.intent_id != roster.intent_id ||
+                operation.group_id != roster.group_id ||
+                !by_trade.emplace(operation.trade_id, operation).second) {
+                throw std::runtime_error("execution operation is foreign or duplicated");
+            }
+        }
+        if (by_trade.size() != roster.members.size()) {
+            throw std::runtime_error("execution roster has missing or foreign operations");
+        }
+        std::vector<ts::ExecutionOperationRecord> result;
+        result.reserve(roster.members.size());
+        for (const auto& member : roster.members) {
+            const auto found = by_trade.find(member.trade_id);
+            if (found == by_trade.end() || found->second.account_id != member.account_id ||
+                found->second.risk_scope_id != member.risk_scope_id) {
+                throw std::runtime_error("execution operation does not match roster member");
+            }
+            result.push_back(found->second);
         }
         return result;
     }
@@ -315,6 +340,13 @@ public:
         if (!aggregate.outcome().final || aggregate.outcome().aggregation_status != ts::AggregationStatus::READY) {
             return {ts::StorageResultKind::INVALID_STATE, "group is not terminal"};
         }
+        const auto terminal = std::find_if(
+            records.values.begin(), records.values.end(),
+            [](const ts::SettlementRecord& record) { return record.settlement.terminal(); });
+        if (terminal == records.values.end()) {
+            return {ts::StorageResultKind::INVALID_STATE,
+                    "group has no canonical terminal settlement"};
+        }
         auto candidate = *m_series;
         const auto progressed = candidate.apply_group_completion(receipts, m_checkpoint.series.state_revision);
         if (progressed == ts::ProgressionResult::DUPLICATE) return {ts::StorageResultKind::DUPLICATE, {}};
@@ -326,12 +358,12 @@ public:
         checkpoint.receipts.insert(checkpoint.receipts.end(), receipts.begin(), receipts.end());
         auto mm = m_mm;
         ++mm.state_revision;
-        mm.last_settlement_id = receipts.front().settlement_id;
+        mm.last_settlement_id = terminal->settlement.settlement_id;
         const bool after_loss = m_mm.payload.at("after_loss").get<bool>();
         mm.payload["after_loss"] = m_config.loss_step && !after_loss &&
             aggregate.outcome().kind == ts::OutcomeKind::LOSS;
         ts::SettlementTransition transition;
-        transition.settlement = records.values.front();
+        transition.settlement = *terminal;
         transition.journal.idempotency_key = "settlement:" + std::to_string(mm.last_settlement_id);
         transition.journal.occurred_at_ms = m_clock.now_ms();
         transition.series = checkpoint;

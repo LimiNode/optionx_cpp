@@ -421,6 +421,146 @@ TEST(TradingSystemBatch6, ReorderedBrokerResultsReplayCanonically) {
     EXPECT_EQ(host.series().current_outcome.net_profit->units, 60);
 }
 
+TEST(TradingSystemBatch6, OperationsFollowRosterOrderAcrossRestart) {
+    Database db;
+    auto config = configuration();
+    config.targets = {{11, 1000}, {12, 1000}};
+    auto broker = std::make_shared<Broker::State>();
+    ts::ExecutionGroupId group = 0;
+    {
+        ex::SyntheticHost host(db.config(), config, noon, broker);
+        for (int index = 0; index < 4; ++index) {
+            ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+            const auto completed_group = host.series().current_group_id;
+            if (index == 0) {
+                ASSERT_TRUE(host.submit_plans(completed_group, {
+                    ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION,
+                    ts::SimulatedSubmissionPlan::SUCCESS}).succeeded());
+            } else {
+                ASSERT_TRUE(host.submit(completed_group).succeeded());
+            }
+            if (index != 0) host.broker_result(completed_group, 0, 80);
+            host.broker_result(completed_group, 1, 80);
+            ASSERT_TRUE(host.observe(completed_group).succeeded());
+            ASSERT_TRUE(host.complete(completed_group).succeeded());
+        }
+
+        ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+        group = host.series().current_group_id;
+        const auto submitted = host.submit_plans(group, {
+            ts::SimulatedSubmissionPlan::PRE_SUBMIT_REJECTION,
+            ts::SimulatedSubmissionPlan::SUCCESS});
+        ASSERT_TRUE(submitted.succeeded())
+            << ts::to_string(submitted.kind) << ": " << submitted.message;
+    }
+
+    ex::SyntheticHost reopened(db.config(), config, noon, broker);
+    const auto roster = ex::read(reopened.storage().roster(group));
+    ASSERT_EQ(roster.members.size(), 2U);
+    EXPECT_EQ(roster.members[0].trade_id, 9U);
+    EXPECT_EQ(roster.members[1].trade_id, 10U);
+    const auto operations = reopened.operations(group);
+    ASSERT_EQ(operations.size(), 2U);
+    EXPECT_EQ(operations[0].trade_id, 9U);
+    EXPECT_EQ(operations[0].state, ts::ExecutionOperationState::REJECTED);
+    EXPECT_EQ(operations[1].trade_id, 10U);
+    EXPECT_EQ(operations[1].state, ts::ExecutionOperationState::BROKER_ID_PERSISTED);
+
+    const auto terminal = reopened.broker_result(group, 1, 80);
+    EXPECT_EQ(terminal.trade_id, 10U);
+    ASSERT_TRUE(reopened.observe(group).succeeded());
+    ASSERT_TRUE(reopened.complete(group).succeeded());
+    EXPECT_EQ(ex::read(reopened.storage().physical_trade(9)).lifecycle_state, "REJECTED");
+    EXPECT_EQ(ex::read(reopened.storage().physical_trade(10)).lifecycle_state, "SETTLED");
+}
+
+TEST(TradingSystemBatch6, DurableRiskScopeIdentityRejectsMixedKinds) {
+    Database db;
+    ts::TradingSystemStorage storage(db.config());
+    auto make_reservation = [](std::uint64_t reservation_id, ts::RiskScopeKind kind) {
+        ts::ReservationRecord value;
+        value.reservation_id = reservation_id;
+        value.risk_scope_id = 42;
+        value.risk_scope_kind = kind;
+        value.intent_id = 1;
+        value.execution_group = {1, 1};
+        value.cardinality = ts::ExecutionCardinality::EXACTLY_ONE;
+        value.stake = ex::usd(1);
+        value.potential_risk = ex::usd(1);
+        value.idempotency_key = "risk-" + std::to_string(reservation_id);
+        return value;
+    };
+
+    auto unit = storage.begin();
+    ASSERT_EQ(unit.put_reservation(
+        make_reservation(1, ts::RiskScopeKind::ACCOUNT), 0).kind,
+        ts::StorageResultKind::APPLIED);
+    const auto conflicting = unit.put_reservation(
+        make_reservation(2, ts::RiskScopeKind::STRATEGY), 0);
+    EXPECT_EQ(conflicting.kind, ts::StorageResultKind::INVALID_STATE)
+        << ts::to_string(conflicting.kind) << ": " << conflicting.message;
+    unit.rollback();
+}
+
+TEST(TradingSystemBatch6, SimulatedBrokerRejectsForeignHistoryIdentity) {
+    Broker adapter;
+    Broker::HistoryEntry foreign;
+    foreign.operation_id = "operation-1";
+    foreign.client_operation_id = "client-1";
+    foreign.account_id = 11;
+    foreign.trade_id = 7;
+    foreign.intent_id = 99;
+    foreign.execution_group_id = 90;
+    adapter.add_history_entry(foreign);
+
+    ts::TradeSettlement settlement;
+    settlement.settlement_id = 1;
+    settlement.intent_id = 1;
+    settlement.execution_group_id = 80;
+    settlement.trade_id = 7;
+    settlement.kind = ts::OutcomeKind::WIN;
+    settlement.evidence = ts::ExecutionEvidence::EXECUTED;
+    settlement.net_profit = ex::usd(1);
+    EXPECT_FALSE(adapter.attach_settlement("operation-1", settlement));
+
+    ts::ExecutionOperationRecord operation;
+    operation.operation_id = "operation-1";
+    operation.client_operation_id = "client-1";
+    operation.intent_id = 1;
+    operation.group_id = 80;
+    operation.trade_id = 7;
+    operation.account_id = 11;
+    operation.risk_scope_id = 1000;
+    EXPECT_EQ(adapter.reconcile(operation).kind, ts::ReconciliationKind::EXECUTION_UNKNOWN);
+}
+
+TEST(TradingSystemBatch6, CompletionUsesTerminalEvidenceAsDurableAnchor) {
+    Database db;
+    auto broker = std::make_shared<Broker::State>();
+    ex::SyntheticHost host(db.config(), configuration(), noon, broker);
+    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+    const auto group = host.series().current_group_id;
+    ASSERT_TRUE(host.submit(group).succeeded());
+    const auto operation = host.operations(group).front();
+
+    ts::TradeSettlement unknown;
+    unknown.settlement_id = 1;
+    unknown.intent_id = operation.intent_id;
+    unknown.execution_group_id = group;
+    unknown.trade_id = operation.trade_id;
+    unknown.kind = ts::OutcomeKind::UNKNOWN;
+    unknown.evidence = ts::ExecutionEvidence::MAY_HAVE_EXECUTED;
+    auto unit = host.storage().begin();
+    ASSERT_TRUE(unit.put_settlement({unknown, ex::usd(0), std::nullopt, true,
+                                     ts::trading_storage_schema_version}).succeeded());
+    ASSERT_TRUE(unit.commit().succeeded());
+
+    const auto terminal = host.broker_result(group, 0, 80);
+    ASSERT_TRUE(host.observe(group).succeeded());
+    ASSERT_TRUE(host.complete(group).succeeded());
+    EXPECT_EQ(host.mm_state().last_settlement_id, terminal.settlement_id);
+}
+
 TEST(TradingSystemBatch6, MixedScopeStatesHydrateConservativelyAfterRestart) {
     Database db;
     auto config = configuration();

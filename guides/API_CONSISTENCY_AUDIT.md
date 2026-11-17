@@ -39,13 +39,16 @@ release/settlement is derived from terminal settlement evidence.
 ### Risk-scope identity
 
 Canonical reservation records persist both `RiskScopeKind` and `risk_scope_id`.
-The admission projection is deliberately keyed by the numeric scope ID because
-the current runtime treats `scope_id` as the canonical globally unique risk
-resource identity. The kind remains part of the canonical record and is checked
+The admission projection is deliberately keyed by the numeric scope ID. Batch 6
+enforces one `RiskScopeKind` per numeric ID across durable reservation records and
+fails closed during admission/index audit if `ACCOUNT:42` and `STRATEGY:42` are
+present together. The kind remains part of the canonical record and is checked
 when records are hydrated. Reusing one numeric ID for different scope kinds is
 therefore invalid configuration, not a supported aliasing mechanism. The
-projection schema is unchanged in Batch 6; a future migration would be needed
-before changing this key contract.
+in-memory `RiskAdmission` API still receives a caller-supplied typed scope, so
+callers must preserve that global uniqueness invariant before any durable record
+exists. The projection schema is unchanged in Batch 6; a future migration would
+be needed before changing this key contract.
 
 ### Result and lifecycle APIs
 

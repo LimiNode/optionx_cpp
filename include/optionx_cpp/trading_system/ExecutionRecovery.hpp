@@ -185,6 +185,8 @@ struct SimulatedExecutionCommand {
     std::string client_operation_id;
     std::uint64_t account_id = 0;
     std::uint64_t trade_id = 0;
+    IntentId intent_id = 0;
+    ExecutionGroupId execution_group_id = 0;
 };
 
 enum class SimulatedSubmissionPlan {
@@ -213,6 +215,8 @@ public:
         std::uint64_t account_id = 0;
         std::uint64_t trade_id = 0;
         std::optional<TradeSettlement> settlement;
+        IntentId intent_id = 0;
+        ExecutionGroupId execution_group_id = 0;
     };
 
     /// \brief State that belongs to the simulated external broker, not OptionX.
@@ -254,8 +258,11 @@ public:
             match = &entry;
         }
         if (!match) return false;
-        if (!settlement.valid() || settlement.intent_id == 0 ||
-            settlement.execution_group_id == 0 || settlement.trade_id != match->trade_id) {
+        if (!settlement.valid() || match->intent_id == 0 ||
+            match->execution_group_id == 0 ||
+            settlement.intent_id != match->intent_id ||
+            settlement.execution_group_id != match->execution_group_id ||
+            settlement.trade_id != match->trade_id) {
             return false;
         }
         if (match->settlement) {
@@ -299,6 +306,8 @@ public:
         entry.client_operation_id = command.client_operation_id;
         entry.account_id = command.account_id;
         entry.trade_id = command.trade_id;
+        entry.intent_id = command.intent_id;
+        entry.execution_group_id = command.execution_group_id;
         entry.broker_trade_id = "broker-" + std::to_string(++m_state->next_broker_id);
         m_state->history.push_back(entry);
         const bool id_available = plan != SimulatedSubmissionPlan::ACCEPTED_WITHOUT_BROKER_ID;
@@ -352,7 +361,11 @@ private:
             const bool operation_match = entry.operation_id == operation.operation_id;
             const bool client_match = !operation.client_operation_id.empty() &&
                                        entry.client_operation_id == operation.client_operation_id;
-            if ((operation_match || client_match) &&
+            const bool intent_match = entry.intent_id == 0 ||
+                                      entry.intent_id == operation.intent_id;
+            const bool group_match = entry.execution_group_id == 0 ||
+                                     entry.execution_group_id == operation.group_id;
+            if ((operation_match || client_match) && intent_match && group_match &&
                 entry.account_id == operation.account_id &&
                 entry.trade_id == operation.trade_id) {
                 result.push_back(&entry);
@@ -1111,7 +1124,9 @@ public:
         const auto response = adapter.submit({current.operation_id,
                                                current.client_operation_id,
                                                current.account_id,
-                                               current.trade_id});
+                                               current.trade_id,
+                                               current.intent_id,
+                                               current.group_id});
         auto observed = started;
         if (!next_revision_of(started.state_revision, observed.state_revision)) {
             return {StorageResultKind::INVALID_ARGUMENT, "execution operation revision overflow"};
