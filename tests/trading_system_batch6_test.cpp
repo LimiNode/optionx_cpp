@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../examples/trading_system/SyntheticHost.hpp"
+#include "support/trading_system/SyntheticHost.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -7,7 +7,7 @@
 #include <limits>
 
 namespace {
-namespace ex = optionx_examples;
+namespace ex = optionx::test_support;
 namespace ts = optionx::trading_system;
 constexpr std::int64_t noon = 12 * 60 * 60 * 1000;
 

@@ -1,9 +1,9 @@
 #pragma once
-#ifndef OPTIONX_EXAMPLE_SYNTHETIC_HOST_HPP_INCLUDED
-#define OPTIONX_EXAMPLE_SYNTHETIC_HOST_HPP_INCLUDED
+#ifndef OPTIONX_TEST_SUPPORT_TRADING_SYSTEM_SYNTHETIC_HOST_HPP_INCLUDED
+#define OPTIONX_TEST_SUPPORT_TRADING_SYSTEM_SYNTHETIC_HOST_HPP_INCLUDED
 
 /// \file SyntheticHost.hpp
-/// \brief Single-threaded offline composition example, not a production runtime.
+/// \brief Single-threaded offline integration-test harness, not a production runtime.
 
 #include <optionx_cpp/trading_system.hpp>
 
@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace optionx_examples {
+namespace optionx::test_support {
 namespace ts = optionx::trading_system;
 
 inline ts::MoneyAmount usd(std::int64_t units) {
@@ -153,7 +153,10 @@ public:
                 ? ts::ExecutionCardinality::EXACTLY_ONE : ts::ExecutionCardinality::SPLIT_GROUP;
             intent.idempotency_key = "synthetic-intent-" + std::to_string(intent.intent_id);
             signal.assign_to_request(intent.request);
-            intent.request.amount = std::stod(sizing.amount->to_decimal());
+        // TradeRequest is the existing broker boundary and stores a double.
+        // MoneyAmount remains authoritative for sizing, reservations and
+        // durable records; this conversion is limited to that legacy DTO.
+        intent.request.amount = std::stod(sizing.amount->to_decimal());
             roster.group_id = intent.execution_group.group_id;
             roster.intent_id = intent.intent_id;
             roster.expected_members = intent.execution_group.expected_members;
@@ -525,6 +528,6 @@ private:
     std::map<std::uint64_t, std::unique_ptr<ts::RiskAdmission>> m_risk;
 };
 
-} // namespace optionx_examples
+} // namespace optionx::test_support
 
-#endif // OPTIONX_EXAMPLE_SYNTHETIC_HOST_HPP_INCLUDED
+#endif // OPTIONX_TEST_SUPPORT_TRADING_SYSTEM_SYNTHETIC_HOST_HPP_INCLUDED

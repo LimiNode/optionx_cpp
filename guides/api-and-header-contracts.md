@@ -50,6 +50,10 @@
   MDBX storage, and execution recovery. Consumers that need only the pure
   domain contracts therefore still use the same aggregate and accept its MDBX
   dependency; no second `trading_system_storage.hpp` aggregate is supported.
+- Batch 6 test orchestration is not part of this public include contract.
+  `tests/support/trading_system/SyntheticHost.hpp` is test-only support in the
+  `optionx::test_support` namespace. A public consumer must not depend on it or
+  on files under `examples/`; use `<optionx_cpp/trading_system.hpp>` instead.
 - `storages.hpp` remains a separate aggregate for generic/session/record
   storage and must not include `trading_system/TradingSystemStorage.hpp`.
 - Bridge families are public only through `bridges.hpp` or the family umbrella

@@ -1,14 +1,14 @@
 # Trading System Batch 6: Synthetic Vertical Slice
 
-Batch 6 is a bounded offline composition example. It proves that the existing
+Batch 6 is a bounded offline composition slice. It proves that the existing
 filter, sizing, risk, durable-storage, settlement and recovery contracts can be
 used by one ordinary C++17 caller. It is not a production `TradingSystem`
 facade, scheduler, graph engine or broker adapter.
 
 ## Pipeline
 
-`optionx_examples::SyntheticHost` in `examples/trading_system/SyntheticHost.hpp`
-composes the following stages:
+The test-only `optionx::test_support::SyntheticHost` in
+`tests/support/trading_system/SyntheticHost.hpp` composes the following stages:
 
 ```text
 synthetic signal
@@ -47,7 +47,7 @@ completion remain separate durable transitions. Group completion updates the
 series, MM payload and every member reservation in the existing atomic Batch 5B
 path.
 
-The example is single-threaded. `RiskAdmission` owners are authoritative for
+The harness is single-threaded. `RiskAdmission` owners are authoritative for
 one risk scope and are recreated only after durable facts are read. Shared-scope
 members are aggregated into one in-memory reservation token for admission while
 their physical reservation records remain separate in the roster and storage.
@@ -83,8 +83,12 @@ advancing when its low 63-bit counter is exhausted.
   boundary/rebuild cases;
 - durable policy/account-binding changes failing closed.
 
-The test uses deterministic synthetic time and a real MDBX environment. No live
+The integration test uses deterministic synthetic time and a real MDBX environment. No live
 credentials, network broker or wall-clock sleep is involved.
+
+The companion `trading_system_batch6_consumer_test` is intentionally separate:
+it includes only `<optionx_cpp/trading_system.hpp>` and connects public filters,
+sizing, series and aggregation contracts without test support or example paths.
 
 ## Loss-step policy
 
