@@ -57,6 +57,22 @@ ts::SettlementRecord stored_settlement(ts::SettlementId id) {
             ts::trading_storage_schema_version};
 }
 
+ts::ReservationRecord scope_reservation(
+    std::uint64_t id, ts::RiskScopeKind kind = ts::RiskScopeKind::ACCOUNT,
+    std::uint64_t scope = 42) {
+    ts::ReservationRecord value;
+    value.reservation_id = id;
+    value.risk_scope_id = scope;
+    value.risk_scope_kind = kind;
+    value.intent_id = 1;
+    value.execution_group = {1, 1};
+    value.cardinality = ts::ExecutionCardinality::EXACTLY_ONE;
+    value.stake = ex::usd(1);
+    value.potential_risk = ex::usd(1);
+    value.idempotency_key = "risk-" + std::to_string(id);
+    return value;
+}
+
 void expect_no_execution(ex::SyntheticHost& host, const std::shared_ptr<Broker::State>& broker) {
     EXPECT_TRUE(host.storage().reservations().values.empty());
     EXPECT_TRUE(host.storage().journal_events().values.empty());
@@ -476,30 +492,224 @@ TEST(TradingSystemBatch6, OperationsFollowRosterOrderAcrossRestart) {
 
 TEST(TradingSystemBatch6, DurableRiskScopeIdentityRejectsMixedKinds) {
     Database db;
-    ts::TradingSystemStorage storage(db.config());
-    auto make_reservation = [](std::uint64_t reservation_id, ts::RiskScopeKind kind) {
-        ts::ReservationRecord value;
-        value.reservation_id = reservation_id;
-        value.risk_scope_id = 42;
-        value.risk_scope_kind = kind;
-        value.intent_id = 1;
-        value.execution_group = {1, 1};
-        value.cardinality = ts::ExecutionCardinality::EXACTLY_ONE;
-        value.stake = ex::usd(1);
-        value.potential_risk = ex::usd(1);
-        value.idempotency_key = "risk-" + std::to_string(reservation_id);
-        return value;
-    };
+    {
+        ts::TradingSystemStorage storage(db.config());
+        auto unit = storage.begin();
+        ASSERT_EQ(unit.put_reservation(scope_reservation(1), 0).kind,
+                  ts::StorageResultKind::APPLIED);
+        EXPECT_EQ(unit.put_reservation(scope_reservation(2, ts::RiskScopeKind::STRATEGY), 0).kind,
+                  ts::StorageResultKind::INVALID_STATE);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+    ts::TradingSystemStorage reopened(db.config());
+    EXPECT_EQ(reopened.reservation(1).kind, ts::StorageResultKind::NOT_FOUND);
+    EXPECT_EQ(reopened.reservation(2).kind, ts::StorageResultKind::NOT_FOUND);
+    EXPECT_TRUE(reopened.admission_scope_index_verified());
+    // The aborted claim must not prevent a subsequent valid binding.
+    auto unit = reopened.begin();
+    ASSERT_TRUE(unit.put_reservation(scope_reservation(2, ts::RiskScopeKind::STRATEGY), 0).succeeded());
+    EXPECT_TRUE(unit.commit().succeeded());
+}
 
-    auto unit = storage.begin();
-    ASSERT_EQ(unit.put_reservation(
-        make_reservation(1, ts::RiskScopeKind::ACCOUNT), 0).kind,
-        ts::StorageResultKind::APPLIED);
-    const auto conflicting = unit.put_reservation(
-        make_reservation(2, ts::RiskScopeKind::STRATEGY), 0);
-    EXPECT_EQ(conflicting.kind, ts::StorageResultKind::INVALID_STATE)
-        << ts::to_string(conflicting.kind) << ": " << conflicting.message;
-    unit.rollback();
+TEST(TradingSystemBatch6, TerminalScopeIdentitySurvivesReopenAndRejectsOtherKinds) {
+    for (const auto state : {ts::RiskReservationState::SETTLED, ts::RiskReservationState::RELEASED}) {
+        Database db;
+        {
+            ts::TradingSystemStorage storage(db.config());
+            auto unit = storage.begin();
+            auto history = scope_reservation(1);
+            history.state = state;
+            ASSERT_TRUE(unit.put_reservation(history, 0).succeeded());
+            ASSERT_TRUE(unit.commit().succeeded());
+        }
+        ts::TradingSystemStorage reopened(db.config());
+        ASSERT_TRUE(reopened.admission_scope_index_verified());
+        auto unit = reopened.begin();
+        ASSERT_TRUE(unit.put_reservation(scope_reservation(3), 0).succeeded());
+        EXPECT_EQ(unit.put_reservation(scope_reservation(2, ts::RiskScopeKind::GROUP), 0).kind,
+                  ts::StorageResultKind::INVALID_STATE);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+        EXPECT_EQ(reopened.reservation(3).kind, ts::StorageResultKind::NOT_FOUND);
+        EXPECT_EQ(reopened.reservations().values.size(), 1U);
+    }
+}
+
+TEST(TradingSystemBatch6, CorruptScopeIdentityAbortsEarlierWritesAndCanBeRebuilt) {
+    using Kind = ts::StorageResultKind;
+    const std::vector<std::pair<std::string, Kind>> corruptions{
+        {"not-json", Kind::STORAGE_ERROR}, {"{}", Kind::STORAGE_ERROR},
+        {R"({"schema_version":2,"risk_scope_kind":0})", Kind::UNSUPPORTED_SCHEMA},
+        {R"({"schema_version":1,"risk_scope_kind":999})", Kind::STORAGE_ERROR},
+        {R"({"schema_version":1,"risk_scope_kind":0.5})", Kind::STORAGE_ERROR},
+        {R"({"schema_version":1,"risk_scope_kind":"ACCOUNT"})", Kind::STORAGE_ERROR}
+    };
+    for (const auto& corruption : corruptions) {
+        SCOPED_TRACE(corruption.first);
+        Database db;
+        {
+            ts::TradingSystemStorage storage(db.config());
+            {
+                auto unit = storage.begin();
+                ASSERT_TRUE(unit.put_reservation(scope_reservation(1), 0).succeeded());
+                ASSERT_TRUE(unit.commit().succeeded());
+            }
+            // Deliberately corrupt a quiescent projection after its startup audit.
+            mdbxc::KeyValueTable<std::string, std::string> index(storage.connection(), "ts_admission_scope_index");
+            index.insert_or_assign(ts::detail::risk_scope_identity_key(42), corruption.first);
+            auto unit = storage.begin();
+            ASSERT_TRUE(unit.put_reservation(scope_reservation(3, ts::RiskScopeKind::ACCOUNT, 43), 0).succeeded());
+            EXPECT_EQ(unit.put_reservation(scope_reservation(2), 0).kind, corruption.second);
+            EXPECT_EQ(unit.commit().kind, Kind::INVALID_STATE);
+        }
+        {
+            ts::TradingSystemStorage reopened(db.config());
+            EXPECT_FALSE(reopened.admission_scope_index_verified());
+            EXPECT_EQ(reopened.reservation(2).kind, Kind::NOT_FOUND);
+            EXPECT_EQ(reopened.reservation(3).kind, Kind::NOT_FOUND);
+            auto unit = reopened.begin();
+            ASSERT_TRUE(unit.rebuild_admission_scope_index().succeeded());
+            ASSERT_TRUE(unit.commit().succeeded());
+        }
+        ts::TradingSystemStorage repaired(db.config());
+        EXPECT_TRUE(repaired.admission_scope_index_verified());
+    }
+}
+
+TEST(TradingSystemBatch6, FailedScopeIdentityRebuildCannotCommitPartialProjection) {
+    for (const bool malformed : {false, true}) {
+        Database db;
+        std::vector<std::pair<std::string, std::string>> original;
+        {
+            ts::TradingSystemStorage storage(db.config());
+            {
+                auto unit = storage.begin();
+                ASSERT_TRUE(unit.put_reservation(scope_reservation(1), 0).succeeded());
+                ASSERT_TRUE(unit.commit().succeeded());
+            }
+            mdbxc::KeyValueTable<std::string, std::string> index(storage.connection(), "ts_admission_scope_index");
+            index.load(original);
+            mdbxc::KeyValueTable<std::string, std::string> reservations(storage.connection(), "ts_reservations");
+            auto bad = ts::detail::reservation_to_json(scope_reservation(2, ts::RiskScopeKind::STRATEGY));
+            if (malformed) bad["risk_scope_kind"] = 999;
+            reservations.insert_or_assign("2", bad.dump());
+            auto unit = storage.begin();
+            ASSERT_TRUE(unit.put_settlement(stored_settlement(900)).succeeded());
+            const auto failed = unit.rebuild_admission_scope_index();
+            EXPECT_EQ(failed.kind, malformed ? ts::StorageResultKind::STORAGE_ERROR
+                                            : ts::StorageResultKind::INVALID_STATE);
+            EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+        }
+        ts::TradingSystemStorage reopened(db.config());
+        EXPECT_FALSE(reopened.admission_scope_index_verified());
+        EXPECT_EQ(reopened.settlement(900).kind, ts::StorageResultKind::NOT_FOUND);
+        mdbxc::KeyValueTable<std::string, std::string> index(reopened.connection(), "ts_admission_scope_index");
+        std::vector<std::pair<std::string, std::string>> after;
+        index.load(after);
+        EXPECT_EQ(after, original);
+    }
+}
+
+TEST(TradingSystemBatch6, PreviousScopeProjectionVersionRequiresExplicitRebuild) {
+    Database db;
+    {
+        ts::TradingSystemStorage storage(db.config());
+        {
+            auto unit = storage.begin();
+            ASSERT_TRUE(unit.put_reservation(scope_reservation(1), 0).succeeded());
+            ASSERT_TRUE(unit.commit().succeeded());
+        }
+        mdbxc::KeyValueTable<std::string, std::string> index(storage.connection(), "ts_admission_scope_index");
+        index.erase(ts::detail::risk_scope_identity_key(42));
+        index.insert_or_assign("@schema", R"({"schema_version":1})");
+        auto unit = storage.begin();
+        EXPECT_EQ(unit.put_reservation(scope_reservation(2), 0).kind, ts::StorageResultKind::UNSUPPORTED_SCHEMA);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+    {
+        ts::TradingSystemStorage reopened(db.config());
+        EXPECT_FALSE(reopened.admission_scope_index_verified());
+        {
+            auto unit = reopened.begin();
+            EXPECT_EQ(unit.put_reservation(scope_reservation(2), 0).kind, ts::StorageResultKind::INVALID_STATE);
+            EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+        }
+        auto unit = reopened.begin();
+        ASSERT_TRUE(unit.rebuild_admission_scope_index().succeeded());
+        EXPECT_EQ(unit.reservation_history_visits(), 1U);
+        ASSERT_TRUE(unit.commit().succeeded());
+    }
+    ts::TradingSystemStorage upgraded(db.config());
+    EXPECT_TRUE(upgraded.admission_scope_index_verified());
+    auto unit = upgraded.begin();
+    EXPECT_EQ(unit.put_reservation(scope_reservation(2, ts::RiskScopeKind::STRATEGY), 0).kind,
+              ts::StorageResultKind::INVALID_STATE);
+    EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+}
+
+TEST(TradingSystemBatch6, MissingTerminalScopeClaimFailsStartupAuditDespiteCurrentMarker) {
+    Database db;
+    {
+        ts::TradingSystemStorage storage(db.config());
+        {
+            auto unit = storage.begin();
+            auto history = scope_reservation(1);
+            history.state = ts::RiskReservationState::SETTLED;
+            ASSERT_TRUE(unit.put_reservation(history, 0).succeeded());
+            ASSERT_TRUE(unit.commit().succeeded());
+        }
+        mdbxc::KeyValueTable<std::string, std::string> index(storage.connection(), "ts_admission_scope_index");
+        index.erase(ts::detail::risk_scope_identity_key(42));
+    }
+    ts::TradingSystemStorage reopened(db.config());
+    EXPECT_FALSE(reopened.admission_scope_index_verified());
+    {
+        auto unit = reopened.begin();
+        EXPECT_EQ(unit.put_reservation(scope_reservation(2, ts::RiskScopeKind::STRATEGY), 0).kind,
+                  ts::StorageResultKind::INVALID_STATE);
+        EXPECT_EQ(unit.commit().kind, ts::StorageResultKind::INVALID_STATE);
+    }
+    auto unit = reopened.begin();
+    ASSERT_TRUE(unit.rebuild_admission_scope_index().succeeded());
+    ASSERT_TRUE(unit.commit().succeeded());
+    EXPECT_TRUE(reopened.admission_scope_index_verified());
+}
+
+TEST(TradingSystemBatch6, OrdinaryReservationWritesNeverVisitCompletedHistory) {
+    for (const std::uint64_t count : {32U, 2048U}) {
+        SCOPED_TRACE(count);
+        Database db;
+        {
+            ts::TradingSystemStorage storage(db.config());
+            auto unit = storage.begin();
+            for (std::uint64_t id = 1; id <= count; ++id) {
+                auto history = scope_reservation(id, ts::RiskScopeKind::ACCOUNT, id + 1000);
+                history.state = ts::RiskReservationState::SETTLED;
+                ASSERT_TRUE(unit.put_reservation(history, 0).succeeded());
+            }
+            EXPECT_EQ(unit.reservation_history_visits(), 0U);
+            EXPECT_EQ(unit.risk_scope_identity_checks(), count);
+            ASSERT_TRUE(unit.commit().succeeded());
+        }
+        ts::TradingSystemStorage reopened(db.config());
+        ASSERT_TRUE(reopened.admission_scope_index_verified());
+        // Every write gets a fresh UOW, including an update to completed history.
+        for (const auto id : {count + 1, std::uint64_t{1}}) {
+            auto value = scope_reservation(id, ts::RiskScopeKind::ACCOUNT, id + 1000);
+            value.state = ts::RiskReservationState::SETTLED;
+            if (id == 1) ++value.state_revision;
+            auto unit = reopened.begin();
+            ASSERT_TRUE(unit.put_reservation(value, 0).succeeded());
+            EXPECT_EQ(unit.reservation_history_visits(), 0U);
+            EXPECT_EQ(unit.risk_scope_identity_checks(), 1U);
+            EXPECT_EQ(unit.admission_scope_index_visits(), 0U);
+            ASSERT_TRUE(unit.commit().succeeded());
+        }
+        auto rebuild = reopened.begin();
+        ASSERT_TRUE(rebuild.rebuild_admission_scope_index().succeeded());
+        EXPECT_EQ(rebuild.reservation_history_visits(), count + 1);
+        EXPECT_EQ(rebuild.risk_scope_identity_checks(), count + 1);
+        ASSERT_TRUE(rebuild.commit().succeeded());
+    }
 }
 
 TEST(TradingSystemBatch6, SimulatedBrokerRejectsForeignHistoryIdentity) {
@@ -537,28 +747,82 @@ TEST(TradingSystemBatch6, SimulatedBrokerRejectsForeignHistoryIdentity) {
 TEST(TradingSystemBatch6, CompletionUsesTerminalEvidenceAsDurableAnchor) {
     Database db;
     auto broker = std::make_shared<Broker::State>();
-    ex::SyntheticHost host(db.config(), configuration(), noon, broker);
-    ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
-    const auto group = host.series().current_group_id;
-    ASSERT_TRUE(host.submit(group).succeeded());
-    const auto operation = host.operations(group).front();
+    ts::ExecutionGroupId group;
+    ts::SettlementId terminal_id;
+    std::uint64_t series_revision, mm_revision, physical_revision, reservation_revision;
+    std::uint64_t trade_id, reservation_id;
+    {
+        ex::SyntheticHost host(db.config(), configuration(), noon, broker);
+        ASSERT_TRUE(host.accept(ex::synthetic_buy()).succeeded());
+        group = host.series().current_group_id;
+        ASSERT_TRUE(host.submit(group).succeeded());
+        const auto operation = host.operations(group).front();
+        trade_id = operation.trade_id;
+        reservation_id = ex::read(host.storage().roster(group)).reservation_bindings.front().reservation_id;
 
-    ts::TradeSettlement unknown;
-    unknown.settlement_id = 1;
-    unknown.intent_id = operation.intent_id;
-    unknown.execution_group_id = group;
-    unknown.trade_id = operation.trade_id;
-    unknown.kind = ts::OutcomeKind::UNKNOWN;
-    unknown.evidence = ts::ExecutionEvidence::MAY_HAVE_EXECUTED;
-    auto unit = host.storage().begin();
-    ASSERT_TRUE(unit.put_settlement({unknown, ex::usd(0), std::nullopt, true,
-                                     ts::trading_storage_schema_version}).succeeded());
-    ASSERT_TRUE(unit.commit().succeeded());
+        ts::TradeSettlement unknown;
+        unknown.settlement_id = 1;
+        unknown.intent_id = operation.intent_id;
+        unknown.execution_group_id = group;
+        unknown.trade_id = trade_id;
+        unknown.kind = ts::OutcomeKind::UNKNOWN;
+        unknown.evidence = ts::ExecutionEvidence::MAY_HAVE_EXECUTED;
+        const auto physical = ex::read(host.storage().physical_trade(trade_id));
+        {
+            auto unit = host.storage().begin();
+            const auto event_id = unit.next_journal_event_id_for_append();
+            ASSERT_EQ(event_id.kind, ts::StorageResultKind::APPLIED);
+            ts::SettlementTransition transition;
+            transition.journal = {event_id.value, "EXECUTION_SETTLED", "trade:" + std::to_string(trade_id),
+                0, ts::trading_storage_schema_version, "settlement:1", noon, {}};
+            transition.settlement = {unknown, ex::usd(0), std::nullopt, true,
+                                     ts::trading_storage_schema_version};
+            transition.physical_trade = physical;
+            transition.physical_trade->lifecycle_state = "EXECUTION_UNKNOWN";
+            ++transition.physical_trade->state_revision;
+            transition.expected_physical_trade_revision = physical.state_revision;
+            const auto recorded = unit.record_physical_settlement(transition);
+            ASSERT_TRUE(recorded.succeeded()) << recorded.message;
+            ASSERT_TRUE(unit.commit().succeeded());
+        }
 
-    const auto terminal = host.broker_result(group, 0, 80);
-    ASSERT_TRUE(host.observe(group).succeeded());
-    ASSERT_TRUE(host.complete(group).succeeded());
-    EXPECT_EQ(host.mm_state().last_settlement_id, terminal.settlement_id);
+        const auto terminal = host.broker_result(group, 0, 80);
+        terminal_id = terminal.settlement_id;
+        ASSERT_TRUE(host.observe(group).succeeded());
+        auto records = host.storage().settlements_for_group(group);
+        ASSERT_TRUE(records.succeeded());
+        ASSERT_EQ(records.values.size(), 2U);
+        std::stable_sort(records.values.begin(), records.values.end(),
+            [](const ts::SettlementRecord& lhs, const ts::SettlementRecord& rhs) {
+                return ts::canonical_settlement_before(lhs.settlement, rhs.settlement);
+            });
+        EXPECT_EQ(records.values[0].settlement.settlement_id, unknown.settlement_id);
+        EXPECT_FALSE(records.values[0].settlement.terminal());
+        EXPECT_EQ(records.values[0].settlement.kind, ts::OutcomeKind::UNKNOWN);
+        EXPECT_EQ(records.values[1].settlement.settlement_id, terminal_id);
+        EXPECT_TRUE(records.values[1].settlement.terminal());
+        EXPECT_LT(unknown.settlement_id, terminal_id);
+        ASSERT_TRUE(host.complete(group).succeeded());
+        EXPECT_EQ(host.mm_state().last_settlement_id, terminal_id);
+        const auto completions = host.storage().journal_events("GROUP_COMPLETION");
+        ASSERT_EQ(completions.values.size(), 1U);
+        EXPECT_EQ(completions.values.front().idempotency_key,
+                  "settlement:" + std::to_string(terminal_id) + ":logical");
+        series_revision = host.series().series.state_revision;
+        mm_revision = host.mm_state().state_revision;
+        physical_revision = ex::read(host.storage().physical_trade(trade_id)).state_revision;
+        reservation_revision = ex::read(host.storage().reservation(reservation_id)).state_revision;
+    }
+    ex::SyntheticHost reopened(db.config(), configuration(), noon, broker);
+    EXPECT_EQ(reopened.storage().settlements_for_group(group).values.size(), 2U);
+    EXPECT_EQ(reopened.complete(group).kind, ts::StorageResultKind::DUPLICATE);
+    EXPECT_EQ(reopened.series().series.state_revision, series_revision);
+    EXPECT_EQ(reopened.mm_state().state_revision, mm_revision);
+    EXPECT_EQ(reopened.mm_state().last_settlement_id, terminal_id);
+    EXPECT_EQ(ex::read(reopened.storage().physical_trade(trade_id)).state_revision, physical_revision);
+    EXPECT_EQ(ex::read(reopened.storage().reservation(reservation_id)).state_revision, reservation_revision);
+    EXPECT_EQ(reopened.storage().journal_events("GROUP_COMPLETION").values.size(), 1U);
+    EXPECT_EQ(submissions(broker), 1U);
 }
 
 TEST(TradingSystemBatch6, MixedScopeStatesHydrateConservativelyAfterRestart) {

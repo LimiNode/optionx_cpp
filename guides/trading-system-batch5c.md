@@ -131,6 +131,25 @@ silently repairs data. Full execution-chain recovery remains a separate startup
 check through `recover()` / `admission_readiness()`; the projection audit does
 not replace it. Ordinary `prepare()` does not invoke the full readiness scan.
 
+The same table also stores `@scope-kind:<id>` claims outside the `scope:<id>:`
+ranges. These bind a numeric risk-scope ID to one `RiskScopeKind` for its entire
+retained reservation history, including settled/released records. Each
+reservation write verifies or creates its claim inside the same MDBX writer
+transaction; conflicting or malformed identity evidence aborts the whole UOW,
+including earlier successful writes. Rebuild checks every canonical reservation
+and cannot commit a partial index when kinds conflict. No per-UOW history cache
+is used. Independent supported writer processes serialize through MDBX and read
+the committed claim; the storage object's mutex is only an additional local
+writer guard.
+
+The marker includes `scope_identity_version: 1`. Databases with the earlier
+marker require an explicit successful `rebuild_admission_scope_index()` before
+admission resumes, even if their old active-scope entries were correct. This
+upgrades only a rebuildable projection: canonical schema version, DTOs and named
+tables do not change. Quiesce all writers for the upgrade and use compatible
+writer binaries afterward; mixing older writers that ignore the new claims is
+unsupported. A failed rebuild rolls back marker, claims and all other UOW writes.
+
 Canonical tables and projections must be written only through UnitOfWork.
 Direct writes through `connection()` are a maintenance/corruption-testing
 escape hatch, not a supported concurrent runtime writer. After such writes,
@@ -159,6 +178,17 @@ reservations and 1,000 unrelated operation entries in one other scope: target
 admission visits 2 entries, completion cleanup visits 1, and subsequent
 admission visits 0. These counts exclude the deliberately full startup audit
 and the separate group-local settlement aggregation.
+
+Reservation writes additionally perform one scope-identity point lookup and at
+most one claim insert (MDBX tree cost), with no historical reservation scan.
+`risk_scope_identity_checks()` counts those lookups;
+`reservation_history_visits()` counts canonical reservations loaded by explicit
+rebuilds. The write-scaling regression seeds 32 and 2,048 completed records,
+reopens storage, and checks both an insertion and historical update in separate
+fresh UOWs: one point lookup and zero historical visits each. Explicit rebuild
+visits all 33 or 2,049 canonical records. These diagnostics exclude startup
+audit, which runs in its own rolled-back UOW. Claims grow with distinct scope
+IDs, not callback count, and terminal group cleanup never removes them.
 
 Write UnitOfWork instances owned by one `TradingSystemStorage` are serialized,
 and release their writer guard immediately after commit or rollback. This

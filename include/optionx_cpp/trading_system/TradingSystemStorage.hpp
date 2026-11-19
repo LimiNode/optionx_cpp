@@ -403,6 +403,16 @@ inline std::pair<std::string, std::string> group_index_bounds(ExecutionGroupId g
 }
 
 inline constexpr const char* admission_scope_index_marker = "@schema";
+inline constexpr std::uint32_t admission_scope_identity_version = 1;
+
+inline nlohmann::json admission_scope_index_schema() {
+    return {{"schema_version", trading_storage_schema_version},
+            {"scope_identity_version", admission_scope_identity_version}};
+}
+
+inline std::string risk_scope_identity_key(std::uint64_t id) {
+    return "@scope-kind:" + std::to_string(id);
+}
 
 inline std::pair<std::string, std::string> admission_scope_index_bounds(
     std::uint64_t risk_scope_id) {
@@ -1491,8 +1501,6 @@ public:
     /// journal or reservation history and never perform this rebuild.
     StorageResult rebuild_admission_scope_index() {
         try {
-            const auto scope_kinds = validate_risk_scope_kind_consistency();
-            if (scope_kinds.kind != StorageResultKind::APPLIED) return scope_kinds;
             std::vector<std::pair<std::string, std::string>> current;
             m_storage.m_admission_scope_index.load(current, m_transaction);
             for (const auto& entry : current) {
@@ -1500,15 +1508,16 @@ public:
             }
             m_storage.m_admission_scope_index.insert_or_assign(
                 detail::admission_scope_index_marker,
-                nlohmann::json{{"schema_version", trading_storage_schema_version}}.dump(),
+                detail::admission_scope_index_schema().dump(),
                 m_transaction);
 
             std::vector<std::pair<std::string, std::string>> encoded_reservations;
             m_storage.m_reservations.load(encoded_reservations, m_transaction);
+            m_reservation_history_visits += encoded_reservations.size();
             for (const auto& entry : encoded_reservations) {
                 const auto reservation = detail::reservation_from_json(
                     nlohmann::json::parse(entry.second));
-                if (!reservation.valid()) {
+                if (!valid_schema(reservation.schema_version) || !reservation.valid()) {
                     return fail({StorageResultKind::STORAGE_ERROR,
                                  "cannot rebuild admission index from invalid reservation"});
                 }
@@ -1562,41 +1571,39 @@ public:
     }
 
 private:
-    StorageResult validate_risk_scope_kind_consistency(
-        const ReservationRecord* pending = nullptr) {
+    StorageResult bind_risk_scope_identity(const ReservationRecord& reservation) {
         try {
-            if (!m_risk_scope_kinds_loaded) {
-                std::vector<std::pair<std::string, std::string>> encoded;
-                m_storage.m_reservations.load(encoded, m_transaction);
-                for (const auto& entry : encoded) {
-                    const auto reservation = detail::reservation_from_json(
-                        nlohmann::json::parse(entry.second));
-                    if (!reservation.valid()) {
-                        return {StorageResultKind::STORAGE_ERROR,
-                                "risk-scope identity audit found an invalid reservation"};
-                    }
-                    const auto found = m_risk_scope_kinds.emplace(
-                        reservation.risk_scope_id, reservation.risk_scope_kind);
-                    if (!found.second && found.first->second != reservation.risk_scope_kind) {
-                        return {StorageResultKind::INVALID_STATE,
-                                "risk scope ID is reused across RiskScopeKind values"};
-                    }
+            const auto key = detail::risk_scope_identity_key(reservation.risk_scope_id);
+            ++m_risk_scope_identity_checks;
+            const auto existing = m_storage.m_admission_scope_index.find(key, m_transaction);
+            if (existing) {
+                const auto document = nlohmann::json::parse(*existing);
+                if (document.at("schema_version") != trading_storage_schema_version) {
+                    return fail({StorageResultKind::UNSUPPORTED_SCHEMA,
+                                 "unsupported risk-scope identity schema"});
                 }
-                m_risk_scope_kinds_loaded = true;
-            }
-            if (pending) {
-                const auto found = m_risk_scope_kinds.find(pending->risk_scope_id);
-                if (found != m_risk_scope_kinds.end() &&
-                    found->second != pending->risk_scope_kind) {
-                    return {StorageResultKind::INVALID_STATE,
-                            "risk scope ID is reused across RiskScopeKind values"};
+                const auto& kind = document.at("risk_scope_kind");
+                if (!kind.is_number_integer() ||
+                    (kind != static_cast<int>(RiskScopeKind::ACCOUNT) &&
+                     kind != static_cast<int>(RiskScopeKind::STRATEGY) &&
+                     kind != static_cast<int>(RiskScopeKind::GROUP))) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "invalid risk-scope identity kind"});
                 }
-                m_risk_scope_kinds.emplace(
-                    pending->risk_scope_id, pending->risk_scope_kind);
+                if (kind != static_cast<int>(reservation.risk_scope_kind)) {
+                    return fail({StorageResultKind::INVALID_STATE,
+                                 "risk scope ID is reused across RiskScopeKind values"});
+                }
+            } else {
+                // The claim and reservation share the MDBX writer transaction.
+                m_storage.m_admission_scope_index.insert(key,
+                    nlohmann::json{{"schema_version", trading_storage_schema_version},
+                                   {"risk_scope_kind", static_cast<int>(reservation.risk_scope_kind)}}.dump(),
+                    m_transaction);
             }
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
-            return {StorageResultKind::STORAGE_ERROR, error.what()};
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
         }
     }
 
@@ -1722,8 +1729,6 @@ public:
                                  "reservation immutable identity changed"});
                 }
             }
-            const auto scope_kinds = validate_risk_scope_kind_consistency(&value);
-            if (scope_kinds.kind != StorageResultKind::APPLIED) return scope_kinds;
             const auto index_ready = ensure_admission_scope_index_ready();
             if (index_ready.kind != StorageResultKind::APPLIED) return index_ready;
             const auto result = put_revisioned(
@@ -2309,6 +2314,16 @@ public:
     /// \brief Index entries visited by scope validation and group cleanup.
     std::size_t admission_scope_index_visits() const noexcept {
         return m_admission_scope_index_visits;
+    }
+
+    /// \brief Persistent scope-identity point lookups in this Unit of Work.
+    std::size_t risk_scope_identity_checks() const noexcept {
+        return m_risk_scope_identity_checks;
+    }
+
+    /// \brief Canonical reservations loaded by explicit projection rebuilds.
+    std::size_t reservation_history_visits() const noexcept {
+        return m_reservation_history_visits;
     }
 
     /// \brief Allocates a journal event identity inside this Unit of Work.
@@ -3065,7 +3080,9 @@ private:
             if (marker) {
                 const auto document = nlohmann::json::parse(*marker);
                 if (document.value("schema_version", std::uint32_t{0}) !=
-                    trading_storage_schema_version) {
+                    trading_storage_schema_version ||
+                    document.value("scope_identity_version", std::uint32_t{0}) !=
+                    detail::admission_scope_identity_version) {
                     return fail({StorageResultKind::UNSUPPORTED_SCHEMA,
                                  "unsupported admission scope index schema"});
                 }
@@ -3083,7 +3100,7 @@ private:
             }
             m_storage.m_admission_scope_index.insert_or_assign(
                 detail::admission_scope_index_marker,
-                nlohmann::json{{"schema_version", trading_storage_schema_version}}.dump(),
+                detail::admission_scope_index_schema().dump(),
                 m_transaction);
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
@@ -3125,6 +3142,8 @@ private:
     StorageResult sync_reservation_scope_index(
         const std::optional<ReservationRecord>& previous,
         const ReservationRecord& current) {
+        const auto identity = bind_risk_scope_identity(current);
+        if (identity.kind != StorageResultKind::APPLIED) return identity;
         if (previous && active_reservation_state(previous->state)) {
             erase_scope_index_entry(previous->risk_scope_id, "reservation",
                                     std::to_string(previous->reservation_id));
@@ -3288,8 +3307,8 @@ private:
     std::size_t m_roster_validation_checks = 0;
     std::size_t m_admission_scope_index_visits = 0;
     bool m_rebuilt_admission_scope_index = false;
-    std::map<std::uint64_t, RiskScopeKind> m_risk_scope_kinds;
-    bool m_risk_scope_kinds_loaded = false;
+    std::size_t m_risk_scope_identity_checks = 0;
+    std::size_t m_reservation_history_visits = 0;
 };
 
 inline TradingSystemStorage::UnitOfWork TradingSystemStorage::begin() {

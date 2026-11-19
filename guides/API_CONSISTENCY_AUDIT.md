@@ -39,16 +39,40 @@ release/settlement is derived from terminal settlement evidence.
 ### Risk-scope identity
 
 Canonical reservation records persist both `RiskScopeKind` and `risk_scope_id`.
-The admission projection is deliberately keyed by the numeric scope ID. Batch 6
-enforces one `RiskScopeKind` per numeric ID across durable reservation records and
-fails closed during admission/index audit if `ACCOUNT:42` and `STRATEGY:42` are
-present together. The kind remains part of the canonical record and is checked
-when records are hydrated. Reusing one numeric ID for different scope kinds is
-therefore invalid configuration, not a supported aliasing mechanism. The
+The admission projection is deliberately keyed by the numeric scope ID. Its
+`@scope-kind:<id>` keys bind each ID to one `RiskScopeKind`, including after all
+its reservations settle or release. Each reservation write checks this key in
+the same MDBX writer transaction as its canonical record; a conflicting kind,
+malformed claim or unsupported schema aborts the entire UnitOfWork. Rebuild
+derives claims from all canonical reservations and likewise aborts on mixed
+kinds. Reusing one numeric ID for different scope kinds is therefore invalid
+configuration, not a supported aliasing mechanism. The kind remains part of the
+canonical record and is checked when records are hydrated. The
 in-memory `RiskAdmission` API still receives a caller-supplied typed scope, so
 callers must preserve that global uniqueness invariant before any durable record
-exists. The projection schema is unchanged in Batch 6; a future migration would
-be needed before changing this key contract.
+exists.
+
+This is a bounded, rebuildable projection upgrade, not a canonical DTO/table
+migration. The existing admission index marker now includes
+`scope_identity_version: 1`. An older projection fails closed until the existing
+explicit `rebuild_admission_scope_index()` commits; startup audit does not repair
+it. All runtime writers of one environment must use this projection version;
+mixed old/new writer binaries are unsupported. No new named table is introduced.
+
+Ordinary writes perform one identity point lookup (MDBX tree lookup, not O(N)
+history traversal) and at most one claim insert, independent of completed
+history. The scaling test measures zero historical visits per fresh UnitOfWork
+at both 32 and 2,048 completed reservations. Startup audit/rebuild remains a full
+maintenance pass. Claims add O(distinct scope IDs) persistent entries and are not
+copied into a per-transaction historical map.
+
+Rejected alternatives: a per-UnitOfWork map reloads all history on every write;
+a process-local cache cannot arbitrate independent MDBX writers. Durable claims
+instead share MDBX's serialized writer boundary, so a later writer observes the
+previous committed claim. Raw `connection()` maintenance writes require a
+quiescent audit/rebuild or reopen before resuming runtime, as documented in the
+[recovery guide](trading-system-batch5c.md). Arbitrary concurrent raw-table
+mutation is not a supported integrity contract.
 
 ### Result and lifecycle APIs
 
@@ -66,5 +90,6 @@ include root. The standalone Batch 6 consumer test includes only
 and aggregation components. It deliberately does not include `examples/` or
 `tests/support/`.
 
-No production API, durable schema, SettlementId namespace rule, or Batch 6
-behavioral contract was changed as part of this audit.
+Canonical DTOs, named tables, SettlementId namespace rules and unrelated public
+APIs are unchanged. The rebuildable admission projection version and two UOW
+diagnostic counters are the bounded additions described above.
