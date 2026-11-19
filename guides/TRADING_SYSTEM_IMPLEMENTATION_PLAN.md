@@ -125,9 +125,13 @@ SyntheticSignal
   -> PersistentState
 ```
 
-The same slice then adds one martingale step, one filter rejection and a
-restart/recovery cycle. It must run as ordinary C++ with no GUI, graph engine,
-real account or broker network.
+The same slice now adds one persisted loss step, filter and risk rejection,
+real MDBX reopen, four crash boundaries and a multi-account late-member group.
+It runs as ordinary C++17 with no GUI, graph engine, real account or broker
+network. See [Trading System Batch 6](trading-system-batch6.md). The bounded
+`LossStepStake` policy is reusable but is not a complete Martingale framework.
+Preparation can also apply the canonical series `begin` transition in the same
+Unit of Work when an expected series revision is supplied.
 
 ## Batch 7: Host and Broker Adapters
 

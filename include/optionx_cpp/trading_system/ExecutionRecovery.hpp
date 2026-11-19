@@ -185,6 +185,8 @@ struct SimulatedExecutionCommand {
     std::string client_operation_id;
     std::uint64_t account_id = 0;
     std::uint64_t trade_id = 0;
+    IntentId intent_id = 0;
+    ExecutionGroupId execution_group_id = 0;
 };
 
 enum class SimulatedSubmissionPlan {
@@ -213,11 +215,14 @@ public:
         std::uint64_t account_id = 0;
         std::uint64_t trade_id = 0;
         std::optional<TradeSettlement> settlement;
+        IntentId intent_id = 0;
+        ExecutionGroupId execution_group_id = 0;
     };
 
     /// \brief State that belongs to the simulated external broker, not OptionX.
     struct State {
         std::uint64_t next_broker_id = 0;
+        std::uint64_t next_settlement_id = 0;
         std::map<std::string, std::size_t> submission_counts;
         std::vector<HistoryEntry> history;
     };
@@ -253,8 +258,32 @@ public:
             match = &entry;
         }
         if (!match) return false;
+        if (!settlement.valid() || match->intent_id == 0 ||
+            match->execution_group_id == 0 ||
+            settlement.intent_id != match->intent_id ||
+            settlement.execution_group_id != match->execution_group_id ||
+            settlement.trade_id != match->trade_id) {
+            return false;
+        }
+        if (match->settlement) {
+            return same_terminal_evidence(*match->settlement, settlement);
+        }
         match->settlement = std::move(settlement);
         return true;
+    }
+
+    std::optional<TradeSettlement> settlement_for(const std::string& operation_id) const {
+        const auto matches = matching_entries(operation_id);
+        if (matches.size() != 1 || !matches.front()->settlement) return std::nullopt;
+        return matches.front()->settlement;
+    }
+
+    SettlementId next_settlement_id() noexcept {
+        const auto maximum_counter = external_settlement_namespace_bit - 1;
+        if (m_state->next_settlement_id >= maximum_counter) return 0;
+        // The high bit identifies the simulated broker namespace. Local MDBX
+        // settlement sequences therefore cannot collide in ordinary operation.
+        return external_settlement_namespace_bit + ++m_state->next_settlement_id;
     }
 
     SimulatedSubmissionResult submit(const SimulatedExecutionCommand& command) {
@@ -277,6 +306,8 @@ public:
         entry.client_operation_id = command.client_operation_id;
         entry.account_id = command.account_id;
         entry.trade_id = command.trade_id;
+        entry.intent_id = command.intent_id;
+        entry.execution_group_id = command.execution_group_id;
         entry.broker_trade_id = "broker-" + std::to_string(++m_state->next_broker_id);
         m_state->history.push_back(entry);
         const bool id_available = plan != SimulatedSubmissionPlan::ACCEPTED_WITHOUT_BROKER_ID;
@@ -330,7 +361,11 @@ private:
             const bool operation_match = entry.operation_id == operation.operation_id;
             const bool client_match = !operation.client_operation_id.empty() &&
                                        entry.client_operation_id == operation.client_operation_id;
-            if ((operation_match || client_match) &&
+            const bool intent_match = entry.intent_id == 0 ||
+                                      entry.intent_id == operation.intent_id;
+            const bool group_match = entry.execution_group_id == 0 ||
+                                     entry.execution_group_id == operation.group_id;
+            if ((operation_match || client_match) && intent_match && group_match &&
                 entry.account_id == operation.account_id &&
                 entry.trade_id == operation.trade_id) {
                 result.push_back(&entry);
@@ -879,7 +914,8 @@ public:
                           const ExecutionRosterRecord& roster,
                           const std::vector<ReservationRecord>& reservations,
                           const std::vector<PhysicalTradeRecord>& physical_trades,
-                          const std::vector<const RiskAdmission*>& admission_owners) const {
+                          const std::vector<const RiskAdmission*>& admission_owners,
+                          std::optional<std::uint64_t> expected_series_revision = std::nullopt) const {
         if (!intent.valid() || intent.status != IntentStatus::ADMITTED || !roster.valid() ||
             reservations.size() != roster.members.size() ||
             physical_trades.size() != roster.members.size()) {
@@ -966,6 +1002,10 @@ public:
             result.kind != StorageResultKind::DUPLICATE) return result;
         if (auto result = unit.put_roster(roster); result.kind != StorageResultKind::APPLIED &&
             result.kind != StorageResultKind::DUPLICATE) return result;
+        if (expected_series_revision) {
+            const auto result = unit.begin_prepared_series(intent, roster, *expected_series_revision);
+            if (!result.succeeded()) return result;
+        }
         for (std::size_t i = 0; i < reservations.size(); ++i) {
             if (reservations[i].state_revision != 0 || physical_trades[i].state_revision != 0) {
                 return {StorageResultKind::INVALID_ARGUMENT,
@@ -1084,7 +1124,9 @@ public:
         const auto response = adapter.submit({current.operation_id,
                                                current.client_operation_id,
                                                current.account_id,
-                                               current.trade_id});
+                                               current.trade_id,
+                                               current.intent_id,
+                                               current.group_id});
         auto observed = started;
         if (!next_revision_of(started.state_revision, observed.state_revision)) {
             return {StorageResultKind::INVALID_ARGUMENT, "execution operation revision overflow"};
