@@ -4,9 +4,13 @@
 
 This is the foundation decision for the `optionx::trading_system` domain.
 It is intentionally independent of ADELIA, MegaConnector, GUI code and broker
-implementations. Batches 1 through 4 provide tested in-memory contracts. The
-durable boundary is specified in [Batch 5A](trading-system-batch5a.md); this
-document still does not authorize a production runtime by itself.
+implementations. Batches 1 through 6 are merged: the in-memory contracts are
+extended by durable local storage, simulated recovery and an offline synthetic
+composition. The durable boundary is specified in [Batch 5A](trading-system-batch5a.md)
+and implemented by [5B](trading-system-batch5b.md), [5C](trading-system-batch5c.md)
+and [6](trading-system-batch6.md). This does not authorize a production runtime.
+[Batch 7A](trading-system-batch7a.md) proposes integration with the existing
+platform API, without changing its broker semantics.
 
 ## Responsibility Boundary
 
@@ -77,6 +81,13 @@ retry or release of reserved risk. Terminal delivery is idempotent by
 `intent_id`, `execution_group_id`, `trade_id` and a settlement/event identity;
 duplicate callbacks must not advance a series twice.
 
+That generic unknown state does not redefine broker `TradeState`.
+IntradeBar `OPEN_ERROR` retains the established unsuccessful-opening contract;
+`OPEN_SUCCESS` confirms opening and `CHECK_ERROR` preserves that fact while
+its result is unavailable. See the [7A correspondence](trading-system-batch7a.md)
+for missing-observation recovery, evidence-encoding gaps and retry ownership.
+The existing platform's managers, callbacks and retry behavior remain unchanged.
+
 The state source of truth is durable operation state. Event delivery is a
 notification mechanism and cannot be required to reach every upstream module
 for correctness. RAII manages subscriptions and runtime resources; it does
@@ -86,8 +97,9 @@ For Batch 5, the durable source of truth is a logical operation journal with
 idempotency receipts and projections for physical trade and series queries.
 `TradeRecordDB` and `SignalRecordDB` remain useful physical/source adapters,
 but their current standalone write methods do not provide a shared Unit of
-Work. A future storage adapter must use one MDBX transaction for coordinated
-local facts or explicitly use recovery rather than claim atomicity.
+Work. `TradingSystemStorage::UnitOfWork` now supplies that shared transaction
+for trading-system facts; standalone record-DB writes remain separate and need
+an explicit replayable projection protocol rather than a claim of atomicity.
 
 ## Branching and Execution Cardinality
 

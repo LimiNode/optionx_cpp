@@ -5,6 +5,23 @@ filter, sizing, risk, durable-storage, settlement and recovery contracts can be
 used by one ordinary C++17 caller. It is not a production `TradingSystem`
 facade, scheduler, graph engine or broker adapter.
 
+## Completion
+
+Batches 1-6 are merged. Batch 6 was accepted on
+`854d4d95a32e6e0ca7c419d738bee1372d9330f8` and squash-merged in
+[PR #192](https://github.com/LimiNode/optionx_cpp/pull/192) as
+`47ec37b825da9163bfa7ed3fe09f2d4dff0d1797`.
+Post-merge [Ubuntu Smoke](https://github.com/LimiNode/optionx_cpp/actions/runs/44958086612)
+and [Windows Smoke](https://github.com/LimiNode/optionx_cpp/actions/runs/44958086599)
+passed on that merge SHA. Its tree matches the reviewed HEAD exactly.
+Local MinGW/MSVC regression reruns passed 189/189 each, including 37 Batch 6
+tests, plus three C++17 consumer executables per compiler.
+
+These are offline guarantees. No live opening, server-side idempotency,
+complete broker history or live recovery correctness was established by this
+batch. The next gate is [documentary Batch 7A](trading-system-batch7a.md), not a
+production promotion of SyntheticHost.
+
 ## Pipeline
 
 The test-only `optionx::test_support::SyntheticHost` in
@@ -83,6 +100,14 @@ advancing when its low 63-bit counter is exhausted.
   boundary/rebuild cases;
 - durable policy/account-binding changes failing closed.
 
+The corrective regressions also cover roster order beyond single-digit IDs,
+simulated broker identity binding, an indexed UNKNOWN before terminal evidence,
+and terminal anchor/idempotency after reopen. Scope-kind conflict and malformed
+claims forbid commit; reopen confirms no partial writes. Ordinary reservation
+writes perform one persistent identity point lookup and zero historical visits
+at both 32 and 2,048 completed records. The lookup has MDBX tree cost, not a
+claim of constant-time complexity.
+
 The integration test uses deterministic synthetic time and a real MDBX environment. No live
 credentials, network broker or wall-clock sleep is involved.
 
@@ -101,8 +126,40 @@ framework.
 
 ## Scope limits
 
-The example does not provide live execution, a generic module graph, a
+The test harness does not provide live execution, a generic module graph, a
 production scheduler, broker-specific reconciliation, FX conversion, GUI,
 MegaConnector/ADELIA integration or a new storage engine. Those remain later
-integration boundaries. Batch 7 must connect such hosts to platform adapters
-only after this offline composition remains accepted.
+integration boundaries. Batch 7A first defines how existing platform contracts
+can be connected without turning this harness into the production runtime.
+
+## Admission Projection Upgrade
+
+The rebuildable `ts_admission_scope_index` now stores `@scope-kind:<id>` claims
+outside active `scope:<id>:` ranges and a `scope_identity_version: 1` marker.
+Claims survive settlement/release so a numeric `ACCOUNT` scope cannot later be
+reused as a `STRATEGY` scope. They are written in the same MDBX transaction as
+reservations; ordinary writes do not reload all reservation history.
+
+For an older projection:
+
+1. Stop admission and quiesce **all** writers to the environment. Take a
+   consistent backup with the host's normal MDBX maintenance procedure.
+2. Open with the upgraded binary in maintenance mode. Startup audit compares a
+   rebuild in a rolled-back transaction; it never silently repairs the index.
+   A failed audit keeps new admission closed.
+3. In one UOW, call `rebuild_admission_scope_index()` and check for `APPLIED`
+   before `commit()`. Any failure, including mixed scope kinds in canonical
+   history, must roll back the complete UOW. Do not delete or rewrite financial
+   facts to make an invalid rebuild pass.
+4. Check successful commit and rerun `audit_admission_scope_index()`. Before
+   resuming execution, run recovery/readiness checks and hydrate authoritative
+   risk/series/MM owners from durable facts; a projection audit is not complete
+   execution-chain recovery.
+5. Resume only compatible writer binaries. Do not mix old/new library writers
+   against the same environment. Raw `connection()` maintenance writes require
+   another quiescent audit/rebuild or reopen before runtime admission.
+
+No canonical DTO, named-table or storage-schema migration is involved. This is
+an explicit projection upgrade, not permission for an online rolling upgrade
+with incompatible writers. See [recovery details](trading-system-batch5c.md)
+and the [API audit](API_CONSISTENCY_AUDIT.md).
