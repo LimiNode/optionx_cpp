@@ -99,6 +99,31 @@ private:
     MoneyAmount m_amount;
 };
 
+/// \brief Pure, capped one-loss-step sizing; progression state belongs to the caller.
+/// \details A loss selects base * multiplier, never an unbounded exponential ladder.
+class LossStepStake {
+public:
+    LossStepStake(MoneyAmount base, std::int64_t multiplier)
+        : m_base(std::move(base)), m_multiplier(multiplier) {}
+
+    SizingDecision evaluate(const TradingDecisionContext& context, bool after_loss) const {
+        if (m_multiplier <= 1) {
+            return SizingDecision::rejected(SizingReason::INVALID_CONFIGURATION);
+        }
+        auto decision = FixedStake(m_base).evaluate(context);
+        if (!decision.amount || !after_loss) return decision;
+        if (m_base.units > (std::numeric_limits<std::int64_t>::max)() / m_multiplier) {
+            return SizingDecision::rejected(SizingReason::NUMERIC_OVERFLOW);
+        }
+        decision.amount->units *= m_multiplier;
+        return decision;
+    }
+
+private:
+    MoneyAmount m_base;
+    std::int64_t m_multiplier;
+};
+
 /// \brief Calculates a fixed percentage of a supported balance snapshot.
 class PercentOfBalance {
 public:

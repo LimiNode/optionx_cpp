@@ -27,6 +27,9 @@
 namespace optionx::trading_system {
 
 inline constexpr std::uint32_t trading_storage_schema_version = 1;
+/// \brief Reserved high-bit namespace for externally assigned settlement IDs.
+inline constexpr std::uint64_t external_settlement_namespace_bit =
+    std::uint64_t{1} << 63;
 
 enum class StorageResultKind {
     APPLIED,
@@ -400,6 +403,16 @@ inline std::pair<std::string, std::string> group_index_bounds(ExecutionGroupId g
 }
 
 inline constexpr const char* admission_scope_index_marker = "@schema";
+inline constexpr std::uint32_t admission_scope_identity_version = 1;
+
+inline nlohmann::json admission_scope_index_schema() {
+    return {{"schema_version", trading_storage_schema_version},
+            {"scope_identity_version", admission_scope_identity_version}};
+}
+
+inline std::string risk_scope_identity_key(std::uint64_t id) {
+    return "@scope-kind:" + std::to_string(id);
+}
 
 inline std::pair<std::string, std::string> admission_scope_index_bounds(
     std::uint64_t risk_scope_id) {
@@ -1405,6 +1418,9 @@ public:
             }
             auto candidate = next;
             if (sequence_name == "settlement") {
+                if (candidate >= external_settlement_namespace_bit) {
+                    return fail_sequence("local settlement namespace exhausted");
+                }
                 // put_settlement() maintains this high-water mark atomically.
                 // A missing sequence on a non-empty legacy table requires the
                 // explicit rebuild_settlement_sequence() maintenance pass;
@@ -1447,14 +1463,31 @@ public:
                     return fail({StorageResultKind::STORAGE_ERROR,
                                  "settlement identity is malformed"});
                 }
-                if (used > maximum) maximum = used;
+                if (used < external_settlement_namespace_bit && used > maximum) {
+                    maximum = used;
+                }
             }
-            if (maximum == (std::numeric_limits<std::uint64_t>::max)()) {
-                return fail({StorageResultKind::INVALID_ARGUMENT,
-                             "durable settlement identifier exhausted"});
+            const auto local_maximum = external_settlement_namespace_bit - 1;
+            const auto rebuilt_next = maximum == local_maximum
+                ? external_settlement_namespace_bit : maximum + 1;
+            const auto current = m_storage.m_sequences.find("settlement", m_transaction);
+            std::uint64_t next = rebuilt_next;
+            if (current) {
+                std::size_t length = 0;
+                const auto existing_next = std::stoull(*current, &length);
+                if (length != current->size() || existing_next == 0) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "settlement identifier sequence is malformed"});
+                }
+                // A previous maintenance run may have included external IDs.
+                // Repair that invalid local counter from local facts only.
+                if (existing_next < external_settlement_namespace_bit &&
+                    existing_next > next) {
+                    next = existing_next;
+                }
             }
             m_storage.m_sequences.insert_or_assign(
-                "settlement", std::to_string(maximum + 1), m_transaction);
+                "settlement", std::to_string(next), m_transaction);
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
             return fail({StorageResultKind::STORAGE_ERROR, error.what()});
@@ -1475,15 +1508,16 @@ public:
             }
             m_storage.m_admission_scope_index.insert_or_assign(
                 detail::admission_scope_index_marker,
-                nlohmann::json{{"schema_version", trading_storage_schema_version}}.dump(),
+                detail::admission_scope_index_schema().dump(),
                 m_transaction);
 
             std::vector<std::pair<std::string, std::string>> encoded_reservations;
             m_storage.m_reservations.load(encoded_reservations, m_transaction);
+            m_reservation_history_visits += encoded_reservations.size();
             for (const auto& entry : encoded_reservations) {
                 const auto reservation = detail::reservation_from_json(
                     nlohmann::json::parse(entry.second));
-                if (!reservation.valid()) {
+                if (!valid_schema(reservation.schema_version) || !reservation.valid()) {
                     return fail({StorageResultKind::STORAGE_ERROR,
                                  "cannot rebuild admission index from invalid reservation"});
                 }
@@ -1537,6 +1571,42 @@ public:
     }
 
 private:
+    StorageResult bind_risk_scope_identity(const ReservationRecord& reservation) {
+        try {
+            const auto key = detail::risk_scope_identity_key(reservation.risk_scope_id);
+            ++m_risk_scope_identity_checks;
+            const auto existing = m_storage.m_admission_scope_index.find(key, m_transaction);
+            if (existing) {
+                const auto document = nlohmann::json::parse(*existing);
+                if (document.at("schema_version") != trading_storage_schema_version) {
+                    return fail({StorageResultKind::UNSUPPORTED_SCHEMA,
+                                 "unsupported risk-scope identity schema"});
+                }
+                const auto& kind = document.at("risk_scope_kind");
+                if (!kind.is_number_integer() ||
+                    (kind != static_cast<int>(RiskScopeKind::ACCOUNT) &&
+                     kind != static_cast<int>(RiskScopeKind::STRATEGY) &&
+                     kind != static_cast<int>(RiskScopeKind::GROUP))) {
+                    return fail({StorageResultKind::STORAGE_ERROR,
+                                 "invalid risk-scope identity kind"});
+                }
+                if (kind != static_cast<int>(reservation.risk_scope_kind)) {
+                    return fail({StorageResultKind::INVALID_STATE,
+                                 "risk scope ID is reused across RiskScopeKind values"});
+                }
+            } else {
+                // The claim and reservation share the MDBX writer transaction.
+                m_storage.m_admission_scope_index.insert(key,
+                    nlohmann::json{{"schema_version", trading_storage_schema_version},
+                                   {"risk_scope_kind", static_cast<int>(reservation.risk_scope_kind)}}.dump(),
+                    m_transaction);
+            }
+            return {StorageResultKind::APPLIED, {}};
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     friend class TradingSystemStorage;
 
     /// \brief Compares a full rebuild with the index, then rolls it back.
@@ -1727,6 +1797,91 @@ public:
         }
     }
 
+    /// \brief Begins a series in the same transaction as execution preparation.
+    /// \details Uses canonical progression, not a caller-fabricated waiting checkpoint.
+    /// Only an identical still-waiting preparation may be replayed.
+    StorageResult begin_prepared_series(const TradeIntent& intent,
+                                       const ExecutionRosterRecord& roster,
+                                       std::uint64_t expected_revision) {
+        if (!intent.series_id || !roster.valid() || roster.intent_id != intent.intent_id ||
+            roster.group_id != intent.execution_group.group_id ||
+            roster.expected_members != intent.execution_group.expected_members) {
+            return fail({StorageResultKind::INVALID_ARGUMENT, "invalid series preparation binding"});
+        }
+        try {
+            const auto stored_roster = m_storage.m_rosters.find(
+                std::to_string(roster.group_id), m_transaction);
+            const auto stored_intent = m_storage.m_intents.find(
+                std::to_string(intent.intent_id), m_transaction);
+            if (!stored_roster || !stored_intent ||
+                *stored_roster != detail::roster_to_json(roster).dump() ||
+                *stored_intent != nlohmann::json{{"schema_version", trading_storage_schema_version},
+                                               {"intent", nlohmann::json(intent)}}.dump()) {
+                return fail({StorageResultKind::CONFLICT, "series preparation lacks durable intent/roster"});
+            }
+            const auto encoded = m_storage.m_series.find(
+                std::to_string(intent.series_id), m_transaction);
+            if (!encoded) return fail({StorageResultKind::NOT_FOUND, "series checkpoint is missing"});
+            auto checkpoint = detail::checkpoint_from_json(nlohmann::json::parse(*encoded));
+            if (!detail::durable_record_valid(checkpoint)) {
+                return fail({StorageResultKind::INVALID_STATE, "invalid durable series checkpoint"});
+            }
+            if (expected_revision != (std::numeric_limits<std::uint64_t>::max)() &&
+                checkpoint.series.state_revision == expected_revision + 1 &&
+                checkpoint.status == SeriesStatus::WAITING_OUTCOME &&
+                checkpoint.current_intent_id == intent.intent_id &&
+                checkpoint.current_group_id == roster.group_id &&
+                checkpoint.series.origin_signal_id == intent.origin_signal_id &&
+                intent.series_step >= 0 &&
+                checkpoint.current_step == static_cast<std::uint32_t>(intent.series_step) &&
+                std::find(checkpoint.used_intent_keys.begin(), checkpoint.used_intent_keys.end(),
+                          intent.idempotency_key) != checkpoint.used_intent_keys.end()) {
+                return {StorageResultKind::DUPLICATE, {}};
+            }
+            if (checkpoint.series.state_revision != expected_revision) {
+                return fail({StorageResultKind::REVISION_CONFLICT, "stale series preparation revision"});
+            }
+            if (checkpoint.status != SeriesStatus::ACTIVE) {
+                return fail({StorageResultKind::INVALID_STATE, "series is not idle"});
+            }
+            const auto currency = roster.members.front().stake.currency;
+            const auto precision = roster.members.front().stake.precision;
+            std::vector<std::uint64_t> trade_ids;
+            for (const auto& member : roster.members) {
+                if (member.stake.currency != currency ||
+                    member.stake.precision != precision) {
+                    return fail({StorageResultKind::INVALID_ARGUMENT,
+                                 "series preparation requires a single valuation currency"});
+                }
+                trade_ids.push_back(member.trade_id);
+            }
+            SeriesSnapshot before{checkpoint.series, checkpoint.status,
+                checkpoint.current_intent_id, checkpoint.current_group_id,
+                checkpoint.current_step, checkpoint.current_outcome};
+            SeriesProgression owner(checkpoint.series);
+            if (owner.hydrate(before, {}, checkpoint.receipts,
+                    {checkpoint.used_intents.begin(), checkpoint.used_intents.end()},
+                    {checkpoint.used_intent_keys.begin(), checkpoint.used_intent_keys.end()}) !=
+                    ProgressionResult::APPLIED ||
+                owner.begin(intent, trade_ids, currency, precision, expected_revision) !=
+                    ProgressionResult::APPLIED) {
+                return fail({StorageResultKind::INVALID_STATE, "canonical series begin rejected preparation"});
+            }
+            const auto waiting = owner.snapshot();
+            checkpoint.series = waiting.series;
+            checkpoint.status = waiting.status;
+            checkpoint.current_intent_id = waiting.current_intent_id;
+            checkpoint.current_group_id = waiting.current_group_id;
+            checkpoint.current_step = waiting.current_step;
+            checkpoint.current_outcome = waiting.outcome;
+            checkpoint.used_intents.push_back(intent.intent_id);
+            checkpoint.used_intent_keys.push_back(intent.idempotency_key);
+            return put_series(checkpoint, expected_revision);
+        } catch (const std::exception& error) {
+            return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+        }
+    }
+
     StorageResult put_money_management(const MoneyManagementStateRecord& value,
                                        std::uint64_t expected_revision) {
         if (!valid_schema(value.schema_version)) {
@@ -1763,7 +1918,9 @@ public:
             const auto required_next = settlement_id ==
                 (std::numeric_limits<std::uint64_t>::max)()
                 ? settlement_id : settlement_id + 1;
-            if (!current || current_next < required_next) {
+            const bool external_namespace =
+                (settlement_id & external_settlement_namespace_bit) != 0;
+            if (!external_namespace && (!current || current_next < required_next)) {
                 m_storage.m_sequences.insert_or_assign(
                     "settlement", std::to_string(required_next), m_transaction);
             }
@@ -2157,6 +2314,16 @@ public:
     /// \brief Index entries visited by scope validation and group cleanup.
     std::size_t admission_scope_index_visits() const noexcept {
         return m_admission_scope_index_visits;
+    }
+
+    /// \brief Persistent scope-identity point lookups in this Unit of Work.
+    std::size_t risk_scope_identity_checks() const noexcept {
+        return m_risk_scope_identity_checks;
+    }
+
+    /// \brief Canonical reservations loaded by explicit projection rebuilds.
+    std::size_t reservation_history_visits() const noexcept {
+        return m_reservation_history_visits;
     }
 
     /// \brief Allocates a journal event identity inside this Unit of Work.
@@ -2913,7 +3080,9 @@ private:
             if (marker) {
                 const auto document = nlohmann::json::parse(*marker);
                 if (document.value("schema_version", std::uint32_t{0}) !=
-                    trading_storage_schema_version) {
+                    trading_storage_schema_version ||
+                    document.value("scope_identity_version", std::uint32_t{0}) !=
+                    detail::admission_scope_identity_version) {
                     return fail({StorageResultKind::UNSUPPORTED_SCHEMA,
                                  "unsupported admission scope index schema"});
                 }
@@ -2931,7 +3100,7 @@ private:
             }
             m_storage.m_admission_scope_index.insert_or_assign(
                 detail::admission_scope_index_marker,
-                nlohmann::json{{"schema_version", trading_storage_schema_version}}.dump(),
+                detail::admission_scope_index_schema().dump(),
                 m_transaction);
             return {StorageResultKind::APPLIED, {}};
         } catch (const std::exception& error) {
@@ -2973,6 +3142,8 @@ private:
     StorageResult sync_reservation_scope_index(
         const std::optional<ReservationRecord>& previous,
         const ReservationRecord& current) {
+        const auto identity = bind_risk_scope_identity(current);
+        if (identity.kind != StorageResultKind::APPLIED) return identity;
         if (previous && active_reservation_state(previous->state)) {
             erase_scope_index_entry(previous->risk_scope_id, "reservation",
                                     std::to_string(previous->reservation_id));
@@ -3136,6 +3307,8 @@ private:
     std::size_t m_roster_validation_checks = 0;
     std::size_t m_admission_scope_index_visits = 0;
     bool m_rebuilt_admission_scope_index = false;
+    std::size_t m_risk_scope_identity_checks = 0;
+    std::size_t m_reservation_history_visits = 0;
 };
 
 inline TradingSystemStorage::UnitOfWork TradingSystemStorage::begin() {

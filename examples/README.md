@@ -88,6 +88,13 @@ Currently maintained examples:
   `events.ndjson`.
 - `trade_record_db_example.cpp` demonstrates basic `TradeRecordDB` usage.
 
+Trading-system Batch 6 integration support is not an example. The deterministic
+`SyntheticHost` harness lives under
+`tests/support/trading_system/SyntheticHost.hpp` in the test-only namespace
+`optionx::test_support`; it is used by the Batch 6 integration test and is not
+part of the installed public API. Public consumer checks include only the
+documented aggregate headers.
+
 MetaTrader-facing examples live under `mql/` in terminal-like layouts:
 
 - `mql/MQL5/Include/OptionX/OptionXFileBridge.mqh`
