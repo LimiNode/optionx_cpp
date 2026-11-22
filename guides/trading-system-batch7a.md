@@ -9,9 +9,9 @@ Batches 1-6 are complete. `optionx::test_support::SyntheticHost` remains test
 support, not an installed API or a production runtime. This document introduces
 no C++ implementation, schema change, broker request or live-account test.
 
-The user's final integration clarification takes precedence over the earlier
-suggestion to reclassify IntradeBar failed-open responses. The existing platform
-API is the integration boundary, not an implementation to replace.
+The existing OptionX platform API defines the integration contract, including
+IntradeBar failed-open semantics. It is the integration boundary, not an
+implementation to replace or reclassify.
 
 The [implementation slices](trading-system-batch7-plan.md) require separate
 approval. Stop after this architecture PR; neither 7B nor live execution is
@@ -126,10 +126,10 @@ Trade open failed. Server returned an empty response; instrument may be closed o
 ```
 
 `TradeManager` converts the parser failure to `OPEN_ERROR`. Preserve that
-classification. The test proves the local contract, not a theorem about the
-external server. The user's practical observations are the basis for accepting
-this broker-specific refusal rule. No new archived live observations were
-collected or independently verified in 7A.
+classification. This is the supported broker-specific refusal rule in OptionX.
+The test proves the local contract, not the absence of external server side
+effects. No archived live observations establishing that external guarantee
+were collected or independently verified in 7A.
 
 A valid HTTP 200 with empty content is not the same as having received no valid
 HTTP response. The adapter does not inspect raw HTTP to override either legacy
@@ -175,6 +175,11 @@ fixed-point round-trip before submission. Validate finite/range/currency and
 state/sign consistency when converting broker result values; preserve the
 original numeric observation and normalization policy. Do not reconstruct net
 profit from a fresh payout, account-balance change or a `CHECK_ERROR` estimate.
+In IntradeBar, `apply_trade_check_info_to_result()` in
+[ApiResponses.hpp](../include/optionx_cpp/platforms/IntradeBarPlatform/ApiResponses.hpp)
+already sets `TradeResult::profit` to **net P&L**: WIN subtracts the stake from
+broker gross proceeds, LOSS uses `-result.amount`, and STANDOFF uses zero.
+The mapper normalizes that net value directly; it must not subtract stake again.
 An unsupported numeric fact remains raw evidence awaiting resolution, not an
 invented settlement. Multi-currency valuation keeps the approved Batch 5A/5B
 contracts and is not expanded here.
