@@ -10,9 +10,17 @@ The original sketches below are not the runtime API. See
 [Batch 2](trading-system-batch2.md) for implemented decision/sizing contracts and
 [Batch 3](trading-system-batch3.md) for fixed-point outcomes, series transitions
 and settlement idempotency. The Batch 3 owner is in-memory only, not the durable
-state/recovery adapter proposed here. See [Batch 5A](trading-system-batch5a.md)
-for the approved identity, valuation, transaction ownership and recovery
-boundaries before implementing durable storage.
+state/recovery adapter originally proposed here. [Batch 5A](trading-system-batch5a.md)
+defines the approved identity/valuation boundaries, now implemented by the
+offline [5B](trading-system-batch5b.md), [5C](trading-system-batch5c.md) and
+[6](trading-system-batch6.md) stages. The sketches remain historical design
+context, not a second current API.
+
+[Batch 7A](trading-system-batch7a.md) is the documentation-only integration
+proposal. It preserves existing platform states and callbacks: IntradeBar
+`OPEN_ERROR` is failed opening; `CHECK_ERROR` does not revoke known opening.
+Do not derive a blanket broker-error-to-unknown conversion from the generic
+`IntentStatus::EXECUTION_UNKNOWN` sketch below.
 
 ## Stable IDs and States
 

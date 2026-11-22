@@ -2,10 +2,18 @@
 
 ## Delivery Rule
 
-The new domain is delivered as small, testable batches. Batches 1 through 4 are
-merged in `main`. Batch 5 is deliberately split into architecture, durable
-storage, and recovery stages. Each stage must preserve the existing broker,
-Router, task and storage contracts and must not open live trades.
+The new domain is delivered as small, testable batches. Batches 1 through 6,
+including the separate 5A architecture, 5B storage and 5C recovery stages, are
+merged in `main`. Batch 6 merged through PR #192 as
+`47ec37b825da9163bfa7ed3fe09f2d4dff0d1797`; its post-merge
+[Ubuntu](https://github.com/LimiNode/optionx_cpp/actions/runs/44958086612) and
+[Windows](https://github.com/LimiNode/optionx_cpp/actions/runs/44958086599) smoke
+workflows passed on that exact SHA. This establishes the offline domain, not
+production runtime readiness. SyntheticHost remains test support.
+
+Batch 7A is the next documentation-only review gate. Every later stage must
+preserve the existing broker, Router, task and storage contracts; no live
+trading follows automatically from these milestones.
 
 ## Batch 0: Foundation Audit
 
@@ -135,15 +143,25 @@ Unit of Work when an expected series revision is supplied.
 
 ## Batch 7: Host and Broker Adapters
 
-Only after the synthetic slice is stable:
+The accepted synthetic slice is followed first by
+[Batch 7A: Platform Integration Contract](trading-system-batch7a.md), with a
+separate [delivery plan](trading-system-batch7-plan.md). 7A audits existing
+platform guarantees and proposes the state/identity, retry ownership,
+reconciliation, account/risk, lifecycle and offline-test boundaries. It adds no
+runtime and stops for independent review.
 
-- map ADELIA/MegaConnector nodes to small OptionX capabilities;
-- connect existing platform execution through the intent/group adapter;
-- preserve owner-loop dispatch and staged shutdown;
-- add broker-specific reconciliation paths where the broker provides enough
-  identity to make them safe.
+Proposed later PRs are a pure request/observation adapter (7B), durable receipt
+application and known-ID reconciliation on fakes (7C), then bounded offline
+integration through the existing platform layer (7D). Live execution requires
+a separate future gate. Graph/GUI work and ADELIA/MegaConnector integrations
+are not part of Batch 7.
 
-This batch must not move strategy formulas into `IntradeBarPlatform`.
+Do not alter `IntradeBarPlatform`, `TradeManager`, `RequestManager`, `TradeState`,
+callbacks or existing retry behavior without a separately confirmed defect.
+IntradeBar `OPEN_ERROR` keeps failed-open semantics; `CHECK_ERROR` keeps the
+fact of an opened trade whose result is unavailable. Existing Trading System
+unknown-execution states remain for genuinely missing evidence, not blanket
+reinterpretation of broker errors. No strategy formula belongs in the platform.
 
 ## Review Gates
 
@@ -156,7 +174,8 @@ Every batch requires:
 - no secret or live-account material in fixtures;
 - a diff review showing that unrelated user changes were preserved.
 
-Batch 5A, 5B and 5C must remain separate Draft PRs until each review gate is
-accepted. None of them includes live Polymarket integration, an exchange
+The separate Batch 5A, 5B and 5C review gates are complete. Batch 7A must remain
+a separate Draft PR until architecture review; do not start 7B automatically.
+These stages do not include live Polymarket integration, an exchange
 orderbook/position engine, a GUI/graph editor, an FX aggregation engine, or a
 new scheduler/event bus.
