@@ -3,10 +3,11 @@
 ## Status
 
 Batch 6 merged as `47ec37b825da9163bfa7ed3fe09f2d4dff0d1797`.
-[Batch 7A](trading-system-batch7a.md) is a documentation-only proposal. The
-following PR scopes are proposed, not authorized implementation. Stop for
-independent review of 7A before starting 7B. Each later slice is separately
-reviewed; none is automatically merged.
+[Batch 7A](trading-system-batch7a.md) was accepted and merged in PR #193 as
+`e81a43db85a31d6828fac72422e0fc5d384e718a`.
+[Batch 7B](trading-system-batch7b.md) implements only the pure mapper authorized
+after that review. Stop after its separate Draft PR. 7C/7D remain proposed,
+not authorized implementation; neither 7B nor later slices merge automatically.
 
 All slices preserve the existing Intrade platform, managers, `TradeState`,
 callbacks and retry behavior. Changes to the new Trading System's internal
@@ -26,7 +27,7 @@ actions. No C++ API, durable schema or dependency changes.
 
 ## 7B: Pure Observation And Request Adapter
 
-**First implementation slice proposed for review.**
+**First implementation slice, delivered for separate review.**
 
 Scope: deterministic functions translating a bound physical roster member to
 `TradeRequest` data and `TradeResult` data to a typed internal observation.

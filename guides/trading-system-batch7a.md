@@ -2,7 +2,8 @@
 
 ## Status And Scope
 
-Architecture proposal for independent review, based on
+Accepted architecture contract, merged through PR #193 as
+`e81a43db85a31d6828fac72422e0fc5d384e718a`, based on
 `main@47ec37b825da9163bfa7ed3fe09f2d4dff0d1797` after the guarded squash merge of
 [Batch 6, PR #192](https://github.com/LimiNode/optionx_cpp/pull/192).
 Batches 1-6 are complete. `optionx::test_support::SyntheticHost` remains test
@@ -14,8 +15,8 @@ IntradeBar failed-open semantics. It is the integration boundary, not an
 implementation to replace or reclassify.
 
 The [implementation slices](trading-system-batch7-plan.md) require separate
-approval. Stop after this architecture PR; neither 7B nor live execution is
-authorized by 7A.
+approval. Subsequent review authorized only the [pure 7B mapper](trading-system-batch7b.md).
+7C/7D and live execution remain gated; no runtime follows from the 7A merge.
 
 ## Decisions
 

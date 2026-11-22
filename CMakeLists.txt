@@ -1191,7 +1191,8 @@ if(OPTIONX_BUILD_TESTS)
                 CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
         endif()
         if(test_name STREQUAL "trading_system_batch4_consumer_test" OR
-           test_name STREQUAL "trading_system_batch6_consumer_test")
+           test_name STREQUAL "trading_system_batch6_consumer_test" OR
+           test_name STREQUAL "trading_system_batch7b_consumer_test")
             set_target_properties(${test_name} PROPERTIES
                 CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
         endif()

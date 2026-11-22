@@ -224,7 +224,9 @@ jobs:
           trading_system_batch3_test trading_system_batch3_consumer_test
           trading_system_batch4_test trading_system_batch4_consumer_test
           trading_system_batch5b_test trading_system_batch5c_test
-          trading_system_batch6_test trading_system_batch6_consumer_test -j
+          trading_system_batch6_test trading_system_batch6_consumer_test
+          trading_system_batch7b_test trading_system_batch7b_consumer_test
+          trade_result_query_test lifecycle_event_safety_test -j
 
       - name: Run market data tick continuity and observed history tests
         run: |
@@ -243,6 +245,10 @@ jobs:
           ./build-linux/trading_system_batch5c_test --gtest_brief=1
           ./build-linux/trading_system_batch6_test --gtest_brief=1
           ./build-linux/trading_system_batch6_consumer_test
+          ./build-linux/trading_system_batch7b_test --gtest_brief=1
+          ./build-linux/trading_system_batch7b_consumer_test
+          ./build-linux/trade_result_query_test --gtest_brief=1
+          ./build-linux/lifecycle_event_safety_test --gtest_brief=1
 
       - name: Build market_data_subscriber_base_test and example
         run: cmake --build build-linux --target market_data_subscriber_base_test market_data_subscriber_base_example -j

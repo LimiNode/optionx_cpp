@@ -20,5 +20,6 @@
 #include "trading_system/RiskAdmission.hpp"
 #include "trading_system/TradingSystemStorage.hpp"
 #include "trading_system/ExecutionRecovery.hpp"
+#include "trading_system/detail/PlatformDtoMapper.hpp"
 
 #endif // OPTIONX_HEADER_TRADING_SYSTEM_HPP_INCLUDED
