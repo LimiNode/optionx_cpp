@@ -161,10 +161,11 @@ are not part of Batch 7.
 
 Do not alter `IntradeBarPlatform`, `TradeManager`, `RequestManager`, `TradeState`,
 callbacks or existing retry behavior without a separately confirmed defect.
-IntradeBar `OPEN_ERROR` keeps failed-open semantics; `CHECK_ERROR` keeps the
-fact of an opened trade whose result is unavailable. Existing Trading System
-unknown-execution states remain for genuinely missing evidence, not blanket
-reinterpretation of broker errors. No strategy formula belongs in the platform.
+IntradeBar `OPEN_ERROR` keeps failed-open semantics; `CHECK_ERROR` preserves
+previously established opening but does not independently prove it. Existing
+Trading System unknown-execution states remain for genuinely missing evidence,
+not blanket reinterpretation of broker errors. No strategy formula belongs in
+the platform.
 
 ## Review Gates
 

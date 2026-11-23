@@ -43,7 +43,8 @@ Public API: none required in the broker/platform layer. Keep candidate mapper
 types internal until their use by the execution owner is reviewed; no new
 mandatory public facade is needed for a pure mapping test.
 
-Invariants: `OPEN_ERROR` remains failed opening, `CHECK_ERROR` retains acceptance,
+Invariants: `OPEN_ERROR` remains failed opening, `CHECK_ERROR` preserves
+previously established acceptance but does not independently establish it,
 only confirmed financial states produce normalized financial facts, and local
 queue admission is not broker acceptance. All ID-width and native-money
 conversions are checked, including preservation of source/account identity.
@@ -83,6 +84,11 @@ terminal facts survive late errors; same settlement cannot advance MM twice;
 confirmed opening is never erased by a failed result query. No automatic resend
 when no captured callback/authoritative identity exists. No arbitrary history
 candidate is promoted to a confirmed match.
+
+Persist the immutable normalization version together with the selected
+currency/precision profile and original numeric facts for converted durable
+evidence. Replay uses that version or fails closed if unsupported; it must not
+recompute historical money under the latest normalization rules.
 
 Negative tests: rejected/duplicate/conflicting receipt; stale revision; lost
 acceptance/result callback; unknown ID or string-only Intrade identity; incomplete
@@ -136,6 +142,10 @@ Dependencies/risks: 7C accepted; host-approved mailbox/freshness budgets;
 offline transport seam validated without a production API redesign. If the
 fixture requires a broader platform change, stop and request a separate design
 review rather than expanding this scope.
+
+Before 7D, resolve the separately recorded [MSVC platform-target baseline](trading-system-batch7b.md#separate-msvc-platform-baseline)
+or establish a reproducible isolated Windows-platform verification path.
+Passing Windows domain/mapper CI does not substitute for that platform check.
 
 ## Separate Live Gate
 

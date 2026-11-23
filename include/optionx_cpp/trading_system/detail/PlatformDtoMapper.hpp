@@ -228,6 +228,7 @@ struct PlatformObservation {
     MoneyProfile profile;
     MappingError error = MappingError::NONE;
     ObservationKind kind = ObservationKind::PROGRESS;
+    /// Positive proof from this observation; false does not revoke prior acceptance.
     bool proves_opening = false;
     std::string broker_trade_id;
     std::optional<OutcomeKind> outcome;
@@ -300,7 +301,6 @@ inline PlatformObservation map_observation(
             return observation;
         case TradeState::CHECK_ERROR:
             observation.kind = ObservationKind::RESULT_CHECK_FAILED;
-            observation.proves_opening = true;
             return observation;
         case TradeState::CANCELED_TRADE:
             observation.kind = ObservationKind::CANCELLATION_REPORTED;

@@ -249,7 +249,7 @@ INSTANTIATE_TEST_SUITE_P(AllStates, StateMapping, testing::Values(
     StateCase{TradeState::OPEN_ERROR, pm::ObservationKind::FAILED_OPEN, false, false},
     StateCase{TradeState::IN_PROGRESS, pm::ObservationKind::OPEN_CONFIRMED, true, false},
     StateCase{TradeState::WAITING_CLOSE, pm::ObservationKind::OPEN_CONFIRMED, true, false},
-    StateCase{TradeState::CHECK_ERROR, pm::ObservationKind::RESULT_CHECK_FAILED, true, false},
+    StateCase{TradeState::CHECK_ERROR, pm::ObservationKind::RESULT_CHECK_FAILED, false, false},
     StateCase{TradeState::WIN, pm::ObservationKind::FINANCIAL_RESULT, true, true},
     StateCase{TradeState::LOSS, pm::ObservationKind::FINANCIAL_RESULT, true, true},
     StateCase{TradeState::STANDOFF, pm::ObservationKind::FINANCIAL_RESULT, true, true},
@@ -282,7 +282,7 @@ TEST(TradingSystemBatch7B, OpenErrorPreservesOriginalErrorWithoutSettlementEvide
     EXPECT_FALSE(mapped.net_profit);
 }
 
-TEST(TradingSystemBatch7B, CheckErrorIgnoresEstimatedProfitAndPreservesOpening) {
+TEST(TradingSystemBatch7B, CheckErrorIgnoresEstimatedProfitWithoutProvingOpening) {
     Fixture f;
     auto raw = f.result(TradeState::CHECK_ERROR);
     raw.profit = 8.5;
@@ -290,11 +290,119 @@ TEST(TradingSystemBatch7B, CheckErrorIgnoresEstimatedProfitAndPreservesOpening) 
     const auto mapped = f.observe(raw);
     EXPECT_EQ(mapped.error, pm::MappingError::NONE);
     EXPECT_EQ(mapped.kind, pm::ObservationKind::RESULT_CHECK_FAILED);
-    EXPECT_TRUE(mapped.proves_opening);
+    EXPECT_FALSE(mapped.proves_opening);
     EXPECT_EQ(mapped.broker_trade_id, "123");
     EXPECT_EQ(mapped.raw.profit, 8.5);
+    EXPECT_EQ(mapped.raw.live_state, TradeState::WIN);
     EXPECT_FALSE(mapped.net_profit);
     EXPECT_FALSE(mapped.outcome);
+}
+
+TEST(TradingSystemBatch7B, ForcedCloseBeforeOpeningConfirmationDoesNotProveOpening) {
+    Fixture f;
+    f.operation.state = ts::ExecutionOperationState::SUBMISSION_STARTED;
+    f.operation.state_revision = 1;
+    auto raw = f.result(TradeState::CHECK_ERROR);
+    raw.live_state = TradeState::CHECK_ERROR;
+    raw.option_id = 0;
+    raw.option_hash.clear();
+    raw.error_code = TradeErrorCode::CLIENT_FORCED_CLOSE;
+    raw.error_desc = "Client forced close before opening confirmation.";
+    const nlohmann::json before = f.operation;
+    const auto mapped = f.observe(raw);
+    EXPECT_EQ(mapped.error, pm::MappingError::NONE);
+    EXPECT_EQ(mapped.kind, pm::ObservationKind::RESULT_CHECK_FAILED);
+    EXPECT_FALSE(mapped.proves_opening);
+    EXPECT_TRUE(mapped.broker_trade_id.empty());
+    EXPECT_FALSE(mapped.outcome);
+    EXPECT_FALSE(mapped.net_profit);
+    EXPECT_EQ(nlohmann::json(mapped.raw), nlohmann::json(raw));
+    EXPECT_EQ(nlohmann::json(mapped.operation), before);
+    EXPECT_EQ(nlohmann::json(f.operation), before);
+}
+
+TEST(TradingSystemBatch7B, InvalidResultQueryWithoutNumericIdDoesNotProveOpening) {
+    Fixture f;
+    for (const auto hash : {"", "broker-hash"}) {
+        auto raw = f.result(TradeState::CHECK_ERROR);
+        raw.live_state = TradeState::CHECK_ERROR;
+        raw.option_id = 0;
+        raw.option_hash = hash;
+        raw.error_code = TradeErrorCode::INVALID_REQUEST;
+        raw.error_desc = raw.option_hash.empty() ? "Broker trade identity is missing." :
+            "Intrade Bar trade result check requires numeric option_id.";
+        const auto mapped = f.observe(raw);
+        EXPECT_EQ(mapped.error, pm::MappingError::NONE);
+        EXPECT_EQ(mapped.kind, pm::ObservationKind::RESULT_CHECK_FAILED);
+        EXPECT_FALSE(mapped.proves_opening);
+        EXPECT_TRUE(mapped.broker_trade_id.empty());
+        EXPECT_FALSE(mapped.outcome);
+        EXPECT_FALSE(mapped.net_profit);
+        EXPECT_EQ(nlohmann::json(mapped.raw), nlohmann::json(raw));
+        EXPECT_EQ(nlohmann::json(mapped.operation), nlohmann::json(f.operation));
+    }
+}
+
+TEST(TradingSystemBatch7B, CheckErrorWithOnlySavedBrokerIdDoesNotProveOpening) {
+    Fixture f;
+    f.operation.broker_trade_id = "123";
+    auto raw = f.result(TradeState::CHECK_ERROR);
+    raw.option_id = 0;
+    const auto mapped = f.observe(raw);
+    EXPECT_EQ(mapped.error, pm::MappingError::NONE);
+    EXPECT_EQ(mapped.kind, pm::ObservationKind::RESULT_CHECK_FAILED);
+    EXPECT_FALSE(mapped.proves_opening);
+    EXPECT_EQ(mapped.broker_trade_id, "123");
+    EXPECT_EQ(mapped.operation.state, ts::ExecutionOperationState::PREPARED);
+    EXPECT_EQ(nlohmann::json(mapped.operation), nlohmann::json(f.operation));
+    EXPECT_FALSE(mapped.outcome);
+    EXPECT_FALSE(mapped.net_profit);
+}
+
+TEST(TradingSystemBatch7B, CheckErrorDoesNotDemotePreviouslyConfirmedOpening) {
+    for (const auto state : {ts::ExecutionOperationState::BROKER_ACCEPTED,
+                             ts::ExecutionOperationState::BROKER_ID_PERSISTED}) {
+        Fixture f;
+        const auto opened = f.observe(f.result(TradeState::OPEN_SUCCESS));
+        ASSERT_EQ(opened.error, pm::MappingError::NONE);
+        ASSERT_TRUE(opened.proves_opening);
+        f.operation.state = state;
+        f.operation.state_revision = 2;
+        if (state == ts::ExecutionOperationState::BROKER_ID_PERSISTED) {
+            f.operation.broker_trade_id = opened.broker_trade_id;
+        }
+        const nlohmann::json accepted = f.operation;
+        const auto checked = f.observe(f.result(TradeState::CHECK_ERROR));
+        EXPECT_EQ(checked.error, pm::MappingError::NONE);
+        EXPECT_EQ(checked.kind, pm::ObservationKind::RESULT_CHECK_FAILED);
+        EXPECT_FALSE(checked.proves_opening);
+        EXPECT_TRUE(opened.proves_opening);
+        EXPECT_EQ(nlohmann::json(checked.operation), accepted);
+        EXPECT_EQ(nlohmann::json(f.operation), accepted);
+        EXPECT_FALSE(checked.outcome);
+        EXPECT_FALSE(checked.net_profit);
+    }
+}
+
+TEST(TradingSystemBatch7B, FinalWinOrLossAfterCheckErrorRemainsFinancialEvidence) {
+    for (const auto state : {TradeState::WIN, TradeState::LOSS}) {
+        Fixture f;
+        const nlohmann::json before = f.operation;
+        const auto checked = f.observe(f.result(TradeState::CHECK_ERROR));
+        ASSERT_EQ(checked.kind, pm::ObservationKind::RESULT_CHECK_FAILED);
+        EXPECT_FALSE(checked.proves_opening);
+        EXPECT_FALSE(checked.outcome);
+        EXPECT_FALSE(checked.net_profit);
+        const auto settled = f.observe(f.result(state));
+        EXPECT_EQ(settled.error, pm::MappingError::NONE);
+        EXPECT_EQ(settled.kind, pm::ObservationKind::FINANCIAL_RESULT);
+        EXPECT_TRUE(settled.proves_opening);
+        EXPECT_EQ(settled.outcome, state == TradeState::WIN ? ts::OutcomeKind::WIN : ts::OutcomeKind::LOSS);
+        ASSERT_TRUE(settled.net_profit);
+        EXPECT_EQ(settled.net_profit->units, state == TradeState::WIN ? 800 : -1000);
+        EXPECT_EQ(nlohmann::json(settled.operation), before);
+        EXPECT_EQ(nlohmann::json(f.operation), before);
+    }
 }
 
 TEST(TradingSystemBatch7B, OpeningWithMissingBrokerIdRemainsConfirmed) {

@@ -69,7 +69,7 @@ payout and price projections are retained but never promoted to settlement.
 | `UNKNOWN`, `WAITING_OPEN` | Progress only; no opening or money assertion. |
 | `OPEN_ERROR` | Failed opening with original error; no settlement, no `NOT_SUBMITTED` assertion and no blanket unknown-execution conversion. |
 | `OPEN_SUCCESS`, `IN_PROGRESS`, `WAITING_CLOSE` | Opening confirmed; missing numeric ID remains an identity-reconciliation condition, not failed opening. |
-| `CHECK_ERROR` | Result-check failure with confirmed opening; nonzero estimated profit is not normalized as a final outcome. |
+| `CHECK_ERROR` | Result-check failure, not independent proof of opening. Preserve previously established acceptance; nonzero estimated profit is not a final outcome. |
 | `WIN`, `LOSS`, `STANDOFF` | Checked native net P&L and WIN/LOSS/DRAW, only after identity, stake, numeric and sign validation. |
 | `REFUND` | This initial full-refund profile accepts only exactly zero raw net P&L as DRAW; original REFUND is retained. Nonzero, even if it would round to zero, is unsupported. |
 | `CANCELED_TRADE` | Cancellation notification only, not proof that execution was impossible. |
@@ -81,6 +81,22 @@ fact also requires a positive numeric broker ID, either reported now or already
 bound durably. The saved string form is the canonical decimal numeric ID;
 conflicting IDs, negative IDs, overflow and malformed saved IDs fail. The hash
 is retained separately and does not substitute for Intrade's numeric check ID.
+
+`proves_opening` is a positive assertion made by this observation, not the
+stored operation's acceptance state. A false value does not prove non-execution
+or instruct the future durable owner to clear earlier acceptance. `CHECK_ERROR`
+always leaves it false, even with a reported or saved numeric broker ID: an ID
+alone supplies correlation, not independent proof of execution. The captured
+operation and raw error remain unchanged; no automatic `OPEN_ERROR` or
+`EXECUTION_UNKNOWN` conversion occurs.
+
+This distinction follows existing platform behavior, not a new HTTP rule:
+`TradeQueueManager` can finalize a still-unconfirmed `WAITING_OPEN` operation
+as `CHECK_ERROR / CLIENT_FORCED_CLOSE`, and `TradeManager::fetch_trade_result()`
+can return `CHECK_ERROR / INVALID_REQUEST` without a numeric broker ID. Neither
+establishes opening. Conversely, an earlier `OPEN_SUCCESS` or durable
+`BROKER_ACCEPTED` / `BROKER_ID_PERSISTED` fact is not demoted by a later check
+failure. A subsequent validated WIN/LOSS remains financial evidence.
 
 Identical inputs produce equivalent data. No clock, random source, counter or
 SettlementId is used. Observation kinds are classifications, not another
@@ -104,8 +120,12 @@ representation. There is no intermediate multiplication by a floating scale,
 epsilon adjustment or `long double` precision dependency. For example, 1.125
 at precision 2 becomes 1.12, 1.375 becomes 1.38, and the actual binary64 value
 of the literal 2.675 becomes 2.67. This rule does not recover discarded wire
-decimal information. Reproducible replay must retain the chosen profile/rule
-and original facts when durable receipts are implemented.
+decimal information. In 7C, every durable decision/evidence record using this
+conversion must retain the immutable normalization version
+`BINARY64_FIXED_NEAREST_EVEN_V1`, selected currency/precision profile and
+original numeric facts together. Replay must use that recorded version, never
+silently reinterpret old facts under newer rules; unsupported versions fail
+closed. This is a future persistence requirement, not a 7B codec/schema change.
 
 NaN/infinity, currency/precision mismatches and fixed-point overflow fail
 explicitly. WIN/LOSS must have the right sign both before and after rounding;
@@ -154,7 +174,7 @@ exercise pure translation without platform instances, callbacks, MDBX files,
 credentials or broker traffic. Existing parser/result-query/lifecycle and
 Batch 1-6 regressions remain separate checks. Ubuntu CI adds result-query and
 lifecycle tests; Windows CI adds only mapper/consumer to its existing matrix.
-Local MinGW GCC 15.2 and MSVC 19.44 passed all 36 new tests and the C++17
+Local MinGW GCC 15.2 and MSVC 19.44 passed all 41 mapper tests and the C++17
 consumer. Exact-head CI and full regression results are recorded in the PR;
 these offline checks do not establish new external broker guarantees.
 
@@ -165,3 +185,28 @@ constants). This is a recorded baseline limitation of those platform targets,
 not a claim that Windows CI exercises them. No workaround or platform/header
 refactor is included. MinGW/Ubuntu cover these platform regressions; the new
 mapper and domain aggregate are checked independently on MSVC.
+
+### Separate MSVC Platform Baseline
+
+Reproduce from the repository root with the existing VS 2022/MSVC 19.44 Debug
+build (`build-codex-msvc`). Run each target separately, since a failed target
+stops a multi-target build:
+
+```powershell
+cmake --build build-codex-msvc --config Debug --target intrade_bar_api_response_test --parallel 2
+cmake --build build-codex-msvc --config Debug --target trade_result_query_test --parallel 2
+```
+
+Diagnostics observed before 7B and reproduced during the corrective pass:
+
+- `build-codex-msvc/include/mdbx_containers/detail/utils.hpp:201`: C2632
+  (`char char`) and C2059, with cascading errors at lines 235/237.
+- `include/optionx_cpp/platforms/IntradeBarPlatform/RequestManager.hpp:2113`
+  and `:2671`: C3493 for uncaptured `domain_check_batch_size` and
+  `max_html_history_pages`.
+
+These are platform-header build failures, not an independently established
+third-party root cause. They do not make the pure mapper/MSVC tests fail and
+are not fixed by this PR. Before 7D, resolve them in separately reviewed work
+or establish a reproducible isolated Windows-platform verification path.
+Passing Windows domain CI alone does not discharge that platform gate.
