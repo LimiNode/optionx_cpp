@@ -230,4 +230,7 @@ stake use that currency.
 `NOT_EXECUTED_PROVEN` after an attempted command. REJECTED accepts either proof;
 CANCELLED still requires no submission. UNKNOWN and CHECK_ERROR alone cannot
 release risk or create terminal evidence. Validated physical/group transitions
-reuse the existing UOW; platform receipt application remains gated in 7C-B.
+reuse the existing UOW. [7C-B](trading-system-batch7c-b.md) supplies the internal
+sealed binding/receipt protocol, preserving prior acceptance through CHECK_ERROR,
+canonical settlement deduplication and fixed-point provenance. Its known-ID fake
+uses existing BaseTradingApi; no platform lifecycle integration is implied.

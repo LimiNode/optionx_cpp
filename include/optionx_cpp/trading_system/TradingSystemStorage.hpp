@@ -1316,6 +1316,44 @@ public:
     UnitOfWork(const UnitOfWork&) = delete;
     UnitOfWork& operator=(const UnitOfWork&) = delete;
 
+    StorageReadResult<JournalEvent> journal_by_key(const std::string& key) {
+        ++m_journal_point_reads;
+        return read_json<JournalEvent>(m_storage.m_journal, key, detail::journal_from_json);
+    }
+
+    StorageReadResult<TradeIntent> intent(IntentId id) {
+        return read_json<TradeIntent>(m_storage.m_intents, std::to_string(id),
+            [](const nlohmann::json& value) {
+                return value.contains("intent") ? value.at("intent").get<TradeIntent>() : value.get<TradeIntent>();
+            });
+    }
+
+    StorageReadResult<ExecutionRosterRecord> roster(ExecutionGroupId id) {
+        return read_json<ExecutionRosterRecord>(m_storage.m_rosters, std::to_string(id), detail::roster_from_json);
+    }
+
+    StorageReadResult<PhysicalTradeRecord> physical_trade(std::uint64_t id) {
+        return read_json<PhysicalTradeRecord>(m_storage.m_physical_trades, std::to_string(id), detail::physical_trade_from_json);
+    }
+
+    StorageReadResult<ReservationRecord> reservation(std::uint64_t id) {
+        return read_json<ReservationRecord>(m_storage.m_reservations, std::to_string(id), detail::reservation_from_json);
+    }
+
+    StorageReadResult<AccountIdentityRecord> account(std::uint64_t id) {
+        return read_json<AccountIdentityRecord>(m_storage.m_accounts, std::to_string(id), detail::account_from_json);
+    }
+
+    StorageReadResult<SettlementRecord> settlement(SettlementId id) {
+        return read_json<SettlementRecord>(m_storage.m_settlements, std::to_string(id), detail::settlement_record_from_json);
+    }
+
+    std::size_t journal_point_reads() const noexcept { return m_journal_point_reads; }
+    std::size_t terminal_index_visits() const noexcept { return m_terminal_index_visits; }
+
+    /// \brief Marks a failed staged transition uncommittable, including its earlier writes.
+    StorageResult reject(StorageResult result) { return fail(std::move(result)); }
+
     StorageResult append_journal(const JournalEvent& event) {
         if (event.event_type == "GROUP_COMPLETION") {
             return fail({StorageResultKind::INVALID_STATE,
@@ -1325,6 +1363,27 @@ public:
     }
 
 private:
+    template<class T, class Parser>
+    StorageReadResult<T> read_json(
+        const mdbxc::KeyValueTable<std::string, std::string>& table,
+        const std::string& key, Parser parser) {
+        try {
+            const auto encoded = table.find(key, m_transaction);
+            if (!encoded) return {StorageResultKind::NOT_FOUND, std::nullopt, {}};
+            const auto value = nlohmann::json::parse(*encoded);
+            if (value.at("schema_version") != trading_storage_schema_version) {
+                return {StorageResultKind::UNSUPPORTED_SCHEMA, std::nullopt, "unsupported durable schema"};
+            }
+            auto parsed = parser(value);
+            if (!detail::durable_record_valid(parsed)) {
+                return {StorageResultKind::STORAGE_ERROR, std::nullopt, "invalid durable record"};
+            }
+            return {StorageResultKind::APPLIED, std::move(parsed), {}};
+        } catch (const std::exception& error) {
+            return {StorageResultKind::STORAGE_ERROR, std::nullopt, error.what()};
+        }
+    }
+
     StorageResult append_journal_validated(const JournalEvent& event) {
         if (!valid_schema(event.schema_version) || event.event_id == 0 ||
             event.event_type.empty() || event.aggregate_id.empty() || event.idempotency_key.empty()) {
@@ -2916,6 +2975,7 @@ private:
                 bounds.first, bounds.second, m_transaction);
             std::vector<SettlementRecord> candidates;
             for (const auto& entry : index_entries) {
+                ++m_terminal_index_visits;
                 if (entry.first.rfind(bounds.first, 0) != 0) {
                     return {StorageResultKind::STORAGE_ERROR, std::nullopt,
                             "group settlement index range contains an invalid key"};
@@ -3375,6 +3435,8 @@ private:
     std::set<std::uint64_t> m_touched_reservations;
     std::size_t m_roster_validation_checks = 0;
     std::size_t m_admission_scope_index_visits = 0;
+    std::size_t m_journal_point_reads = 0;
+    std::size_t m_terminal_index_visits = 0;
     bool m_rebuilt_admission_scope_index = false;
     std::size_t m_risk_scope_identity_checks = 0;
     std::size_t m_reservation_history_visits = 0;

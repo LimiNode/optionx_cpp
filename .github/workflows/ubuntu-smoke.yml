@@ -227,6 +227,7 @@ jobs:
           trading_system_batch6_test trading_system_batch6_consumer_test
           trading_system_batch7b_test trading_system_batch7b_consumer_test
           trading_system_batch7c_a_test trading_system_batch7c_a_consumer_test
+          trading_system_batch7c_b_test trading_system_batch7c_b_consumer_test
           trade_result_query_test lifecycle_event_safety_test -j
 
       - name: Run market data tick continuity and observed history tests
@@ -250,6 +251,8 @@ jobs:
           ./build-linux/trading_system_batch7b_consumer_test
           ./build-linux/trading_system_batch7c_a_test --gtest_brief=1
           ./build-linux/trading_system_batch7c_a_consumer_test
+          ./build-linux/trading_system_batch7c_b_test --gtest_brief=1
+          ./build-linux/trading_system_batch7c_b_consumer_test
           ./build-linux/trade_result_query_test --gtest_brief=1
           ./build-linux/lifecycle_event_safety_test --gtest_brief=1
 

@@ -22,6 +22,12 @@
 
 namespace optionx::trading_system {
 
+namespace detail::platform_receipts {
+class Binding;
+struct BindingResult;
+struct ApplyResult;
+}
+
 enum class ExecutionOperationState {
     PREPARED,
     SUBMISSION_STARTED,
@@ -386,6 +392,40 @@ class ExecutionRecoveryManager {
 public:
     explicit ExecutionRecoveryManager(FakeExecutionClock& clock) : m_clock(clock) {}
 
+    /// \brief Captures an immutable native profile and request before submission (internal adapter protocol).
+    detail::platform_receipts::BindingResult capture_platform_binding(
+        TradingSystemStorage& storage, const ExecutionOperationRecord& operation,
+        CurrencyType currency, int precision) const;
+
+    /// \brief Restores a sealed binding from the existing journal; does not authorize a resend.
+    detail::platform_receipts::BindingResult restore_platform_binding(
+        const TradingSystemStorage& storage, const std::string& operation_id) const;
+
+    /// \brief Reads persisted normalization/provenance without recomputing historical money.
+    StorageReadResult<JournalEvent> platform_receipt_fact(
+        const TradingSystemStorage& storage, const detail::platform_receipts::Binding& binding,
+        const std::string& receipt_id) const;
+
+    /// \brief Stages a bound observation in the caller's UOW; failure poisons that UOW.
+    detail::platform_receipts::ApplyResult apply_platform_receipt(
+        TradingSystemStorage::UnitOfWork& unit,
+        const detail::platform_receipts::Binding& binding, const TradeResult& result,
+        const std::string& receipt_id, std::uint64_t expected_revision) const;
+
+    /// \brief Applies and commits one bound receipt, independently of logical group completion.
+    detail::platform_receipts::ApplyResult apply_platform_receipt(
+        TradingSystemStorage& storage,
+        const detail::platform_receipts::Binding& binding, const TradeResult& result,
+        const std::string& receipt_id, std::uint64_t expected_revision) const;
+
+    /// \brief Queries a confirmed numeric ID through an attested endpoint outside any UOW.
+    /// \details Caller guarantees endpoint identity/lifetime and enqueues the owned callback DTO.
+    StorageResult request_known_result(
+        TradingSystemStorage& storage, const detail::platform_receipts::Binding& binding,
+        std::uint64_t expected_revision, platforms::BaseTradingApi& api,
+        const AccountIdentityRecord& endpoint_account,
+        std::function<void(TradeResult)> callback) const;
+
     static std::string operation_key(const ExecutionOperationRecord& operation) {
         return "exec-op:" + operation.operation_id + ":" +
                std::to_string(operation.state_revision);
@@ -416,6 +456,11 @@ public:
                                                      ExecutionOperationRecord>>> chains;
         for (const auto& event : events.values) {
             try {
+                if (event.payload.contains("platform_receipt_version") &&
+                    (!event.payload.at("platform_receipt_version").is_number_integer() ||
+                     event.payload.at("platform_receipt_version") != 1)) {
+                    return corrupted(result, "unsupported platform operation extension", event);
+                }
                 const auto operation = event.payload.get<ExecutionOperationRecord>();
                 if (!operation.valid() || event.aggregate_id !=
                     "operation:" + operation.operation_id ||

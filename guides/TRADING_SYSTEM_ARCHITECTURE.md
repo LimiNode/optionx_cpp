@@ -89,6 +89,11 @@ See the [7A correspondence](trading-system-batch7a.md)
 for missing-observation recovery and retry ownership. The separate
 [7C-A evidence contract](trading-system-batch7c-a.md) distinguishes no submission
 from proven non-execution after an attempt, without rewriting legacy records.
+The [7C-B receipt protocol](trading-system-batch7c-b.md) binds mapper observations
+to pre-submission account/request facts in the existing execution owner. It uses
+point-read revision checks and the existing UOW, not a second terminal ledger.
+Known-ID queries exercise the existing BaseTradingApi role on fakes; platform
+callback scheduling, lifecycle and live execution remain outside this stage.
 The existing platform's managers, callbacks and retry behavior remain unchanged.
 
 The state source of truth is durable operation state. Event delivery is a
