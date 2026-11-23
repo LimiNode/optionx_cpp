@@ -461,6 +461,10 @@ inline detail::platform_receipts::ApplyResult ExecutionRecoveryManager::apply_pl
         }
         output.operation = current;
         if (pr::terminal(current.state)) {
+            if ((current.state == ExecutionOperationState::REJECTED ||
+                 current.state == ExecutionOperationState::CANCELLED) && mapped.proves_opening) {
+                return finish({StorageResultKind::CONFLICT, "opening contradicts terminal non-execution evidence"});
+            }
             if (!financial && !failed_open) return finish({StorageResultKind::DUPLICATE, {}});
             const auto id = current_event.payload.value("platform_settlement_id", SettlementId{0});
             const auto source = unit.journal_by_key(current_event.payload.at("platform_receipt_key").get<std::string>());

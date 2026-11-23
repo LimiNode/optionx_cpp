@@ -19,8 +19,9 @@ after the trading DTOs, without importing the full platform/HTTP stack.
 
 No broker, manager, TradeState, DTO, callback, retry or dependency changes;
 no live/demo traffic, automatic resend, scheduler or platform lifecycle work.
-Stop at this Draft PR for independent review. 7D and this PR's merge require
-separate authorization. The known [MSVC platform-target failures](trading-system-batch7b.md#separate-msvc-platform-baseline)
+The reviewed corrective scope is authorized for guarded merge after exact-head
+Windows/Ubuntu CI. Trading System development then stops at 7C-B; do not start
+7D without a new assignment. The known [MSVC platform-target failures](trading-system-batch7b.md#separate-msvc-platform-baseline)
 remain a separate gate before 7D.
 
 ## Internal Owner Protocol
@@ -128,8 +129,12 @@ The first terminal settlement ID is canonical. A new delivery of equivalent
 terminal evidence returns that ID without another settlement or MM update.
 Changed normalized financial outcomes/profit conflict. A different receipt ID
 with equivalent normalized evidence does not replace the original numeric facts.
-Late diagnostic/progress notifications do not
-demote terminal state. Terminal replay validates the persisted profile and source
+Late diagnostics do not demote terminal state. A valid late observation proving
+opening (OPEN_SUCCESS, IN_PROGRESS or WAITING_CLOSE) conflicts with REJECTED or
+CANCELLED non-execution evidence; it cannot be silently classified as a duplicate.
+The conflict changes no journal, physical, reservation, series or MM facts and
+authorizes no broker action. Previously confirmed opening/progress after SETTLED
+remains idempotent when identity matches. Terminal replay validates the persisted profile and source
 receipt against the canonical settlement; it does not re-normalize old profit.
 An entirely new callback is still mapped/validated under the captured V1 profile.
 
@@ -201,3 +206,28 @@ point reads and terminal-index entries visited, **not total MDBX I/O**, B-tree
 page reads or wall-clock performance. Actual counts and compiler/CI results
 belong in the PR report. Group completion and startup recovery retain their
 previous separately documented history costs.
+
+## Corrective Verification
+
+The three rejected-then-opening regressions failed on reviewed HEAD
+`9b6e38af6e11344d173f4432343a59eb432faa99` (DUPLICATE instead of CONFLICT).
+After the terminal guard, all 32 receipt tests pass, including unchanged durable
+facts across reopen and late SETTLED diagnostics/contradictions. Local MSVC Debug
+and MinGW Release runs pass 283 Batch 1-7C-B tests and all six standalone consumers.
+
+The earlier 132 versus 131 platform-test totals selected different executables,
+not a removed test: 111 parser/response + 12 result-query + 9
+`lifecycle_event_safety_test` versus the same first two + 8
+`intrade_auth_lifecycle_test`. The corrective MinGW run explicitly executes all
+four (140/140):
+
+```powershell
+cmake --build build-codex --target intrade_bar_api_response_test trade_result_query_test intrade_auth_lifecycle_test lifecycle_event_safety_test --parallel 2
+foreach ($name in @('intrade_bar_api_response_test', 'trade_result_query_test', 'intrade_auth_lifecycle_test', 'lifecycle_event_safety_test')) {
+    & ".\build-codex\$name.exe"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+```
+
+These are local offline results, not claims of MSVC platform-target success or
+exact-head remote CI. The separately documented MSVC baseline remains unchanged.

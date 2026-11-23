@@ -102,6 +102,36 @@ protected:
         return support::read(host->storage().reservation(roster.reservation_bindings.at(member).reservation_id));
     }
 
+    nlohmann::json durable_state() {
+        const auto journal = host->storage().journal_events();
+        if (!journal.succeeded()) throw std::runtime_error(journal.message);
+        auto events = nlohmann::json::array();
+        for (const auto& event : journal.values) events.push_back(ts::detail::journal_to_json(event));
+        const auto records = host->storage().settlements_for_group(operations[0].group_id);
+        if (!records.succeeded()) throw std::runtime_error(records.message);
+        auto settlements = nlohmann::json::array();
+        for (const auto& record : records.values) settlements.push_back(ts::detail::settlement_record_to_json(record));
+        return {{"journal", events}, {"settlements", settlements},
+            {"physical", ts::detail::physical_trade_to_json(support::read(host->storage().physical_trade(operations[0].trade_id)))},
+            {"reservation", ts::detail::reservation_to_json(risk())},
+            {"series", ts::detail::checkpoint_to_json(support::read(host->storage().series(1)))},
+            {"mm", ts::detail::mm_to_json(support::read(host->storage().money_management("synthetic.mm")))}};
+    }
+
+    void rejected_late_opening(TradeState state) {
+        setup(); start();
+        ASSERT_TRUE(apply(result(TradeState::OPEN_ERROR, 0), "rejected").succeeded());
+        const auto before = durable_state();
+        const auto conflict = apply(result(state), "late-opening");
+        EXPECT_EQ(conflict.kind, ts::StorageResultKind::CONFLICT);
+        EXPECT_FALSE(conflict.operation);
+        EXPECT_EQ(conflict.settlement_id, 0u);
+        EXPECT_EQ(durable_state(), before);
+        reopen();
+        EXPECT_EQ(durable_state(), before);
+        EXPECT_TRUE(broker->submission_counts.empty());
+    }
+
     void alter_journal(const std::string& key, const std::function<void(nlohmann::json&)>& edit) {
         mdbxc::KeyValueTable<std::string, std::string> table(host->storage().connection(), "ts_journal");
         auto wire = nlohmann::json::parse(*table.find(key));
@@ -221,6 +251,48 @@ TEST_F(TradingSystemBatch7CB, ExactReplayBypassesStaleRevisionButChangedFactsCon
     EXPECT_EQ(apply(changed, "another").kind, ts::StorageResultKind::CONFLICT);
     EXPECT_EQ(apply(result(TradeState::CHECK_ERROR), "late-check").kind, ts::StorageResultKind::DUPLICATE);
     EXPECT_EQ(apply(result(TradeState::OPEN_ERROR, 0), "late-failure").kind, ts::StorageResultKind::CONFLICT);
+}
+
+TEST_F(TradingSystemBatch7CB, RejectedLateOpenSuccessConflictsWithoutDurableMutation) {
+    rejected_late_opening(TradeState::OPEN_SUCCESS);
+}
+
+TEST_F(TradingSystemBatch7CB, RejectedLateInProgressConflictsWithoutDurableMutation) {
+    rejected_late_opening(TradeState::IN_PROGRESS);
+}
+
+TEST_F(TradingSystemBatch7CB, RejectedLateWaitingCloseConflictsWithoutDurableMutation) {
+    rejected_late_opening(TradeState::WAITING_CLOSE);
+}
+
+TEST_F(TradingSystemBatch7CB, RejectedLateDiagnosticsRemainDuplicatesAndDoNotCreateBrokerClaims) {
+    setup(); start();
+    ASSERT_TRUE(apply(result(TradeState::OPEN_ERROR, 0), "rejected").succeeded());
+    const auto before = durable_state();
+    for (const auto state : {TradeState::CHECK_ERROR, TradeState::UNKNOWN, TradeState::WAITING_OPEN}) {
+        EXPECT_EQ(apply(result(state), "late-" + std::to_string(static_cast<int>(state))).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        EXPECT_EQ(durable_state(), before);
+    }
+}
+
+TEST_F(TradingSystemBatch7CB, SettledLateOpeningDiagnosticsAndContradictionsPreserveAllProjections) {
+    setup(); start();
+    ASSERT_TRUE(apply(result(TradeState::WIN), "win").succeeded());
+    ASSERT_TRUE(host->complete(operations[0].group_id).succeeded());
+    const auto before = durable_state();
+    for (const auto state : {TradeState::OPEN_SUCCESS, TradeState::IN_PROGRESS, TradeState::WAITING_CLOSE,
+                            TradeState::CHECK_ERROR, TradeState::UNKNOWN, TradeState::WAITING_OPEN}) {
+        EXPECT_EQ(apply(result(state), "late-" + std::to_string(static_cast<int>(state))).kind,
+                  ts::StorageResultKind::DUPLICATE);
+        EXPECT_EQ(durable_state(), before);
+    }
+    EXPECT_EQ(apply(result(TradeState::OPEN_ERROR, 0), "failed-open").kind, ts::StorageResultKind::CONFLICT);
+    EXPECT_EQ(apply(result(TradeState::LOSS), "changed-outcome").kind, ts::StorageResultKind::CONFLICT);
+    EXPECT_FALSE(apply(result(TradeState::OPEN_SUCCESS, 92), "different-broker").succeeded());
+    EXPECT_EQ(durable_state(), before);
+    reopen();
+    EXPECT_EQ(durable_state(), before);
 }
 
 TEST_F(TradingSystemBatch7CB, StaleRevisionCannotApplyNewReceiptOrLeakAnyWrites) {
