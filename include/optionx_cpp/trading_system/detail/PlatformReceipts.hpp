@@ -208,6 +208,13 @@ inline void validate_receipt(const JournalEvent& event) {
         event.state_revision != operation.state_revision || !event.payload.at("settlement_id").is_number_unsigned()) {
         throw std::invalid_argument("invalid receipt operation projection");
     }
+    const bool has_settlement = event.payload.at("settlement_id") != 0;
+    const bool has_profit = !event.payload.at("normalized_profit").is_null();
+    if (terminal(operation.state) != has_settlement ||
+        (operation.state == ExecutionOperationState::SETTLED) != has_profit ||
+        operation.state == ExecutionOperationState::CANCELLED) {
+        throw std::invalid_argument("receipt terminality differs from its settlement projection");
+    }
     if (!event.payload.at("normalized_profit").is_null()) {
         const auto& encoded = event.payload.at("normalized_profit");
         if (!encoded.at("units").is_number_integer() ||

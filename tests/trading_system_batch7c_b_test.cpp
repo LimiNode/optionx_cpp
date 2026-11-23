@@ -368,7 +368,7 @@ TEST_F(TradingSystemBatch7CB, UnsupportedOrCorruptReceiptCodecIsNotRecomputedOnR
     ASSERT_TRUE(apply(raw, "one").succeeded());
     const auto key = pr::receipt_key(operations[0].operation_id, "one");
     const auto original = support::read(host->storage().journal_by_key(key));
-    for (int mutation = 0; mutation < 8; ++mutation) {
+    for (int mutation = 0; mutation < 10; ++mutation) {
         alter_journal(key, [&](auto& wire) {
             wire = ts::detail::journal_to_json(original);
             switch (mutation) {
@@ -380,11 +380,32 @@ TEST_F(TradingSystemBatch7CB, UnsupportedOrCorruptReceiptCodecIsNotRecomputedOnR
                 case 5: wire["payload"]["input"]["binding_event_id"] = 999u; break;
                 case 6: wire["payload"]["normalized_profit"]["precision"] = 258; break;
                 case 7: wire["payload"]["normalized_profit"]["units"] = 99; break;
+                case 8: wire["payload"]["settlement_id"] = 0u; break;
+                case 9: wire["payload"]["normalized_profit"] = nullptr; break;
             }
         });
         EXPECT_FALSE(manager.platform_receipt_fact(host->storage(), bindings[0], "one").found()) << mutation;
         EXPECT_FALSE(apply(raw, "one").succeeded()) << mutation;
     }
+}
+
+TEST_F(TradingSystemBatch7CB, StandoffAndZeroRefundUseExistingDrawEvidence) {
+    setup(); start();
+    for (const auto state : {TradeState::STANDOFF, TradeState::REFUND}) {
+        auto unit = host->storage().begin();
+        const auto staged = manager.apply_platform_receipt(unit, bindings[0], result(state), "draw", 1);
+        ASSERT_TRUE(staged.succeeded()) << staged.message;
+        const auto evidence = unit.settlement(staged.settlement_id);
+        ASSERT_TRUE(evidence.found());
+        EXPECT_EQ(evidence.value->settlement.kind, ts::OutcomeKind::DRAW);
+        EXPECT_EQ(evidence.value->native_profit.units, 0);
+    }
+    auto nonzero_refund = result(TradeState::REFUND);
+    nonzero_refund.profit = 0.1;
+    EXPECT_FALSE(apply(nonzero_refund, "nonzero-refund").succeeded());
+    ASSERT_TRUE(apply(result(TradeState::REFUND), "refund").succeeded());
+    reopen();
+    EXPECT_EQ(apply(result(TradeState::STANDOFF), "equivalent-draw").kind, ts::StorageResultKind::DUPLICATE);
 }
 
 TEST_F(TradingSystemBatch7CB, MissingOrChangedDurableBindingCannotProveFailedOpening) {
