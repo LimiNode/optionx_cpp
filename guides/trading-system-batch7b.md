@@ -15,9 +15,11 @@ no new facade, platform manager, scheduler, callback mechanism, dependency,
 storage table, wire codec or migration.
 
 The mapper does not call platforms, allocate trade/settlement IDs, apply durable
-receipts, alter reservations or advance series/MM. Batches 7C/7D and live/demo
-execution remain unimplemented and require separate approval. Stop after review
-of this Draft PR; do not merge it automatically.
+receipts, alter reservations or advance series/MM. Batch 7B was accepted at
+`dad7bcf891f08323c8f4f07681dc660137cab197` and merged in PR #194 as
+`6e5f0adac14ddb5aa135dc5b67a2d108a2d7f1cc`. The separate
+[7C-A evidence slice](trading-system-batch7c-a.md) requires its own Draft review;
+7C-B/7D and live/demo execution remain unimplemented and gated.
 
 ## Request Mapping
 
@@ -135,9 +137,9 @@ on the configured grid. For outgoing stake, `from_chars` parses the existing
 exact fixed-point decimal; normalization must reproduce the original units or
 translation fails as lossy. This does not change `MoneyAmount`'s public codec.
 
-## Failed-open Evidence: Proposal For 7C Only
+## Failed-open Evidence: Historical 7B Proposal
 
-No representation below is implemented by 7B. In particular, the current
+No representation below was implemented by 7B. In particular, its
 `TradeSettlement::valid()`, storage schema version and numeric evidence codec
 remain unchanged. The existing simulated pre-submission rejection continues
 to mean `NOT_SUBMITTED`.
@@ -151,13 +153,15 @@ to mean `NOT_SUBMITTED`.
 | Idempotency | Reuse canonical physical terminal evidence and settlement deduplication; differing evidence/provenance is a conflict, not a new attempt. | Key by captured operation/member/receipt identity and compare evidence; avoid a second terminal ledger disagreeing with settlements. |
 | Migration | Existing records retain their meaning. Add reader compatibility/upgrade gates; never infer historical proof from an error string. | Add receipt storage/projection rebuild and recovery compatibility gates; old records still require their original settlement path. |
 
-**Recommend A for a separate evidence review**, because it reuses the existing
+**7B recommended A for a separate evidence review**, because it reuses the existing
 single terminal ledger and atomic completion path. A possible name is
 `NOT_EXECUTED_PROVEN` with explicit ordinal 3; neither spelling nor schema
 version is approved here. Audit `settlement_to_json/from_json` (currently numeric
 evidence), hydration, terminal comparison, reservation release and
 `reject_without_submission()` before changing them. Do not rename/reinterpret
 NOT_SUBMITTED in place or classify an HTTP attempt as never sent.
+The subsequent [7C-A contract](trading-system-batch7c-a.md) selects A with
+ordinal 3 and a settlement-local v2 gate, preserving global schema version 1.
 
 Required review tests: old-record replay, unknown/new evidence under old reader
 and upgrade gates, qualified broker refusal versus missing callback, duplicate

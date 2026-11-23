@@ -224,4 +224,10 @@ stake use that currency.
 - During submission: record the operation as `SUBMITTING`; cancellation cannot
   claim that the broker did not receive it.
 - After transport ambiguity: transition to `EXECUTION_UNKNOWN`, retain risk,
-  reconcile by broker identity/history, and only then settle or cancel.
+  reconcile by broker identity/history; absence of a match is not cancellation.
+
+[Batch 7C-A](trading-system-batch7c-a.md) distinguishes `NOT_SUBMITTED` from
+`NOT_EXECUTED_PROVEN` after an attempted command. REJECTED accepts either proof;
+CANCELLED still requires no submission. UNKNOWN and CHECK_ERROR alone cannot
+release risk or create terminal evidence. Validated physical/group transitions
+reuse the existing UOW; platform receipt application remains gated in 7C-B.
