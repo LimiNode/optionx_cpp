@@ -62,8 +62,10 @@ must reconcile an unresolved operation before progression.
 
 `REJECTED` is terminal only when the broker model proves that no side effect
 occurred. That transition atomically appends the terminal operation event,
-records `NOT_SUBMITTED` evidence, marks the physical trade rejected, and
-releases its reservation. An ambiguous or unavailable history remains
+records non-execution evidence, marks the physical trade rejected, and
+releases its reservation. [7C-A](trading-system-batch7c-a.md) distinguishes
+NOT_SUBMITTED for pre-submit refusal from NOT_EXECUTED_PROVEN for authoritative
+post-attempt reconciliation; legacy records are not rewritten. An ambiguous or unavailable history remains
 unresolved and blocks the affected risk scope. `UNKNOWN` is never rewritten to
 `CANCELLED` merely because reconciliation did not find a record.
 

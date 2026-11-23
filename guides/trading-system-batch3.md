@@ -49,13 +49,16 @@ from callback arrival order. Event fields are immutable by convention.
 | Outcome | Required evidence | Money | Terminal |
 | --- | --- | --- | --- |
 | `WIN` / `LOSS` / `DRAW` | `EXECUTED` | Positive / negative / zero `MoneyAmount` | Yes |
-| `REJECTED` / `CANCELLED` | `NOT_SUBMITTED` | Absent | Yes, no execution |
+| `REJECTED` | `NOT_SUBMITTED` or `NOT_EXECUTED_PROVEN` (7C-A) | Absent | Yes, no execution |
+| `CANCELLED` | `NOT_SUBMITTED` only | Absent | Yes, no execution |
 | `UNKNOWN` | `MAY_HAVE_EXECUTED` | Absent | No |
 
-`NOT_SUBMITTED` is a caller assertion of proven no execution, including a
-conclusive reconciliation. An HTTP timeout or cancellation request during
-submission is not such proof. Broker-specific interpretation belongs to a later
-adapter. These event kinds must not be inferred from transport errors here.
+`NOT_SUBMITTED` asserts no submission. [7C-A](trading-system-batch7c-a.md) adds
+`NOT_EXECUTED_PROVEN` for conclusive non-execution after an attempt. Older
+reconciliation records encoded as NOT_SUBMITTED retain their original meaning
+and are not rewritten. An HTTP timeout or cancellation request during submission
+is not proof. Broker interpretation belongs to the bound adapter contract;
+these event kinds must not be inferred from transport errors here.
 
 Exact `(SettlementId, full payload)` replay returns `DUPLICATE` before revision
 checks, even after reconciliation, a later step, or series completion. The same

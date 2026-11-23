@@ -20,6 +20,7 @@
 #include <optional>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -298,6 +299,8 @@ struct SettlementRecord {
 
     bool valid() const noexcept {
         return settlement.valid() && native_profit.valid_metadata() &&
+               (settlement.evidence != ExecutionEvidence::NOT_EXECUTED_PROVEN ||
+                (native_profit.units == 0 && !valuation)) &&
                (!settlement.net_profit ||
                 (settlement.net_profit->units == native_profit.units &&
                  settlement.net_profit->precision == native_profit.precision &&
@@ -513,18 +516,34 @@ inline nlohmann::json settlement_to_json(const TradeSettlement& value) {
         {"execution_group_id", value.execution_group_id}, {"trade_id", value.trade_id},
         {"kind", static_cast<int>(value.kind)}, {"evidence", static_cast<int>(value.evidence)}
     };
+    if (value.evidence == ExecutionEvidence::NOT_EXECUTED_PROVEN) {
+        result["evidence_version"] = 2;
+    }
     if (value.net_profit) result["net_profit"] = money_to_json(*value.net_profit);
     return result;
 }
 
 inline TradeSettlement settlement_from_json(const nlohmann::json& value) {
+    const auto version = value.value("evidence_version", nlohmann::json(1));
+    const auto evidence = value.value("evidence", nlohmann::json(1));
+    const auto kind = value.value("kind", nlohmann::json(5));
+    if (!version.is_number_integer() || (version != 1 && version != 2)) {
+        throw std::invalid_argument("unsupported settlement evidence version");
+    }
+    if (!evidence.is_number_integer() || evidence < 0 || evidence > 3 ||
+        (version == 1 && evidence == 3) || (version == 2 && evidence != 3)) {
+        throw std::invalid_argument("unsupported settlement evidence encoding");
+    }
+    if (!kind.is_number_integer() || kind < 0 || kind > 5) {
+        throw std::invalid_argument("unsupported settlement outcome encoding");
+    }
     TradeSettlement result;
     result.settlement_id = value.value("settlement_id", SettlementId{0});
     result.intent_id = value.value("intent_id", IntentId{0});
     result.execution_group_id = value.value("execution_group_id", ExecutionGroupId{0});
     result.trade_id = value.value("trade_id", std::uint64_t{0});
-    result.kind = static_cast<OutcomeKind>(value.value("kind", 5));
-    result.evidence = static_cast<ExecutionEvidence>(value.value("evidence", 1));
+    result.kind = static_cast<OutcomeKind>(kind.get<int>());
+    result.evidence = static_cast<ExecutionEvidence>(evidence.get<int>());
     if (value.contains("net_profit")) result.net_profit = money_from_json(value.at("net_profit"));
     return result;
 }
@@ -1923,6 +1942,9 @@ public:
             if (!external_namespace && (!current || current_next < required_next)) {
                 m_storage.m_sequences.insert_or_assign(
                     "settlement", std::to_string(required_next), m_transaction);
+            } else if (external_namespace && !current && m_storage.m_settlements.empty(m_transaction)) {
+                // A fresh external-first store still needs its independent local sequence.
+                m_storage.m_sequences.insert_or_assign("settlement", "1", m_transaction);
             }
             return put_immutable(
                 m_storage.m_settlements, std::to_string(settlement_id),
@@ -1993,6 +2015,10 @@ public:
             transition.journal.idempotency_key.empty() || !transition.physical_trade) {
             return fail({StorageResultKind::INVALID_ARGUMENT, "invalid physical settlement transition"});
         }
+        if (transition.settlement.settlement.evidence == ExecutionEvidence::NOT_EXECUTED_PROVEN &&
+            transition.physical_trade->lifecycle_state != "REJECTED") {
+            return fail({StorageResultKind::INVALID_ARGUMENT, "proven failed-open requires rejected physical state"});
+        }
         if (transition.logical_currency != CurrencyType::UNKNOWN && transition.settlement.valuation &&
             (transition.settlement.valuation->source != transition.settlement.native_profit.currency ||
              transition.settlement.valuation->target != transition.logical_currency)) {
@@ -2006,7 +2032,9 @@ public:
             auto persisted = transition.settlement;
             const auto target = transition.logical_currency == CurrencyType::UNKNOWN
                 ? persisted.native_profit.currency : transition.logical_currency;
-            persisted.logical_outcome_ready = persisted.native_profit.currency == target ||
+            persisted.logical_outcome_ready =
+                persisted.settlement.evidence == ExecutionEvidence::NOT_EXECUTED_PROVEN ||
+                persisted.native_profit.currency == target ||
                 (persisted.valuation && persisted.valuation->fresh &&
                  detail::convert_money(persisted.native_profit, *persisted.valuation, target).has_value());
 
@@ -2027,6 +2055,30 @@ public:
                 const auto index = index_settlement(persisted.settlement);
                 if (index.kind != StorageResultKind::APPLIED &&
                     index.kind != StorageResultKind::DUPLICATE) return index;
+                return {StorageResultKind::DUPLICATE, {}};
+            }
+
+            const auto terminal = terminal_settlement_for_member(
+                persisted.settlement.trade_id, persisted.settlement.execution_group_id);
+            if (terminal.kind != StorageResultKind::APPLIED &&
+                terminal.kind != StorageResultKind::NOT_FOUND) {
+                return fail({terminal.kind, terminal.message});
+            }
+            if (terminal.found() &&
+                (persisted.settlement.evidence == ExecutionEvidence::NOT_EXECUTED_PROVEN ||
+                 terminal.value->settlement.evidence == ExecutionEvidence::NOT_EXECUTED_PROVEN)) {
+                auto canonical = persisted;
+                canonical.settlement.settlement_id = terminal.value->settlement.settlement_id;
+                if (!same_terminal_evidence(persisted.settlement, terminal.value->settlement) ||
+                    detail::settlement_record_to_json(canonical) !=
+                        detail::settlement_record_to_json(*terminal.value)) {
+                    return fail({StorageResultKind::CONFLICT, "conflicting failed-open terminal evidence"});
+                }
+                const auto physical = m_storage.m_physical_trades.find(
+                    std::to_string(transition.physical_trade->trade_id), m_transaction);
+                if (!physical || *physical != detail::physical_trade_to_json(*transition.physical_trade).dump()) {
+                    return fail({StorageResultKind::CONFLICT, "conflicting failed-open physical fact"});
+                }
                 return {StorageResultKind::DUPLICATE, {}};
             }
 
@@ -2166,6 +2218,16 @@ public:
             physical.kind != StorageResultKind::DUPLICATE &&
             physical.kind != StorageResultKind::PENDING_VALUATION) return physical;
         if (!has_logical) return physical;
+        if (physical.kind == StorageResultKind::DUPLICATE) {
+            try {
+                if (!m_storage.m_settlements.find(
+                        std::to_string(transition.settlement.settlement.settlement_id), m_transaction)) {
+                    return physical; // A new receipt ID did not create a second failed-open fact.
+                }
+            } catch (const std::exception& error) {
+                return fail({StorageResultKind::STORAGE_ERROR, error.what()});
+            }
+        }
         return apply_group_completion_atomic(transition);
     }
 
@@ -2846,7 +2908,7 @@ private:
         return {StorageResultKind::APPLIED, {}};
     }
 
-    StorageReadResult<RiskReservationState> terminal_reservation_state(
+    StorageReadResult<SettlementRecord> terminal_settlement_for_member(
         std::uint64_t trade_id, ExecutionGroupId group_id) {
         try {
             const auto bounds = detail::group_index_bounds(group_id);
@@ -2879,25 +2941,32 @@ private:
             }
             std::stable_sort(candidates.begin(), candidates.end(),
                              detail::canonical_settlement_before);
-            std::optional<TradeSettlement> terminal;
+            std::optional<SettlementRecord> terminal;
             for (const auto& candidate : candidates) {
                 if (!candidate.settlement.terminal()) continue;
                 if (!terminal) {
-                    terminal = candidate.settlement;
-                } else if (!same_terminal_evidence(*terminal, candidate.settlement)) {
+                    terminal = candidate;
+                } else if (!same_terminal_evidence(terminal->settlement, candidate.settlement)) {
                     return {StorageResultKind::CONFLICT, std::nullopt,
                             "conflicting terminal settlement evidence"};
                 }
             }
             if (!terminal) return {StorageResultKind::NOT_FOUND, std::nullopt, {}};
-            return {StorageResultKind::APPLIED, terminal->kind == OutcomeKind::REJECTED ||
-                           terminal->kind == OutcomeKind::CANCELLED
-                       ? RiskReservationState::RELEASED
-                       : RiskReservationState::SETTLED, {}};
+            return {StorageResultKind::APPLIED, std::move(terminal), {}};
         } catch (...) {
             return {StorageResultKind::STORAGE_ERROR, std::nullopt,
                     "failed to read group settlement index"};
         }
+    }
+
+    StorageReadResult<RiskReservationState> terminal_reservation_state(
+        std::uint64_t trade_id, ExecutionGroupId group_id) {
+        const auto terminal = terminal_settlement_for_member(trade_id, group_id);
+        if (!terminal.found()) return {terminal.kind, std::nullopt, terminal.message};
+        return {StorageResultKind::APPLIED,
+                terminal.value->settlement.kind == OutcomeKind::REJECTED ||
+                        terminal.value->settlement.kind == OutcomeKind::CANCELLED
+                    ? RiskReservationState::RELEASED : RiskReservationState::SETTLED, {}};
     }
 
     StorageResult validate_terminal_bindings(const SettlementTransition& transition) {

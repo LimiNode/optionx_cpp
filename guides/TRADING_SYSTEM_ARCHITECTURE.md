@@ -86,7 +86,9 @@ IntradeBar `OPEN_ERROR` retains the established unsuccessful-opening contract;
 `OPEN_SUCCESS` confirms opening; `CHECK_ERROR` preserves previously known
 acceptance but does not independently prove opening, even with a numeric ID.
 See the [7A correspondence](trading-system-batch7a.md)
-for missing-observation recovery, evidence-encoding gaps and retry ownership.
+for missing-observation recovery and retry ownership. The separate
+[7C-A evidence contract](trading-system-batch7c-a.md) distinguishes no submission
+from proven non-execution after an attempt, without rewriting legacy records.
 The existing platform's managers, callbacks and retry behavior remain unchanged.
 
 The state source of truth is durable operation state. Event delivery is a

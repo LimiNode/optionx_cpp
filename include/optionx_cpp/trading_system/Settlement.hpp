@@ -13,7 +13,12 @@
 namespace optionx::trading_system {
 
 enum class OutcomeKind { WIN, LOSS, DRAW, REJECTED, CANCELLED, UNKNOWN };
-enum class ExecutionEvidence { NOT_SUBMITTED, MAY_HAVE_EXECUTED, EXECUTED };
+enum class ExecutionEvidence {
+    NOT_SUBMITTED = 0,
+    MAY_HAVE_EXECUTED = 1,
+    EXECUTED = 2,
+    NOT_EXECUTED_PROVEN = 3
+};
 enum class SeriesStatus { ACTIVE, WAITING_OUTCOME, UNRESOLVED, COMPLETED, BLOCKED_ERROR };
 enum class AggregationStatus { PENDING, READY, NUMERIC_OVERFLOW };
 
@@ -41,8 +46,9 @@ enum class ProgressionResult {
 
 /// \class TradeSettlement
 /// \brief An immutable-by-convention event for one predeclared physical member.
-/// \details UNKNOWN is non-terminal. REJECTED/CANCELLED assert proven absence
-/// of submission. Reconciliation supplies a new ID, never rewrites an event.
+/// \details UNKNOWN is non-terminal. REJECTED distinguishes no submission from
+/// proven non-execution after an attempt; CANCELLED still requires no submission.
+/// Reconciliation supplies a new ID, never rewrites an event.
 struct TradeSettlement {
     SettlementId settlement_id = 0;
     IntentId intent_id = 0;
@@ -72,8 +78,11 @@ struct TradeSettlement {
         if (kind == OutcomeKind::UNKNOWN) {
             return evidence == ExecutionEvidence::MAY_HAVE_EXECUTED;
         }
-        return (kind == OutcomeKind::REJECTED || kind == OutcomeKind::CANCELLED) &&
-               evidence == ExecutionEvidence::NOT_SUBMITTED;
+        if (kind == OutcomeKind::REJECTED) {
+            return evidence == ExecutionEvidence::NOT_SUBMITTED ||
+                   evidence == ExecutionEvidence::NOT_EXECUTED_PROVEN;
+        }
+        return kind == OutcomeKind::CANCELLED && evidence == ExecutionEvidence::NOT_SUBMITTED;
     }
 };
 

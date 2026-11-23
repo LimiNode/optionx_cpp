@@ -12,8 +12,10 @@ workflows passed on that exact SHA. This establishes the offline domain, not
 production runtime readiness. SyntheticHost remains test support.
 
 Batch 7A merged through PR #193 as `e81a43db85a31d6828fac72422e0fc5d384e718a`.
-[Batch 7B](trading-system-batch7b.md) is the pure mapper implementation under
-separate Draft review; 7C/7D remain gated. Every later stage must
+[Batch 7B](trading-system-batch7b.md) merged through PR #194 as
+`6e5f0adac14ddb5aa135dc5b67a2d108a2d7f1cc`.
+[Batch 7C-A](trading-system-batch7c-a.md) is the separate failed-open evidence
+Draft slice; 7C-B/7D remain gated. Every later stage must
 preserve the existing broker, Router, task and storage contracts; no live
 trading follows automatically from these milestones.
 
@@ -152,9 +154,10 @@ platform guarantees and proposes the state/identity, retry ownership,
 reconciliation, account/risk, lifecycle and offline-test boundaries. It adds no
 runtime. Its independent review is complete and PR #193 is merged.
 
-The separate 7B Draft delivers only a pure request/observation adapter.
-Proposed later PRs cover durable receipt application and known-ID
-reconciliation on fakes (7C), then bounded offline
+The accepted 7B delivers only a pure request/observation adapter.
+7C-A extends failed-open evidence with explicit serialization compatibility;
+stop at its Draft PR for independent review. Proposed later PRs cover durable
+receipt application and known-ID reconciliation on fakes (7C-B), then bounded offline
 integration through the existing platform layer (7D). Live execution requires
 a separate future gate. Graph/GUI work and ADELIA/MegaConnector integrations
 are not part of Batch 7.
@@ -178,8 +181,8 @@ Every batch requires:
 - no secret or live-account material in fixtures;
 - a diff review showing that unrelated user changes were preserved.
 
-The separate Batch 5A, 5B, 5C and 7A review gates are complete. Stop after the
-separate 7B Draft PR; do not merge it or start 7C/7D automatically.
+The separate Batch 5A, 5B, 5C, 7A and 7B review gates are complete. Stop after the
+separate 7C-A Draft PR; do not merge it or start 7C-B/7D automatically.
 These stages do not include live Polymarket integration, an exchange
 orderbook/position engine, a GUI/graph editor, an FX aggregation engine, or a
 new scheduler/event bus.

@@ -5,9 +5,11 @@
 Batch 6 merged as `47ec37b825da9163bfa7ed3fe09f2d4dff0d1797`.
 [Batch 7A](trading-system-batch7a.md) was accepted and merged in PR #193 as
 `e81a43db85a31d6828fac72422e0fc5d384e718a`.
-[Batch 7B](trading-system-batch7b.md) implements only the pure mapper authorized
-after that review. Stop after its separate Draft PR. 7C/7D remain proposed,
-not authorized implementation; neither 7B nor later slices merge automatically.
+[Batch 7B](trading-system-batch7b.md) was accepted at `dad7bcf8` and merged
+through PR #194 as `6e5f0adac14ddb5aa135dc5b67a2d108a2d7f1cc`.
+[Batch 7C-A](trading-system-batch7c-a.md) is the separate failed-open evidence
+slice authorized for Draft review. Stop after 7C-A; do not merge it or begin
+7C-B/7D automatically.
 
 All slices preserve the existing Intrade platform, managers, `TradeState`,
 callbacks and retry behavior. Changes to the new Trading System's internal
@@ -27,7 +29,7 @@ actions. No C++ API, durable schema or dependency changes.
 
 ## 7B: Pure Observation And Request Adapter
 
-**First implementation slice, delivered for separate review.**
+**Pure mapper slice, independently reviewed and merged in PR #194.**
 
 Scope: deterministic functions translating a bound physical roster member to
 `TradeRequest` data and `TradeResult` data to a typed internal observation.
@@ -61,13 +63,26 @@ Windows MSVC/MinGW and Ubuntu GCC where supported, exact-head CI.
 Dependencies/risks: review the initial numeric profile. The durable rejected
 evidence gap remains explicit; do not solve it by changing platform semantics.
 
-## 7C: Durable Receipt Application And Known-ID Reconciliation
+## 7C-A: Failed-Open Evidence
+
+Scope: append NOT_EXECUTED_PROVEN without renumbering existing evidence, version
+its settlement encoding explicitly, and reuse the atomic physical/risk/group
+completion paths. Preserve legacy NOT_SUBMITTED and existing records. No
+platform receipt adapter or result-query integration in this slice.
+
+Acceptance: legacy/new codec and reader/writer failures, unknown nonproof,
+duplicate/conflicting facts, risk-release rollback/reopen, series/MM replay,
+Batch 1-7B regressions, C++17 consumers and exact-head Windows/Ubuntu CI. See the
+[evidence contract](trading-system-batch7c-a.md) for the audit and compatibility
+decision. Separate Draft PR; independent review required before 7C-B.
+
+## 7C-B: Durable Receipt Application And Known-ID Reconciliation
 
 Scope: factor the minimal receipt path in the existing execution recovery owner,
 apply acceptance/check-failure/final receipts with revision and idempotency
 guards, and drive `fetch_trade_result()` through a programmed `BaseTradingApi`
-fake for known broker IDs. No real Intrade execution. Separate a small evidence
-compatibility PR first if needed; do not smuggle it into a broad refactor.
+fake for known broker IDs. No real Intrade execution. This follows independent
+acceptance of 7C-A; it is not part of the evidence-only PR and is not yet authorized.
 
 Reuse: `ExecutionRecoveryManager` transitions, `TradingSystemStorage::UnitOfWork`,
 physical settlement/group completion, `TradeResultQuery`, existing account and

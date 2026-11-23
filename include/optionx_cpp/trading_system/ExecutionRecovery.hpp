@@ -803,14 +803,35 @@ private:
         return unit.commit();
     }
 
-    StorageResult reject_without_submission(
+    StorageResult reject_without_execution(
         TradingSystemStorage& storage,
-        const ExecutionOperationRecord& current) const {
+        const ExecutionOperationRecord& current,
+        ExecutionEvidence evidence_kind) const {
+        if (evidence_kind != ExecutionEvidence::NOT_SUBMITTED &&
+            evidence_kind != ExecutionEvidence::NOT_EXECUTED_PROVEN) {
+            return {StorageResultKind::INVALID_ARGUMENT, "rejection requires proven non-execution"};
+        }
+        if (current.state == ExecutionOperationState::REJECTED) {
+            const auto facts = storage.settlements_for_group(current.group_id);
+            if (!facts.succeeded()) return {facts.kind, facts.message};
+            bool found = false;
+            for (const auto& fact : facts.values) {
+                if (fact.settlement.trade_id != current.trade_id || !fact.settlement.terminal()) continue;
+                if (fact.settlement.intent_id != current.intent_id ||
+                    fact.settlement.kind != OutcomeKind::REJECTED ||
+                    fact.settlement.evidence != evidence_kind) {
+                    return {StorageResultKind::CONFLICT, "conflicting non-execution evidence"};
+                }
+                found = true;
+            }
+            return found ? StorageResult{StorageResultKind::DUPLICATE, {}}
+                         : StorageResult{StorageResultKind::INVALID_STATE, "rejection evidence is missing"};
+        }
         if (current.state != ExecutionOperationState::SUBMISSION_STARTED &&
             current.state != ExecutionOperationState::EXECUTION_UNKNOWN &&
             current.state != ExecutionOperationState::RECONCILIATION_REQUIRED) {
             return {StorageResultKind::INVALID_STATE,
-                    "operation is not eligible for proven no-submission rejection"};
+                    "operation is not eligible for proven non-execution rejection"};
         }
         const auto roster = storage.roster(current.group_id);
         if (!roster.found()) return {roster.kind, roster.message};
@@ -874,7 +895,7 @@ private:
         evidence.execution_group_id = current.group_id;
         evidence.trade_id = current.trade_id;
         evidence.kind = OutcomeKind::REJECTED;
-        evidence.evidence = ExecutionEvidence::NOT_SUBMITTED;
+        evidence.evidence = evidence_kind;
         auto native_profit = reservation.value->stake;
         native_profit.units = 0;
         SettlementTransition transition;
@@ -1133,7 +1154,7 @@ public:
         }
         if (!response.accepted) {
             if (!response.side_effect_occurred) {
-                return reject_without_submission(storage, started);
+                return reject_without_execution(storage, started, ExecutionEvidence::NOT_SUBMITTED);
             }
             observed.state = ExecutionOperationState::EXECUTION_UNKNOWN;
         } else if (response.response_lost) {
@@ -1168,7 +1189,8 @@ public:
                 : ExecutionOperationState::BROKER_ID_PERSISTED;
             next.broker_trade_id = result.broker_trade_id;
         } else if (result.kind == ReconciliationKind::NOT_EXECUTED_PROVEN) {
-            const auto rejected = reject_without_submission(storage, found->second);
+            const auto rejected = reject_without_execution(
+                storage, found->second, ExecutionEvidence::NOT_EXECUTED_PROVEN);
             if (!rejected.succeeded()) {
                 return {ReconciliationKind::EXECUTION_UNKNOWN, {}, std::nullopt,
                         rejected.message};
