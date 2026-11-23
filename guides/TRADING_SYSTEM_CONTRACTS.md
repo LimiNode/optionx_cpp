@@ -18,7 +18,8 @@ context, not a second current API.
 
 [Batch 7A](trading-system-batch7a.md) is the documentation-only integration
 proposal. It preserves existing platform states and callbacks: IntradeBar
-`OPEN_ERROR` is failed opening; `CHECK_ERROR` does not revoke known opening.
+`OPEN_ERROR` is failed opening; `CHECK_ERROR` does not revoke known opening
+and does not independently establish it.
 Do not derive a blanket broker-error-to-unknown conversion from the generic
 `IntentStatus::EXECUTION_UNKNOWN` sketch below.
 

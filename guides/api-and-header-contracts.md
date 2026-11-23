@@ -54,6 +54,9 @@
   `tests/support/trading_system/SyntheticHost.hpp` is test-only support in the
   `optionx::test_support` namespace. A public consumer must not depend on it or
   on files under `examples/`; use `<optionx_cpp/trading_system.hpp>` instead.
+- Batch 7B's `trading_system/detail/PlatformDtoMapper.hpp` is an internal leaf
+  included by `trading_system.hpp`. Its scoped `detail::platform_mapping` types
+  are not a supported public mapper/money API or standalone include point.
 - `storages.hpp` remains a separate aggregate for generic/session/record
   storage and must not include `trading_system/TradingSystemStorage.hpp`.
 - Bridge families are public only through `bridges.hpp` or the family umbrella

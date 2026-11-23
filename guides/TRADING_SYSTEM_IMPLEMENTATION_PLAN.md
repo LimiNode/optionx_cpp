@@ -11,7 +11,9 @@ merged in `main`. Batch 6 merged through PR #192 as
 workflows passed on that exact SHA. This establishes the offline domain, not
 production runtime readiness. SyntheticHost remains test support.
 
-Batch 7A is the next documentation-only review gate. Every later stage must
+Batch 7A merged through PR #193 as `e81a43db85a31d6828fac72422e0fc5d384e718a`.
+[Batch 7B](trading-system-batch7b.md) is the pure mapper implementation under
+separate Draft review; 7C/7D remain gated. Every later stage must
 preserve the existing broker, Router, task and storage contracts; no live
 trading follows automatically from these milestones.
 
@@ -148,20 +150,22 @@ The accepted synthetic slice is followed first by
 separate [delivery plan](trading-system-batch7-plan.md). 7A audits existing
 platform guarantees and proposes the state/identity, retry ownership,
 reconciliation, account/risk, lifecycle and offline-test boundaries. It adds no
-runtime and stops for independent review.
+runtime. Its independent review is complete and PR #193 is merged.
 
-Proposed later PRs are a pure request/observation adapter (7B), durable receipt
-application and known-ID reconciliation on fakes (7C), then bounded offline
+The separate 7B Draft delivers only a pure request/observation adapter.
+Proposed later PRs cover durable receipt application and known-ID
+reconciliation on fakes (7C), then bounded offline
 integration through the existing platform layer (7D). Live execution requires
 a separate future gate. Graph/GUI work and ADELIA/MegaConnector integrations
 are not part of Batch 7.
 
 Do not alter `IntradeBarPlatform`, `TradeManager`, `RequestManager`, `TradeState`,
 callbacks or existing retry behavior without a separately confirmed defect.
-IntradeBar `OPEN_ERROR` keeps failed-open semantics; `CHECK_ERROR` keeps the
-fact of an opened trade whose result is unavailable. Existing Trading System
-unknown-execution states remain for genuinely missing evidence, not blanket
-reinterpretation of broker errors. No strategy formula belongs in the platform.
+IntradeBar `OPEN_ERROR` keeps failed-open semantics; `CHECK_ERROR` preserves
+previously established opening but does not independently prove it. Existing
+Trading System unknown-execution states remain for genuinely missing evidence,
+not blanket reinterpretation of broker errors. No strategy formula belongs in
+the platform.
 
 ## Review Gates
 
@@ -174,8 +178,8 @@ Every batch requires:
 - no secret or live-account material in fixtures;
 - a diff review showing that unrelated user changes were preserved.
 
-The separate Batch 5A, 5B and 5C review gates are complete. Batch 7A must remain
-a separate Draft PR until architecture review; do not start 7B automatically.
+The separate Batch 5A, 5B, 5C and 7A review gates are complete. Stop after the
+separate 7B Draft PR; do not merge it or start 7C/7D automatically.
 These stages do not include live Polymarket integration, an exchange
 orderbook/position engine, a GUI/graph editor, an FX aggregation engine, or a
 new scheduler/event bus.

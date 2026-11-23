@@ -2,7 +2,8 @@
 
 ## Status And Scope
 
-Architecture proposal for independent review, based on
+Accepted architecture contract, merged through PR #193 as
+`e81a43db85a31d6828fac72422e0fc5d384e718a`, based on
 `main@47ec37b825da9163bfa7ed3fe09f2d4dff0d1797` after the guarded squash merge of
 [Batch 6, PR #192](https://github.com/LimiNode/optionx_cpp/pull/192).
 Batches 1-6 are complete. `optionx::test_support::SyntheticHost` remains test
@@ -14,8 +15,8 @@ IntradeBar failed-open semantics. It is the integration boundary, not an
 implementation to replace or reclassify.
 
 The [implementation slices](trading-system-batch7-plan.md) require separate
-approval. Stop after this architecture PR; neither 7B nor live execution is
-authorized by 7A.
+approval. Subsequent review authorized only the [pure 7B mapper](trading-system-batch7b.md).
+7C/7D and live execution remain gated; no runtime follows from the 7A merge.
 
 ## Decisions
 
@@ -25,9 +26,10 @@ authorized by 7A.
 - IntradeBar `OPEN_ERROR` means unsuccessful opening under the existing platform
   contract. Do not reinterpret it as `EXECUTION_UNKNOWN` from generic network
   reasoning or parse `error_desc` to invent another HTTP classifier.
-- `OPEN_SUCCESS` confirms opening. `CHECK_ERROR` concerns the result of an
-  opened trade; it must not erase acceptance, become an opening failure or
-  release risk as if no trade existed.
+- `OPEN_SUCCESS` confirms opening. `CHECK_ERROR` reports a failed result check;
+  it must not erase previously established acceptance, become an opening
+  failure or release risk as if no trade existed. It does not independently
+  establish opening, even if a numeric broker ID is present.
 - Reuse the existing Trading System `EXECUTION_UNKNOWN` states for genuinely
   missing execution evidence, including process interruption before a platform
   callback is recorded. Do not add that value to broker `TradeState`.
@@ -81,7 +83,7 @@ those facts.
 | `OPEN_SUCCESS` | Opening confirmed. | Persist acceptance and numeric broker ID; `BROKER_ID_PERSISTED` when available, otherwise `BROKER_ACCEPTED` and reconcile identity. | Hold risk, await result. |
 | `IN_PROGRESS` | Active trade. | Preserve acceptance/ID; `EXECUTED` may record active execution after the valid acceptance path. | Hold risk; ignore indicative `live_state` as settlement. |
 | `WAITING_CLOSE` | Opened trade awaiting its final check. | Preserve acceptance and broker ID. | Hold risk, no financial progression. |
-| `CHECK_ERROR` | Result check failed; do not undo known opening. | Retain accepted/executed state and journal the check failure; schedule an eligible `fetch_trade_result()` for the same broker ID. | No settlement from fallback profit; no release or reopen. |
+| `CHECK_ERROR` | Result check failed; neither establish opening nor undo known acceptance. | Journal the check failure and preserve prior evidence/state. Retain accepted/executed state only when previously established; query the same broker ID only with validated binding/provenance and lifecycle eligibility. | No settlement from fallback profit; no release or reopen. |
 | `WIN` | Confirmed final financial outcome. | `OutcomeKind::WIN`, `EXECUTED` evidence and validated positive native net profit. | Physical settlement, then group completion once all members qualify. |
 | `LOSS` | Confirmed final financial outcome. | `OutcomeKind::LOSS`, `EXECUTED` evidence and validated negative native net profit. | Same group-level rule. |
 | `STANDOFF` | Confirmed draw. | `OutcomeKind::DRAW` with checked zero native net profit. | Executed draw, not a rejected attempt. |
@@ -94,6 +96,15 @@ request/account identity and broker ID, then persist the necessary acceptance
 and settlement facts using allowed transitions. Do not invent that callbacks
 must arrive once each or in a fixed order. A final fact cannot be demoted by a
 late `WAITING_OPEN`, `OPEN_SUCCESS` or `CHECK_ERROR` notification.
+
+`CHECK_ERROR` can precede opening confirmation: `TradeQueueManager` adds a
+`WAITING_OPEN` transaction to its open queue before broker confirmation, and
+`finalize_all_trades()` can emit `CHECK_ERROR / CLIENT_FORCED_CLOSE` for it.
+`TradeManager::fetch_trade_result()` also returns `CHECK_ERROR / INVALID_REQUEST`
+when broker identity is missing or lacks the required numeric `option_id`.
+A numeric ID alone is correlation, not independent execution proof. Preserve
+the captured operation and raw diagnostic without inventing acceptance or
+automatically mapping the error to `OPEN_ERROR` / `EXECUTION_UNKNOWN`.
 
 ### Failed-open evidence encoding
 
@@ -239,7 +250,7 @@ not an older snapshot over a newer terminal record.
 | --- | --- |
 | Known positive Intrade `option_id` | Use `fetch_trade_result(TradeResultQuery, result, callback)` against the recorded account. Check-query retries are not opening retries. |
 | Opening confirmed, ID not durably captured | Preserve acceptance if known; query available history and reconcile the mapping. Never fabricate an ID or automatically reopen. |
-| `CHECK_ERROR`, delayed settlement or reconnect | Retain accepted identity and exposure; retry result lookup only when lifecycle/account gates permit. Reconnect alone is not an outcome. |
+| `CHECK_ERROR`, delayed settlement or reconnect | Preserve previously proven acceptance/identity and exposure without inferring new acceptance; retry result lookup only with validated identity provenance and lifecycle/account gates. Reconnect alone is not an outcome. |
 | Unknown ID, history unavailable/incomplete | Keep unresolved evidence and risk. `fetch_trade_history()` availability is not a guarantee of complete history or proof of no execution. |
 | Multiple or merely heuristic history candidates | `AMBIGUOUS`, not authoritative binding. Even a single amount/time match can be a manual trade; consider clock skew, latency and history completeness. |
 | Captured Intrade `OPEN_ERROR` | Preserve failed-open semantics and existing policy. No automatic adapter reinterpretation into unknown execution. |
@@ -336,7 +347,8 @@ The proposed tests below are **not implemented in 7A**:
 | All `TradeState` values, `trade_state` differing from `live_state` | Exhaustive mapping, no indicative financial progression. |
 | HTTP 200 empty-body fixture through existing parser and platform outcome | `OPEN_ERROR` retained, no adapter HTTP reparser or blanket unknown mapping. |
 | Queue admission versus `OPEN_SUCCESS`; pre-enqueue rejection | No early acceptance; only the demonstrated failed-open/local rejection path releases that member. |
-| `CHECK_ERROR` carrying a nonzero estimated profit | Acceptance and broker ID retained, no settlement or reopen, result query uses the original numeric ID. |
+| `CHECK_ERROR` before confirmation (`CLIENT_FORCED_CLOSE`) or without numeric ID (`INVALID_REQUEST`) | No new opening assertion, no automatic failed-open/unknown conversion; preserve raw diagnostic and captured operation. |
+| `OPEN_SUCCESS` then `CHECK_ERROR`, including nonzero estimated profit | Previously established acceptance/ID retained, no settlement or reopen; a later validated WIN/LOSS remains applicable. An ID alone is not opening proof. |
 | WIN/LOSS/draw/full refund, invalid numeric/currency/sign facts | Exact native normalization or explicit unsupported result; no fabricated money. |
 | Duplicate/reordered callbacks and repeated result-query completion | One canonical receipt and MM advance; no regression of terminal state. |
 | Known ID check, missing ID, incomplete history and manual-trade lookalikes | Authoritative identity preferred; heuristic ambiguity and unavailable history preserve risk. |

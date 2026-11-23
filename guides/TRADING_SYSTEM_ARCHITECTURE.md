@@ -83,8 +83,9 @@ duplicate callbacks must not advance a series twice.
 
 That generic unknown state does not redefine broker `TradeState`.
 IntradeBar `OPEN_ERROR` retains the established unsuccessful-opening contract;
-`OPEN_SUCCESS` confirms opening and `CHECK_ERROR` preserves that fact while
-its result is unavailable. See the [7A correspondence](trading-system-batch7a.md)
+`OPEN_SUCCESS` confirms opening; `CHECK_ERROR` preserves previously known
+acceptance but does not independently prove opening, even with a numeric ID.
+See the [7A correspondence](trading-system-batch7a.md)
 for missing-observation recovery, evidence-encoding gaps and retry ownership.
 The existing platform's managers, callbacks and retry behavior remain unchanged.
 
