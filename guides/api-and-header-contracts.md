@@ -57,6 +57,13 @@
 - Batch 7B's `trading_system/detail/PlatformDtoMapper.hpp` is an internal leaf
   included by `trading_system.hpp`. Its scoped `detail::platform_mapping` types
   are not a supported public mapper/money API or standalone include point.
+- Batch 7C-B's `trading_system/detail/PlatformReceipts.hpp` is likewise an
+  internal leaf. Its sealed binding and receipt methods belong to the existing
+  execution owner's internal adapter protocol, not an independently supported
+  public runtime API. `trading_system.hpp` prepares the existing
+  `platforms/common/BaseTradingApi.hpp` role after trading DTOs for offline
+  known-ID queries; this does not promote that leaf to a standalone include or
+  import the full platform/network stack.
 - `storages.hpp` remains a separate aggregate for generic/session/record
   storage and must not include `trading_system/TradingSystemStorage.hpp`.
 - Bridge families are public only through `bridges.hpp` or the family umbrella

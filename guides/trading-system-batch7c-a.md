@@ -10,8 +10,11 @@ contract, not the platform API or a second execution/terminal ledger.
 
 Use the supported `<optionx_cpp/trading_system.hpp>` aggregate. No live/demo
 calls, credentials, dependencies, new tables or global schema migration are
-involved. Stop at this Draft PR for independent review; neither its merge nor
-7C-B/7D is authorized automatically.
+involved. This stage was accepted and squash-merged through PR #195 as
+`b6f293833bd724075767d3ad31738d9ec245fde6`, with the same tree as reviewed HEAD
+`a36d6050af408d979a7ef3efbcfac12d90661043`.
+The separately authorized [7C-B](trading-system-batch7c-b.md) adds the bound
+receipt path; its merge and 7D remain review gates.
 
 ## Contract Audit And Decision
 
@@ -146,7 +149,7 @@ offline parser/query/lifecycle tests remain separate checks. Exact-head results
 belong in the PR report. The [MSVC platform-target baseline](trading-system-batch7b.md#separate-msvc-platform-baseline)
 is not fixed here and remains a gate before 7D.
 
-7C-B must review bound platform receipt provenance, monotonic durable acceptance
+The separate 7C-B slice reviews bound platform receipt provenance, monotonic durable acceptance
 after CHECK_ERROR, revisions, known-ID result queries, bounded normal receipt
 lookup, mirror ownership and crash recovery. Persist
 `BINARY64_FIXED_NEAREST_EVEN_V1`, selected currency/precision and original numeric

@@ -82,7 +82,9 @@ Scope: factor the minimal receipt path in the existing execution recovery owner,
 apply acceptance/check-failure/final receipts with revision and idempotency
 guards, and drive `fetch_trade_result()` through a programmed `BaseTradingApi`
 fake for known broker IDs. No real Intrade execution. This follows independent
-acceptance of 7C-A; it is not part of the evidence-only PR and is not yet authorized.
+acceptance and guarded merge of 7C-A through PR #195. It is separately authorized,
+not part of the evidence-only PR. See the [receipt contract](trading-system-batch7c-b.md);
+stop at its Draft PR without merge or 7D.
 
 Reuse: `ExecutionRecoveryManager` transitions, `TradingSystemStorage::UnitOfWork`,
 physical settlement/group completion, `TradeResultQuery`, existing account and
@@ -106,9 +108,10 @@ evidence. Replay uses that version or fails closed if unsupported; it must not
 recompute historical money under the latest normalization rules.
 
 Negative tests: rejected/duplicate/conflicting receipt; stale revision; lost
-acceptance/result callback; unknown ID or string-only Intrade identity; incomplete
-or ambiguous history; result checks during account deactivation; storage failure
-and reopen; accepted fact with unavailable outcome; mirror replay after a crash.
+acceptance/result callback; unknown ID or string-only Intrade identity;
+result checks during account deactivation; storage failure and reopen; accepted
+fact with unavailable outcome. History heuristics and durable TradeRecordDB mirror
+delivery remain deferred integration work, not claimed implemented here.
 
 Acceptance: review and test failed-open evidence encoding; no duplicated state
 machine; record-visit instrumentation for bounded ordinary receipt reads; no
