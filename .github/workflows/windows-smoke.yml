@@ -35,8 +35,13 @@ jobs:
       - name: Compile MSVC platform regression targets
         shell: pwsh
         run: |
-          msbuild build-windows/intrade_bar_api_response_test.vcxproj /t:ClCompile /p:Configuration=Debug /p:Platform=x64 /nologo
-          msbuild build-windows/trade_result_query_test.vcxproj /t:ClCompile /p:Configuration=Debug /p:Platform=x64 /nologo
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild not found' }
+          foreach ($target in @('intrade_bar_api_response_test', 'trade_result_query_test')) {
+            & $msbuild "build-windows/$target.vcxproj" /t:ClCompile /p:Configuration=Debug /p:Platform=x64 /nologo
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Build lifecycle stack test and example
         run: >
