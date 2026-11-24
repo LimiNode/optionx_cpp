@@ -148,6 +148,20 @@ TEST(SimulatorPolicyTest, RejectsAmbiguousWritersButAllowsIndependentFields) {
     EXPECT_EQ(policy.validate(), SimulatorPolicyError::DUPLICATE_RULE_ID);
 }
 
+TEST(SimulatorPolicyTest, AdjacentWindowsDoNotConflictAndUnknownRuleSymbolFails) {
+    auto policy = example_policy();
+    SimulatorRule adjacent = policy.rules.front();
+    adjacent.id = "after-close";
+    adjacent.selector.utc_window = SimulatorTimeWindow{65100, 65700};
+    policy.rules.push_back(adjacent);
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::NONE);
+    EXPECT_EQ(policy.resolve(request("EURUSD", OrderType::BUY, 65100)).applied_rule_ids,
+              std::vector<std::string>{"after-close"});
+
+    policy.rules.back().selector.symbol = "EURUSX";
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+}
+
 TEST(SimulatorPolicyTest, RejectsInvalidConfigurationAndKeepsEnumDirection) {
     auto policy = example_policy();
     policy.rules.front().selector.utc_window = SimulatorTimeWindow{10, 10};

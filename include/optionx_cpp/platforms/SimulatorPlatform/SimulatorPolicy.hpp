@@ -160,7 +160,8 @@ namespace optionx::platforms {
             std::set<std::string> ids;
             for (const auto& rule : rules) {
                 if (rule.id.empty() || !valid_values(rule.overrides) ||
-                    (rule.selector.symbol && rule.selector.symbol->empty()) ||
+                    (rule.selector.symbol &&
+                     symbols.find(*rule.selector.symbol) == symbols.end()) ||
                     (rule.selector.direction && *rule.selector.direction == OrderType::UNKNOWN) ||
                     (rule.selector.utc_window && !valid_window(*rule.selector.utc_window)) ||
                     (rule.selector.expiry &&
