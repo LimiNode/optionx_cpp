@@ -19,7 +19,16 @@
 #include "trading_system/ExecutionGroupAggregator.hpp"
 #include "trading_system/SeriesProgression.hpp"
 #include "trading_system/RiskAdmission.hpp"
+#if defined(small)
+#pragma push_macro("small")
+#undef small
+#define OPTIONX_RESTORE_SMALL_MACRO
+#endif
 #include "trading_system/TradingSystemStorage.hpp"
+#if defined(OPTIONX_RESTORE_SMALL_MACRO)
+#pragma pop_macro("small")
+#undef OPTIONX_RESTORE_SMALL_MACRO
+#endif
 #include "trading_system/ExecutionRecovery.hpp"
 #include "trading_system/detail/PlatformDtoMapper.hpp"
 #include "trading_system/detail/PlatformReceipts.hpp"
