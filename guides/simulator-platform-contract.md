@@ -93,6 +93,11 @@ delay. Active-trade limits count accepted but not yet terminal operations;
 global and per-symbol caps both apply. They are concurrency limits, not
 rate limits over a wall-clock interval. No interval rate limiter is implied.
 
+SIM-1's pure resolver stores stake thresholds as native-currency minor units
+and payout as parts per million (`750000` means `0.75`). The decimal strings
+in the JSON example require explicit conversion by a future configuration
+adapter; they are not binary floating-point inputs to the resolver.
+
 An expiry policy accepts a bounded duration interval in seconds, excludes
 specified durations, and may override fields at duration thresholds. Duration
 resolution is one-second precision. A trade with unsupported expiry fails

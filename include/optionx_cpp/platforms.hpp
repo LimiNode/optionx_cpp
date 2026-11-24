@@ -26,6 +26,7 @@
 #include "platforms/common/ApiResult.hpp"
 #include "platforms/common/BaseTradingApi.hpp"
 #include "platforms/common/BaseTradingPlatform.hpp"
+#include "platforms/SimulatorPlatform/SimulatorPolicy.hpp"
 #include "platforms/IntradeBarPlatform.hpp"
 //#include "platforms/TradeUpPlatform.hpp"
 
