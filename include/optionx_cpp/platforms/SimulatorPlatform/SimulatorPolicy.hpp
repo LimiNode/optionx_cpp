@@ -6,6 +6,7 @@
 /// \brief Deterministic, side-effect-free trading-condition rules for the simulator.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -138,16 +139,19 @@ namespace optionx::platforms {
         std::set<std::uint32_t> excluded_expiries;
         std::vector<SimulatorRule> rules;
 
-        /// \brief Validates static bounds and equal-rank overlapping field writers.
+        /// \brief Validates bounds, counter scopes, and all reachable effective ranges.
         /// \return NONE when configuration can resolve without ambiguous ties.
         SimulatorPolicyError validate() const {
-            if (version == 0 || !valid_values(defaults) ||
+            if (version == 0 || symbols.empty() || symbols.size() > max_symbols ||
+                rules.size() > max_rules || excluded_expiries.size() > max_exclusions ||
+                !valid_values(defaults) ||
                 allowed_expiry.minimum == 0 ||
                 allowed_expiry.minimum > allowed_expiry.maximum) {
                 return SimulatorPolicyError::INVALID_CONFIG;
             }
             for (const auto& [symbol, values] : symbols) {
-                if (symbol.empty() || !valid_values(values)) {
+                if (symbol.empty() || !valid_values(values) ||
+                    values.max_active_global.has_value()) {
                     return SimulatorPolicyError::INVALID_CONFIG;
                 }
                 SimulatorRuleOverrides effective = defaults;
@@ -162,11 +166,17 @@ namespace optionx::platforms {
                 if (rule.id.empty() || !valid_values(rule.overrides) ||
                     (rule.selector.symbol &&
                      symbols.find(*rule.selector.symbol) == symbols.end()) ||
-                    (rule.selector.direction && *rule.selector.direction == OrderType::UNKNOWN) ||
+                    (rule.selector.direction &&
+                     *rule.selector.direction != OrderType::BUY &&
+                     *rule.selector.direction != OrderType::SELL) ||
                     (rule.selector.utc_window && !valid_window(*rule.selector.utc_window)) ||
                     (rule.selector.expiry &&
                      (rule.selector.expiry->minimum == 0 ||
-                      rule.selector.expiry->minimum > rule.selector.expiry->maximum))) {
+                      rule.selector.expiry->minimum > rule.selector.expiry->maximum)) ||
+                    (rule.overrides.max_active_global &&
+                     (rule.selector.symbol || rule.selector.direction || rule.selector.expiry)) ||
+                    (rule.overrides.max_active_symbol &&
+                     (rule.selector.direction || rule.selector.expiry))) {
                     return SimulatorPolicyError::INVALID_CONFIG;
                 }
                 if (!ids.insert(rule.id).second) return SimulatorPolicyError::DUPLICATE_RULE_ID;
@@ -180,6 +190,61 @@ namespace optionx::platforms {
                         a.overrides.overlaps_fields(b.overrides) &&
                         selectors_overlap(a.selector, b.selector)) {
                         return SimulatorPolicyError::AMBIGUOUS_RULES;
+                    }
+                }
+            }
+            std::vector<const SimulatorRule*> ordered;
+            ordered.reserve(rules.size());
+            std::vector<std::uint64_t> times{0, 86400};
+            std::vector<std::uint64_t> expiries{
+                allowed_expiry.minimum,
+                static_cast<std::uint64_t>(allowed_expiry.maximum) + 1};
+            for (const auto& rule : rules) {
+                ordered.push_back(&rule);
+                if (rule.selector.utc_window) {
+                    times.push_back(rule.selector.utc_window->start);
+                    times.push_back(rule.selector.utc_window->end);
+                }
+                if (rule.selector.expiry) {
+                    expiries.push_back(rule.selector.expiry->minimum);
+                    expiries.push_back(static_cast<std::uint64_t>(rule.selector.expiry->maximum) + 1);
+                }
+            }
+            for (const auto duration : excluded_expiries) {
+                expiries.push_back(duration);
+                expiries.push_back(static_cast<std::uint64_t>(duration) + 1);
+            }
+            std::sort(ordered.begin(), ordered.end(), rule_less);
+            sort_unique(times);
+            sort_unique(expiries);
+            expiries.erase(std::remove_if(expiries.begin(), expiries.end(), [this](std::uint64_t value) {
+                return value < allowed_expiry.minimum ||
+                       value > static_cast<std::uint64_t>(allowed_expiry.maximum) + 1;
+            }), expiries.end());
+
+            // Selector membership is constant inside each half-open boundary cell.
+            const std::uint64_t cells = static_cast<std::uint64_t>(symbols.size()) * 2 *
+                                        (times.size() - 1) * (expiries.size() - 1);
+            if (cells > max_validation_cells) return SimulatorPolicyError::INVALID_CONFIG;
+            for (const auto& [symbol, symbol_values] : symbols) {
+                for (const auto direction : {OrderType::BUY, OrderType::SELL}) {
+                    for (std::size_t ti = 0; ti + 1 < times.size(); ++ti) {
+                        for (std::size_t ei = 0; ei + 1 < expiries.size(); ++ei) {
+                            const auto duration = static_cast<std::uint32_t>(expiries[ei]);
+                            if (excluded_expiries.count(duration)) continue;
+                            SimulatorRuleOverrides values = defaults;
+                            symbol_values.apply_to(values);
+                            for (const auto* rule : ordered) {
+                                if (rule->selector.matches(symbol, direction,
+                                          static_cast<std::uint32_t>(times[ti]), duration)) {
+                                    rule->overrides.apply_to(values);
+                                }
+                            }
+                            if (!valid_values(values) || !values.payout_ppm ||
+                                !values.min_stake_minor || !values.max_stake_minor) {
+                                return SimulatorPolicyError::INVALID_CONFIG;
+                            }
+                        }
                     }
                 }
             }
@@ -221,10 +286,7 @@ namespace optionx::platforms {
                     matched.push_back(&rule);
                 }
             }
-            std::sort(matched.begin(), matched.end(), [](const auto* a, const auto* b) {
-                return std::make_tuple(a->priority, a->selector.specificity(), a->id) <
-                       std::make_tuple(b->priority, b->selector.specificity(), b->id);
-            });
+            std::sort(matched.begin(), matched.end(), rule_less);
             for (const auto* rule : matched) {
                 rule->overrides.apply_to(result.values);
                 result.applied_rule_ids.push_back(rule->id);
@@ -239,6 +301,21 @@ namespace optionx::platforms {
         }
 
     private:
+        static constexpr std::size_t max_symbols = 128;
+        static constexpr std::size_t max_rules = 128;
+        static constexpr std::size_t max_exclusions = 256;
+        static constexpr std::uint64_t max_validation_cells = 200000;
+
+        static bool rule_less(const SimulatorRule* a, const SimulatorRule* b) {
+            return std::make_tuple(a->priority, a->selector.specificity(), a->id) <
+                   std::make_tuple(b->priority, b->selector.specificity(), b->id);
+        }
+
+        static void sort_unique(std::vector<std::uint64_t>& values) {
+            std::sort(values.begin(), values.end());
+            values.erase(std::unique(values.begin(), values.end()), values.end());
+        }
+
         static bool valid_values(const SimulatorRuleOverrides& values) noexcept {
             return (!values.payout_ppm || *values.payout_ppm >= 0) &&
                    (!values.min_stake_minor || *values.min_stake_minor > 0) &&
@@ -248,7 +325,7 @@ namespace optionx::platforms {
         }
 
         static bool valid_window(const SimulatorTimeWindow& window) noexcept {
-            return window.start < 86400 && window.end < 86400 &&
+            return window.start < 86400 && window.end <= 86400 &&
                    window.start != window.end;
         }
 

@@ -108,6 +108,16 @@ and payout as parts per million (`750000` means `0.75`). The decimal strings
 in the JSON example require explicit conversion by a future configuration
 adapter; they are not binary floating-point inputs to the resolver.
 
+Before trading, SIM-1 validates every reachable effective combination of
+symbol, BUY/SELL, UTC window, and expiry. It partitions time and duration at
+rule boundaries and excluded expiries, then checks one representative per
+half-open cell; selector membership is constant inside a cell. Validation is
+`O(R^2 + S * T * E * R)`, where `R` is rules, `S` symbols, and `T/E` are the
+numbers of distinct time/expiry intervals. To bound hostile configurations,
+the implementation rejects more than 128 rules, 128 symbols, 256 excluded
+expiries, or 200000 reachable cells. `resolve()` remains fail-closed if a
+mutable policy object becomes invalid after prior validation.
+
 An expiry policy accepts a bounded duration interval in seconds, excludes
 specified durations, and may override fields at duration thresholds. Duration
 resolution is one-second precision. A trade with unsupported expiry fails

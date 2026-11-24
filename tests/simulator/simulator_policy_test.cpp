@@ -139,10 +139,10 @@ TEST(SimulatorPolicyTest, RejectsAmbiguousWritersButAllowsIndependentFields) {
               SimulatorPolicyError::AMBIGUOUS_RULES);
 
     policy.rules.back().overrides = {};
-    policy.rules.back().overrides.max_active_symbol = 2;
+    policy.rules.back().overrides.min_stake_minor = 200;
     EXPECT_EQ(policy.validate(), SimulatorPolicyError::NONE);
-    EXPECT_EQ(policy.resolve(request("EURUSD", OrderType::BUY, 64800)).values.max_active_symbol,
-              2u);
+    EXPECT_EQ(policy.resolve(request("EURUSD", OrderType::BUY, 64800)).values.min_stake_minor,
+              200);
 
     policy.rules.back().id = "close-window";
     EXPECT_EQ(policy.validate(), SimulatorPolicyError::DUPLICATE_RULE_ID);
@@ -159,6 +159,109 @@ TEST(SimulatorPolicyTest, AdjacentWindowsDoNotConflictAndUnknownRuleSymbolFails)
               std::vector<std::string>{"after-close"});
 
     policy.rules.back().selector.symbol = "EURUSX";
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+}
+
+TEST(SimulatorPolicyTest, GlobalCapIsTimeOnlyAndIdenticalAcrossSymbols) {
+    auto policy = example_policy();
+    SimulatorRule timed;
+    timed.id = "account-evening-cap";
+    timed.priority = 20;
+    timed.selector.utc_window = SimulatorTimeWindow{64800, 68400};
+    timed.overrides.max_active_global = 2;
+    policy.rules.push_back(timed);
+    ASSERT_EQ(policy.validate(), SimulatorPolicyError::NONE);
+    EXPECT_EQ(policy.resolve(request("EURUSD", OrderType::BUY, 64800)).values.max_active_global, 2u);
+    EXPECT_EQ(policy.resolve(request("GBPUSD", OrderType::SELL, 64800)).values.max_active_global, 2u);
+    EXPECT_EQ(policy.resolve(request("EURUSD", OrderType::BUY, 68400)).values.max_active_global, 10u);
+
+    policy.rules.back().selector.symbol = "EURUSD";
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+    policy.rules.back().selector.symbol.reset();
+    policy.rules.back().selector.direction = OrderType::BUY;
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+    policy.rules.back().selector.direction.reset();
+    policy.rules.back().selector.expiry = SimulatorExpiryRange{60, 300};
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+    policy.rules.pop_back();
+    policy.symbols["EURUSD"].max_active_global = 2;
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+}
+
+TEST(SimulatorPolicyTest, RejectsCrossRankEffectiveStakeContradiction) {
+    auto policy = example_policy();
+    SimulatorRule minimum;
+    minimum.id = "large-minimum";
+    minimum.priority = 1;
+    minimum.selector.symbol = "EURUSD";
+    minimum.selector.direction = OrderType::SELL;
+    minimum.overrides.min_stake_minor = 5000;
+    policy.rules.push_back(minimum);
+
+    SimulatorRule maximum;
+    maximum.id = "small-maximum";
+    maximum.priority = 2;
+    maximum.selector.expiry = SimulatorExpiryRange{60, 120};
+    maximum.overrides.max_stake_minor = 2000;
+    policy.rules.push_back(maximum);
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+    EXPECT_EQ(policy.resolve(request("EURUSD", OrderType::BUY, 0, 60)).error,
+              SimulatorPolicyError::INVALID_CONFIG);
+
+    policy.rules.back().selector.symbol = "GBPUSD";
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::NONE);
+}
+
+TEST(SimulatorPolicyTest, DayEndAndMidnightWindowsUseHalfOpenBounds) {
+    auto policy = example_policy();
+    SimulatorRule full_day;
+    full_day.id = "full-day";
+    full_day.selector.utc_window = SimulatorTimeWindow{0, 86400};
+    full_day.overrides.payout_ppm = 700000;
+    policy.rules.push_back(full_day);
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::NONE);
+    EXPECT_EQ(policy.resolve(request("GBPUSD", OrderType::SELL, 0)).values.payout_ppm, 700000);
+    EXPECT_EQ(policy.resolve(request("GBPUSD", OrderType::SELL, 86399)).values.payout_ppm, 700000);
+
+    policy.rules.back().selector.utc_window = SimulatorTimeWindow{86399, 86400};
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::NONE);
+    EXPECT_EQ(policy.resolve(request("GBPUSD", OrderType::SELL, 86398)).values.payout_ppm, 800000);
+    EXPECT_EQ(policy.resolve(request("GBPUSD", OrderType::SELL, 86399)).values.payout_ppm, 700000);
+
+    policy.rules.back().selector.utc_window = SimulatorTimeWindow{86399, 0};
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::NONE);
+    EXPECT_EQ(policy.resolve(request("GBPUSD", OrderType::SELL, 86399)).values.payout_ppm, 700000);
+    EXPECT_EQ(policy.resolve(request("GBPUSD", OrderType::SELL, 0)).values.payout_ppm, 800000);
+    policy.rules.back().selector.utc_window = SimulatorTimeWindow{86400, 0};
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+    policy.rules.back().selector.utc_window = SimulatorTimeWindow{0, 0};
+    EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
+}
+
+TEST(SimulatorPolicyTest, RuleOrderDoesNotChangeResolutionAndInvalidEnumIsRejected) {
+    auto policy = example_policy();
+    SimulatorRule payout;
+    payout.id = "payout-only";
+    payout.priority = 20;
+    payout.selector.symbol = "EURUSD";
+    payout.selector.utc_window = SimulatorTimeWindow{64800, 65000};
+    payout.overrides.payout_ppm = 900000;
+    policy.rules.push_back(payout);
+    const auto first = policy.resolve(request("EURUSD", OrderType::BUY, 64800));
+    ASSERT_EQ(first.error, SimulatorPolicyError::NONE);
+    EXPECT_EQ(first.values.max_active_global, 10u);
+    EXPECT_EQ(first.values.max_active_symbol, 3u);
+    EXPECT_EQ(first.values.max_stake_minor, 2000);
+    std::reverse(policy.rules.begin(), policy.rules.end());
+    const auto reversed = policy.resolve(request("EURUSD", OrderType::BUY, 64800));
+    EXPECT_EQ(reversed.error, SimulatorPolicyError::NONE);
+    EXPECT_EQ(reversed.values.payout_ppm, first.values.payout_ppm);
+    EXPECT_EQ(reversed.applied_rule_ids, first.applied_rule_ids);
+
+    const auto invalid = static_cast<OrderType>(999);
+    EXPECT_EQ(policy.resolve(request("EURUSD", invalid, 64800)).error,
+              SimulatorPolicyError::INVALID_DIRECTION);
+    policy.rules.back().selector.direction = invalid;
     EXPECT_EQ(policy.validate(), SimulatorPolicyError::INVALID_CONFIG);
 }
 
