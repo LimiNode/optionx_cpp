@@ -32,5 +32,6 @@
 #include "trading_system/ExecutionRecovery.hpp"
 #include "trading_system/detail/PlatformDtoMapper.hpp"
 #include "trading_system/detail/PlatformReceipts.hpp"
+#include "trading_system/detail/PlatformObservationHandoff.hpp"
 
 #endif // OPTIONX_HEADER_TRADING_SYSTEM_HPP_INCLUDED
