@@ -32,6 +32,12 @@ jobs:
           -DOPTIONX_BUILD_EXAMPLES=ON
           -DOPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS=ON
 
+      - name: Compile MSVC platform regression targets
+        shell: pwsh
+        run: |
+          msbuild build-windows/intrade_bar_api_response_test.vcxproj /t:ClCompile /p:Configuration=Debug /p:Platform=x64 /nologo
+          msbuild build-windows/trade_result_query_test.vcxproj /t:ClCompile /p:Configuration=Debug /p:Platform=x64 /nologo
+
       - name: Build lifecycle stack test and example
         run: >
           cmake --build build-windows --config Debug --target
