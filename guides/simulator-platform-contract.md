@@ -99,9 +99,9 @@ returns stake plus 75% profit. Freeze payout and effective rule/profile ID at
 open. Later policy edits affect only later opens. Stake and active limits are
 checked and reserved as one owner-loop transition after queue admission.
 Active-trade limits count reserved pending opens and opened but not yet
-terminal operations;
-global and per-symbol caps both apply. They are concurrency limits, not
-rate limits over a wall-clock interval. No interval rate limiter is implied.
+terminal operations; global and per-symbol caps both apply. They are
+concurrency limits, not rate limits over a wall-clock interval. No interval
+rate limiter is implied.
 
 SIM-1's pure resolver stores stake thresholds as native-currency minor units
 and payout as parts per million (`750000` means `0.75`). The decimal strings

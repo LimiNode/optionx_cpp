@@ -2095,7 +2095,8 @@ namespace optionx::platforms::intrade_bar {
         };
 
         auto launch_batch = std::make_shared<std::function<void()>>();
-        *launch_batch = [this, state, make_host, complete, launch_batch]() {
+        *launch_batch = [this, state, make_host, complete, launch_batch,
+                         domain_check_batch_size]() {
             if (state->completed) return;
             if (state->next_index >= state->indices.size()) {
                 complete(false, 0);
@@ -2646,7 +2647,7 @@ namespace optionx::platforms::intrade_bar {
         auto load_more = std::make_shared<std::function<void(std::string)>>();
         auto process_page = std::make_shared<std::function<void(TradeHistoryHtmlPage, long)>>();
 
-        *process_page = [state, complete, load_more](
+        *process_page = [state, complete, load_more, max_html_history_pages](
                 TradeHistoryHtmlPage page,
                 long status_code) {
             ++state->page_count;
