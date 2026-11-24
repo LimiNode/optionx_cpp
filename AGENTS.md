@@ -18,6 +18,8 @@
   минимальные lifecycle, context, branching и risk contracts.
 - [Trading system implementation plan](guides/TRADING_SYSTEM_IMPLEMENTATION_PLAN.md) -
   последовательность небольших PR и первый synthetic vertical slice.
+- [SimulatorPlatform contract](guides/simulator-platform-contract.md) -
+  SIM-0: независимая paper-trading платформа, правила, котировки и инварианты.
 - [Platform API guide](guides/platform-api-guide.md) - практический справочник
   по платформам, модулям, событиям, DTO, storage и bridge API.
 - [API and header contracts](guides/api-and-header-contracts.md) - публичный
