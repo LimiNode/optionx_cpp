@@ -68,3 +68,10 @@ confirmed opening, duplicate and conflicting terminal receipts, overflow,
 shutdown/lifetime, lost callback and restart, wrong-thread drain, and
 idempotent logical completion. They do not establish live broker behavior or
 full production lifecycle integration.
+
+Windows smoke also builds and runs `intrade_bar_api_response_test` and
+`trade_result_query_test` instead of stopping after compilation. The bundled
+curl snapshot provides `libcurl.dll.a`; the MSVC linker can consume that import
+library when it is explicitly included in the network dependencies. Updating
+the Kurlyk gitlink to v1.1.1 is unrelated to this curl linkage: that release
+retains the same curl fallback and primarily updates WebSocket packaging.
