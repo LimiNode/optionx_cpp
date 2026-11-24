@@ -52,10 +52,14 @@ and callbacks. Equal-time events have a stable sequence number.
 
 The execution config defines open delay, close-response delay, tie/refund
 policy, price precision, stake precision, and rounding policy. Defaults for
-both delays are zero. The simulation uses no actual broker request. A
-nonzero open delay does not bypass the active-trade limit: the slot and stake
-are reserved atomically when a request is accepted. Rejected requests release
-no funds because no funds were reserved.
+both delays are zero. The simulation uses no actual broker request.
+`place_trade() == true` only acknowledges local queue admission. Processing
+that command later either fails before reservation or atomically reserves the
+stake and active slot for the pending open. A delayed open must therefore
+count against active-trade caps. At the actual open time, revalidate any
+time-dependent condition; if opening cannot proceed, release both reservations
+exactly once and emit failed-open evidence. A queued command not yet reserved
+has nothing to release.
 
 ## Rule model
 
@@ -66,6 +70,11 @@ seconds-of-day window, and expiry interval/threshold. Overrides may set
 availability, payout, minimum/maximum stake, global/per-symbol active limits,
 and other explicitly supported trading conditions. An absent field inherits
 the current value; it does not clear a value set by a less specific rule.
+`max_active_global` applies to the whole virtual account and may depend only
+on UTC time, never on symbol, direction, or expiry. It must not be set in
+per-symbol defaults. `max_active_symbol` applies to one symbol and may vary by
+time and symbol, but not direction or expiry. Both limits apply together; a
+future direction-specific cap would need its own counter and field.
 
 Resolution for each requested field:
 
@@ -88,8 +97,9 @@ Resolution for each requested field:
 Payout is the **net profit fraction on stake**: `0.75` means a winning bet
 returns stake plus 75% profit. Freeze payout and effective rule/profile ID at
 open. Later policy edits affect only later opens. Stake and active limits are
-checked and reserved as one owner-loop transition, including pending open
-delay. Active-trade limits count accepted but not yet terminal operations;
+checked and reserved as one owner-loop transition after queue admission.
+Active-trade limits count reserved pending opens and opened but not yet
+terminal operations;
 global and per-symbol caps both apply. They are concurrency limits, not
 rate limits over a wall-clock interval. No interval rate limiter is implied.
 
@@ -162,9 +172,13 @@ never use a later quote (no look-ahead). A missing eligible quote leaves the
 operation unresolved or rejects opening, as appropriate; it never invents a
 price. Define bounded waiting and terminal handling before SIM-3.
 
-At accepted open, allocate a stable virtual trade ID, reserve active slot and
-stake, and freeze requested parameters, policy version, matching rule IDs,
-payout, selected opening quote/source/time, and account currency. At expiry,
+The lifecycle has four distinct transitions: local queue admission,
+pre-open stake/slot reservation, actual open after any delay, and terminal
+settlement. Allocate a stable virtual trade ID at reservation. At actual open,
+freeze requested parameters, policy version, matching rule IDs, payout,
+selected opening quote/source/time, and account currency. Shutdown, cancel,
+failed quote selection, or any rejected open releases a reservation exactly
+once; a duplicate callback cannot release it twice. At expiry,
 select an eligible closing quote. BUY wins on price rise, SELL on price fall;
 equal price follows the configured draw/refund rule. A win credits stake plus
 rounded net profit; loss consumes the stake; refund returns the stake. Close
