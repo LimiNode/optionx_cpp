@@ -5,6 +5,10 @@ independent paper-trading platform for binary/fixed-outcome contracts. It may
 consume real or replayed quotes, but it never delegates trades to another
 platform. Integration with Trading System is a later, separate test target.
 
+SIM-2's implemented autonomous core and compiling usage are documented in
+[simulator-core.md](simulator-core.md). That bounded offline API is not the
+future platform facade or Router integration sketched below.
+
 ## Existing boundaries and compatibility
 
 - Use `PlatformType::SIMULATOR`; do not add another platform kind.
