@@ -165,9 +165,9 @@ namespace optionx::platforms {
             return m_records.back().trade.command_id;
         }
 
-        /// \brief Replaces only future effective opens; snapshots cannot be edited in place.
+        /// \brief Replaces future opens only, requiring a strictly increasing policy version.
         bool set_policy(SimulatorPolicySnapshot policy) {
-            if (m_stopped || m_shutdown_requested) return false;
+            if (m_stopped || m_shutdown_requested || policy.version() <= m_policy.version()) return false;
             m_policy = std::move(policy);
             return true;
         }

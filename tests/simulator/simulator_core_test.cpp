@@ -160,6 +160,29 @@ TEST(SimulatorCoreTest, CrossingWindowRevalidatesAvailabilityStakeAndCapsAndRele
     }
 }
 
+TEST(SimulatorCoreTest, PolicyUpdateRejectsSameOrOlderVersionWithoutChangingFutureOpen) {
+    SimulatorCore core(account(), {150, 0, 0, 10}, snapshot(),
+        quotes({{"EURUSD", 150, 100}, {"EURUSD", 60150, 101}}));
+    const auto id = *core.enqueue(order());
+    core.process();
+    auto changed = policy();
+    changed.defaults.payout_ppm = 100000;
+    EXPECT_FALSE(core.set_policy(snapshot(changed)));
+    changed.version = 2;
+    changed.defaults.payout_ppm = 500000;
+    EXPECT_TRUE(core.set_policy(snapshot(changed)));
+    EXPECT_FALSE(core.set_policy(snapshot()));
+    changed.defaults.payout_ppm = 900000;
+    EXPECT_FALSE(core.set_policy(snapshot(changed)));
+    core.advance_to(60150);
+    EXPECT_EQ(core.query(id)->policy_version, 2u);
+    EXPECT_EQ(core.query(id)->payout_ppm, 500000);
+    EXPECT_EQ(core.query(id)->net_profit_minor, 500);
+    core.shutdown();
+    changed.version = 3;
+    EXPECT_FALSE(core.set_policy(snapshot(changed)));
+}
+
 TEST(SimulatorCoreTest, WindowAtOpenOverridesPayoutAndRecordsMatchingIdentity) {
     auto value = policy();
     SimulatorRule rule;
@@ -286,7 +309,9 @@ TEST(SimulatorCoreTest, MissingOrStaleExpiryNeverFabricatesLossOrReleasesOpenedR
     for (const auto& ticks : std::vector<std::vector<SimulatorTick>>{
             {{"EURUSD", 0, 100}, {"EURUSD", 60001, 99}},
             {{"EURUSD", 0, 100}, {"EURUSD", 59899, 99}}}) {
-        SimulatorCore core(account(), {0, 500, 100, 10}, snapshot(), quotes(ticks));
+        auto capped = policy();
+        capped.defaults.max_active_global = 1;
+        SimulatorCore core(account(), {0, 500, 100, 10}, snapshot(capped), quotes(ticks));
         int callbacks = 0;
         const auto id = *core.enqueue(order(), [&](const auto& r) {
             ++callbacks;
@@ -302,6 +327,9 @@ TEST(SimulatorCoreTest, MissingOrStaleExpiryNeverFabricatesLossOrReleasesOpenedR
         EXPECT_EQ(core.account().exposure_minor, 1000);
         EXPECT_EQ(core.account().open_trades, 1u);
         core.advance_to(60500);
+        const auto blocked = *core.enqueue(order(OrderType::SELL));
+        core.process();
+        EXPECT_EQ(core.query(blocked)->error, TradeErrorCode::LIMIT_OPEN_TRADES);
         core.shutdown();
         core.shutdown();
         EXPECT_EQ(callbacks, 1);
@@ -342,6 +370,12 @@ TEST(SimulatorCoreTest, HalfUpRoundingAndOverflowCheckedWithoutWideIntegerExtens
     EXPECT_FALSE(SimulatorCore::win_profit(maximum, 1000001));
     EXPECT_FALSE(SimulatorCore::win_profit(0, 1));
     EXPECT_FALSE(SimulatorCore::win_profit(1, -1));
+    for (std::int64_t stake = 1; stake <= 1000000; stake += 7919) {
+        for (std::int64_t payout = 0; payout <= 2000000; payout += 65537) {
+            EXPECT_EQ(SimulatorCore::win_profit(stake, payout),
+                      (stake * payout + 500000) / 1000000);
+        }
+    }
     SimulatorCore core(account(), {}, snapshot(), quotes());
     const auto id = *core.enqueue(order(OrderType::BUY, 101));
     core.advance_to(60000);

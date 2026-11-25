@@ -241,7 +241,7 @@ Targets: `simulator_policy_test`, `simulator_core_test`,
 them. Local tests use no sleeps, credentials, network or platform owner.
 
 Local verification: MSVC 19.44 x64 Debug and MinGW GCC 15.2 x64 Release both
-passed 13/13 policy and 21/21 core tests (the latter includes a 162-scenario
+passed 13/13 policy and 22/22 core tests (the latter includes a 162-scenario
 direction/outcome/delay/expiry matrix), the strict two-TU C++17 consumer, and
 the runnable ledger example. Both Release benchmarks matched checksums.
 Ubuntu and exact-head workflow status are reported by the Draft PR checks,
@@ -268,6 +268,8 @@ and `-DCMAKE_CXX_FLAGS=-Wa,-mbig-obj`; do not mix ABI/runtime bundles.
 Not implemented: real-time clocks, Router/online ticks, durable history/restart,
 unresolved reconciliation/retry, multi-source ready/fallback policy, serialized
 config/money parsing, BaseTradingApi overrides, opening callback compatibility,
-or Trading System integration. Policy version is a caller-supplied label, not
-a durable hash registry. SIM-3 and SIM-4 must settle these contracts explicitly;
+or Trading System integration. `set_policy()` rejects equal/older versions and
+requires strictly increasing versions within one core. The host must map versions
+to configuration contents consistently across independent/restarted cores;
+there is no durable hash registry. SIM-3 and SIM-4 must settle these contracts explicitly;
 paper results are not claims about a live broker's execution quality.
