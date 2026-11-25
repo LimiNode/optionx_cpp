@@ -59,6 +59,12 @@ jobs:
           .\build-windows\Debug\lifecycle_stack_test.exe --gtest_brief=1
           .\build-windows\Debug\lifecycle_stack_example.exe
 
+      - name: Build simulator policy test
+        run: cmake --build build-windows --config Debug --target simulator_policy_test
+
+      - name: Run simulator policy test
+        run: .\build-windows\Debug\simulator_policy_test.exe --gtest_brief=1
+
       - name: Build MetaTrader path discovery test
         run: cmake --build build-windows --config Debug --target metatrader_paths_test
 

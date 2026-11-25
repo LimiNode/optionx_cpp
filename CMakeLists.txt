@@ -1115,6 +1115,7 @@ if(OPTIONX_BUILD_TESTS)
         market_data_tick_history_contract_test
         market_data_tick_continuity_test
         intrade_observed_tick_history_test
+        simulator_policy_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
@@ -1189,6 +1190,10 @@ if(OPTIONX_BUILD_TESTS)
 
         add_executable(${test_name} ${test_src})
         target_compile_features(${test_name} PRIVATE cxx_std_17)
+        if(MSVC AND test_name STREQUAL "simulator_policy_test")
+            set_target_properties(${test_name} PROPERTIES
+                MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        endif()
         if(test_name STREQUAL "trading_system_batch3_consumer_test")
             set_target_properties(${test_name} PROPERTIES
                 CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)

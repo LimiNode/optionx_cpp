@@ -40,6 +40,12 @@ jobs:
           ./build-linux/lifecycle_stack_test --gtest_brief=1
           ./build-linux/lifecycle_stack_example
 
+      - name: Build simulator policy test
+        run: cmake --build build-linux --target simulator_policy_test -j
+
+      - name: Run simulator policy test
+        run: ./build-linux/simulator_policy_test --gtest_brief=1
+
       - name: Build trade_record_db_test
         run: cmake --build build-linux --target trade_record_db_test -j
 
