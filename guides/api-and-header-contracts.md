@@ -19,6 +19,7 @@
 #include <optionx_cpp/trading_system_platform.hpp> // Offline platform-owner integration.
 #include <optionx_cpp/market_data.hpp>
 #include <optionx_cpp/platforms.hpp>
+#include <optionx_cpp/simulator_policy.hpp>
 #include <optionx_cpp/platforms/IntradeBarPlatform.hpp>
 #include <optionx_cpp/bridges/bot_binary.hpp>
 #include <optionx_cpp/bridges/protocol_v1.hpp>
@@ -45,7 +46,11 @@
   consumer contract должен работать только с корнем `include`.
 - Public aggregate headers (`optionx.hpp`, `data.hpp`, `trading_system.hpp`,
   `market_data.hpp`, `platforms.hpp`, `storages.hpp`, `components.hpp`,
-  `utils.hpp`, `bridges.hpp`) задают публичные точки подключения.
+  `utils.hpp`, `bridges.hpp`, `simulator_policy.hpp`) задают публичные точки подключения.
+- `simulator_policy.hpp` is the lightweight public entry for the pure
+  `SimulatorPolicy` resolver. `platforms.hpp` also exposes it, but pulls in
+  platform/network dependencies. The leaf under `platforms/SimulatorPlatform/`
+  is not a standalone include target.
 - `trading_system.hpp` is the single public entry point for the complete
   trading-system domain. It includes the domain contracts, trading-specific
   MDBX storage, and execution recovery. Consumers that need only the pure
