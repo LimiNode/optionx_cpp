@@ -280,6 +280,46 @@ TEST(SimulatorPolicyTest, RejectsInvalidConfigurationAndKeepsEnumDirection) {
               SimulatorPolicyError::INVALID_CONFIG);
 }
 
+TEST(SimulatorPolicySnapshotTest, MatchesConservativeResolverIncludingInvalidRequests) {
+    const auto policy = example_policy();
+    const auto snapshot = SimulatorPolicySnapshot::create(policy);
+    ASSERT_TRUE(snapshot);
+    EXPECT_EQ(snapshot->version(), policy.version);
+    for (const auto& symbol : {"EURUSD", "GBPUSD", "MISSING"}) {
+        for (const auto direction : {OrderType::BUY, OrderType::SELL, OrderType::UNKNOWN}) {
+            for (const auto time : {0u, 64499u, 64500u, 65099u, 65100u, 86399u, 86400u}) {
+                for (const auto duration : {59u, 60u, 120u, 300u, 30000u, 30001u}) {
+                    const auto facts = request(symbol, direction, time, duration);
+                    const auto a = policy.resolve(facts);
+                    const auto b = snapshot->resolve(facts);
+                    EXPECT_EQ(a.error, b.error);
+                    EXPECT_EQ(a.values.available, b.values.available);
+                    EXPECT_EQ(a.values.payout_ppm, b.values.payout_ppm);
+                    EXPECT_EQ(a.values.min_stake_minor, b.values.min_stake_minor);
+                    EXPECT_EQ(a.values.max_stake_minor, b.values.max_stake_minor);
+                    EXPECT_EQ(a.values.max_active_global, b.values.max_active_global);
+                    EXPECT_EQ(a.values.max_active_symbol, b.values.max_active_symbol);
+                    EXPECT_EQ(a.applied_rule_ids, b.applied_rule_ids);
+                }
+            }
+        }
+    }
+}
+
+TEST(SimulatorPolicySnapshotTest, OwnsCopyAndRejectsInvalidUpdates) {
+    auto policy = example_policy();
+    const auto snapshot = SimulatorPolicySnapshot::create(policy);
+    ASSERT_TRUE(snapshot);
+    policy.version = 2;
+    policy.symbols["EURUSD"].payout_ppm = -1;
+    SimulatorPolicyError error = SimulatorPolicyError::NONE;
+    EXPECT_FALSE(SimulatorPolicySnapshot::create(policy, &error));
+    EXPECT_EQ(error, SimulatorPolicyError::INVALID_CONFIG);
+    EXPECT_EQ(policy.resolve(request("EURUSD", OrderType::BUY, 0)).error, error);
+    EXPECT_EQ(snapshot->resolve(request("EURUSD", OrderType::BUY, 0)).values.payout_ppm, 750000);
+    EXPECT_EQ(snapshot->version(), 1u);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

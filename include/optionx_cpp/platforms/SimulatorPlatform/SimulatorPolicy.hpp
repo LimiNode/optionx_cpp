@@ -18,6 +18,8 @@
 
 namespace optionx::platforms {
 
+    class SimulatorPolicySnapshot;
+
     /// \brief Half-open UTC seconds-of-day window; a wrapped window crosses midnight.
     struct SimulatorTimeWindow {
         std::uint32_t start = 0;
@@ -258,6 +260,15 @@ namespace optionx::platforms {
             SimulatorPolicyResult result;
             result.error = validate();
             if (result.error != SimulatorPolicyError::NONE) return result;
+            return resolve_validated(request, false);
+        }
+
+    private:
+        friend class SimulatorPolicySnapshot;
+
+        SimulatorPolicyResult resolve_validated(const SimulatorPolicyRequest& request,
+                                                bool ordered) const {
+            SimulatorPolicyResult result;
             const auto symbol = symbols.find(request.symbol);
             if (symbol == symbols.end()) {
                 result.error = SimulatorPolicyError::INVALID_SYMBOL;
@@ -286,7 +297,7 @@ namespace optionx::platforms {
                     matched.push_back(&rule);
                 }
             }
-            std::sort(matched.begin(), matched.end(), rule_less);
+            if (!ordered) std::sort(matched.begin(), matched.end(), rule_less);
             for (const auto* rule : matched) {
                 rule->overrides.apply_to(result.values);
                 result.applied_rule_ids.push_back(rule->id);
@@ -356,6 +367,36 @@ namespace optionx::platforms {
                     (a.expiry->minimum <= b.expiry->maximum &&
                      b.expiry->minimum <= a.expiry->maximum));
         }
+    };
+
+    /// \class SimulatorPolicySnapshot
+    /// \brief Owning validated policy value with no mutable configuration access.
+    class SimulatorPolicySnapshot {
+    public:
+        /// \brief Copies and validates configuration once; failure never yields a snapshot.
+        static std::optional<SimulatorPolicySnapshot> create(
+                SimulatorPolicy policy, SimulatorPolicyError* error = nullptr) {
+            const auto status = policy.validate();
+            if (error) *error = status;
+            if (status != SimulatorPolicyError::NONE) return std::nullopt;
+            std::sort(policy.rules.begin(), policy.rules.end(),
+                [](const SimulatorRule& a, const SimulatorRule& b) {
+                    return SimulatorPolicy::rule_less(&a, &b);
+                });
+            return SimulatorPolicySnapshot(std::move(policy));
+        }
+
+        /// \brief Resolves in O(log S + log X + R), without configuration validation.
+        SimulatorPolicyResult resolve(const SimulatorPolicyRequest& request) const {
+            return m_policy.resolve_validated(request, true);
+        }
+
+        /// \brief Returns the frozen configuration version.
+        std::uint32_t version() const noexcept { return m_policy.version; }
+
+    private:
+        explicit SimulatorPolicySnapshot(SimulatorPolicy policy) : m_policy(std::move(policy)) {}
+        SimulatorPolicy m_policy;
     };
 
 } // namespace optionx::platforms
