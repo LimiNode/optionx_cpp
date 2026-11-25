@@ -1197,7 +1197,8 @@ if(OPTIONX_BUILD_TESTS)
            test_name STREQUAL "trading_system_batch6_consumer_test" OR
            test_name STREQUAL "trading_system_batch7b_consumer_test" OR
            test_name STREQUAL "trading_system_batch7c_a_consumer_test" OR
-           test_name STREQUAL "trading_system_batch7c_b_consumer_test")
+           test_name STREQUAL "trading_system_batch7c_b_consumer_test" OR
+           test_name STREQUAL "trading_system_batch7d_b_consumer_test")
             set_target_properties(${test_name} PROPERTIES
                 CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
         endif()
@@ -1215,6 +1216,10 @@ if(OPTIONX_BUILD_TESTS)
         )
         if(MSVC)
             target_compile_options(${test_name} PRIVATE /bigobj)
+        endif()
+        if(MINGW AND (test_name STREQUAL "trading_system_batch7d_b_test" OR
+                     test_name STREQUAL "trading_system_batch7d_b_consumer_test"))
+            target_compile_options(${test_name} PRIVATE -Wa,-mbig-obj)
         endif()
         if(test_name STREQUAL "trading_system_batch4_test")
             find_package(Threads REQUIRED)
