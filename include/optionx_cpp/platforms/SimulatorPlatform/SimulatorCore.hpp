@@ -7,9 +7,12 @@
 
 #include <functional>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 
 namespace optionx::platforms {
+
+    enum class SimulatorPriceSide { BID, ASK, MID, REFERENCE };
 
     /// \brief Immutable fixture input: positive fixed-scale prices, Unix UTC milliseconds.
     struct SimulatorTick {
@@ -17,6 +20,13 @@ namespace optionx::platforms {
         std::int64_t timestamp_ms = 0;
         std::int64_t price_units = 0;
         std::size_t observation_id = 0; ///< Assigned from input order, not caller data.
+        std::int64_t received_ms = 0; ///< Simulator owner observation time; fixtures use zero.
+        std::uint64_t provider_key = 0;
+        std::uint64_t provider_instance = 0;
+        std::uint64_t source_generation = 0;
+        std::uint64_t provider_received_ms = 0; ///< Provider metadata, not the decision clock.
+        std::uint32_t price_decimals = 0;
+        SimulatorPriceSide price_side = SimulatorPriceSide::REFERENCE;
     };
 
     /// \class SimulatorQuoteFixture
@@ -80,7 +90,7 @@ namespace optionx::platforms {
     /// \brief Core-only lifecycle facts; UNRESOLVED still owns an opened active slot.
     enum class SimulatorTradePhase { QUEUED, PENDING, OPEN, UNRESOLVED, SETTLED, FAILED_OPEN, CANCELED };
     /// \brief Why no eligible execution quote or economic result could be established.
-    enum class SimulatorUnresolvedReason { NONE, MISSING_QUOTE, STALE_QUOTE, SHUTDOWN };
+    enum class SimulatorUnresolvedReason { NONE, MISSING_QUOTE, STALE_QUOTE, SHUTDOWN, INCOMPATIBLE_SOURCE };
 
     /// \brief Read-only copy of account projections; unresolved trades remain open exposure.
     struct SimulatorAccountSnapshot {
@@ -125,9 +135,18 @@ namespace optionx::platforms {
     class SimulatorCore {
     public:
         using callback_t = std::function<void(const SimulatorTrade&)>;
+        using quote_selector_t = std::function<std::optional<SimulatorTick>(const std::string&, std::int64_t)>;
 
         SimulatorCore(SimulatorAccountConfig account, SimulatorExecutionConfig execution,
                       SimulatorPolicySnapshot policy, SimulatorQuoteFixture quotes,
+                      std::int64_t start_ms = 0)
+            : SimulatorCore(std::move(account), execution, std::move(policy),
+                quote_selector_t{[fixture = std::make_shared<const SimulatorQuoteFixture>(std::move(quotes))]
+                    (const std::string& symbol, std::int64_t when) { return fixture->latest(symbol, when); }}, start_ms) {}
+
+        /// \brief Uses a host-owned as-of selector; the fixture overload remains the reference path.
+        SimulatorCore(SimulatorAccountConfig account, SimulatorExecutionConfig execution,
+                      SimulatorPolicySnapshot policy, quote_selector_t quotes,
                       std::int64_t start_ms = 0)
             : m_execution(execution), m_policy(std::move(policy)), m_quotes(std::move(quotes)),
               m_now(start_ms) {
@@ -136,7 +155,7 @@ namespace optionx::platforms {
                 account.money_decimals > 8 || account.initial_balance_minor < 0 || start_ms < 0 ||
                 execution.open_delay_ms < 0 || execution.response_delay_ms < 0 ||
                 execution.max_quote_age_ms < 0 || execution.max_records == 0 ||
-                execution.max_records > 1000000)
+                execution.max_records > 1000000 || !m_quotes)
                 throw std::invalid_argument("simulator account/execution configuration");
             m_account.config = std::move(account);
             m_account.balance_minor = m_account.config.initial_balance_minor;
@@ -365,10 +384,23 @@ namespace optionx::platforms {
         }
 
         std::optional<SimulatorTick> quote(SimulatorTrade& trade) const {
-            auto tick = m_quotes.latest(trade.order.symbol, m_now);
+            auto tick = m_quotes(trade.order.symbol, m_now);
+            if (tick && (tick->symbol != trade.order.symbol || tick->price_units <= 0 ||
+                         tick->timestamp_ms < 0 || tick->timestamp_ms > m_now ||
+                         tick->received_ms < 0 || tick->received_ms > m_now))
+                tick.reset();
             if (!tick) trade.unresolved_reason = SimulatorUnresolvedReason::MISSING_QUOTE;
             else if (m_now - tick->timestamp_ms > m_execution.max_quote_age_ms) {
                 trade.unresolved_reason = SimulatorUnresolvedReason::STALE_QUOTE;
+                tick.reset();
+            }
+            else if (trade.open_quote &&
+                std::tie(tick->provider_key, tick->provider_instance, tick->source_generation,
+                         tick->price_decimals, tick->price_side) !=
+                std::tie(trade.open_quote->provider_key, trade.open_quote->provider_instance,
+                         trade.open_quote->source_generation, trade.open_quote->price_decimals,
+                         trade.open_quote->price_side)) {
+                trade.unresolved_reason = SimulatorUnresolvedReason::INCOMPATIBLE_SOURCE;
                 tick.reset();
             }
             return tick;
@@ -442,7 +474,7 @@ namespace optionx::platforms {
 
         SimulatorExecutionConfig m_execution;
         SimulatorPolicySnapshot m_policy;
-        SimulatorQuoteFixture m_quotes;
+        quote_selector_t m_quotes;
         SimulatorAccountSnapshot m_account;
         std::vector<Record> m_records;
         std::vector<Event> m_events;

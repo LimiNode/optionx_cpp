@@ -204,7 +204,7 @@ optionx_link_existing_dependencies(optionx_cpp
 
 option(OPTIONX_BUILD_SIMULATOR_EXAMPLES "Build offline simulator examples only" OFF)
 if(OPTIONX_BUILD_EXAMPLES OR OPTIONX_BUILD_SIMULATOR_EXAMPLES)
-    foreach(simulator_example simulator_core_example simulator_policy_benchmark)
+    foreach(simulator_example simulator_core_example simulator_policy_benchmark simulator_execution_benchmark)
         add_executable(${simulator_example} examples/${simulator_example}.cpp)
         set_target_properties(${simulator_example} PROPERTIES
             CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
@@ -1132,6 +1132,8 @@ if(OPTIONX_BUILD_TESTS)
         simulator_policy_test
         simulator_core_test
         simulator_core_consumer_test
+        simulator_market_data_test
+        simulator_market_data_consumer_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
@@ -1206,6 +1208,12 @@ if(OPTIONX_BUILD_TESTS)
 
         add_executable(${test_name} ${test_src})
         target_compile_features(${test_name} PRIVATE cxx_std_17)
+        if(test_name MATCHES "^simulator_market_data_.*test$")
+            set_target_properties(${test_name} PROPERTIES
+                CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+            find_package(Threads REQUIRED)
+            target_link_libraries(${test_name} PRIVATE Threads::Threads)
+        endif()
         if(MSVC AND test_name MATCHES "^simulator_.*test$")
             set_target_properties(${test_name} PROPERTIES
                 MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

@@ -9,6 +9,10 @@ no live platforms, credentials, network calls, Router bindings or Trading
 System ledger writes. The simulator models a broker's physical account, not a
 second series/MM state machine.
 
+SIM-3 adds an opt-in Router binding through a separate aggregate; see
+[simulator market data](simulator-market-data.md). The fixture-only path below
+still has no Router dependency. Dynamic selectors do not change ledger rules.
+
 ## Configuration And Usage
 
 Compiling example: [simulator_core_example.cpp](../examples/simulator_core_example.cpp).
@@ -260,12 +264,12 @@ cmake --build build-sim2-msvc --config Debug --target simulator_policy_test simu
 cmake --build build-sim2-msvc --config Release --target simulator_core_example simulator_policy_benchmark
 ```
 
-`OPTIONX_BUILD_SIMULATOR_EXAMPLES=ON` builds only these two dependency-light
+`OPTIONX_BUILD_SIMULATOR_EXAMPLES=ON` builds these dependency-light
 examples without initializing the other example families. The existing
 `OPTIONX_BUILD_EXAMPLES=ON` also includes them. MinGW uses its matching bundle
 and `-DCMAKE_CXX_FLAGS=-Wa,-mbig-obj`; do not mix ABI/runtime bundles.
 
-Not implemented: real-time clocks, Router/online ticks, durable history/restart,
+Not implemented in the fixture-only core: real-time clocks, durable history/restart,
 unresolved reconciliation/retry, multi-source ready/fallback policy, serialized
 config/money parsing, BaseTradingApi overrides, opening callback compatibility,
 or Trading System integration. `set_policy()` rejects equal/older versions and
