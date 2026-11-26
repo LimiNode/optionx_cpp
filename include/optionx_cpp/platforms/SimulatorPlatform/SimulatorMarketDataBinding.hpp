@@ -43,12 +43,17 @@ public:
                     if (const auto subscriber = weak.lock()) subscriber->accepted(result);
                 });
             if (!m_route.valid()) throw std::runtime_error("simulator route rejected");
-        } catch (...) { m_book->unbind(m_generation); throw; }
+        } catch (...) {
+            if (m_subscriber) m_subscriber->enabled.store(false);
+            m_book->unbind(m_generation);
+            throw;
+        }
     }
     SimulatorMarketDataBinding(const SimulatorMarketDataBinding&) = delete;
     SimulatorMarketDataBinding& operator=(const SimulatorMarketDataBinding&) = delete;
     ~SimulatorMarketDataBinding() { shutdown(); }
     void shutdown() noexcept {
+        if (m_subscriber) m_subscriber->enabled.store(false);
         m_book->unbind(m_generation);
         m_route.reset();
         m_subscriber.reset();
@@ -60,6 +65,7 @@ private:
         std::weak_ptr<SimulatorQuoteBook> book;
         SimulatorMarketDataConfig config;
         clock_t clock;
+        std::atomic_bool enabled{true};
         const std::thread::id owner = std::this_thread::get_id();
         std::uint64_t instance;
         std::uint64_t generation;
@@ -68,6 +74,7 @@ private:
                    clock_t time, std::uint64_t provider, std::uint64_t epoch)
             : book(value), config(std::move(settings)), clock(std::move(time)), instance(provider), generation(epoch) {}
         bool on_owner(const std::shared_ptr<SimulatorQuoteBook>& value) const {
+            if (!enabled.load()) return false;
             if (owner == std::this_thread::get_id()) return true;
             value->block(); return false;
         }

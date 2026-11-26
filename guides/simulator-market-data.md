@@ -59,7 +59,11 @@ creation, queries, shutdown and destruction are also owner-thread operations.
 Callbacks capture weak subscriber/book ownership. The selector captures a weak
 book, not the binding/provider. Binding teardown invalidates its generation
 before resetting its scoped route; late old callbacks cannot feed a new
-generation. Destroying the book makes the selector return no quote.
+generation. Teardown also explicitly disables the subscriber: Router may still
+retain it in an already prepared multi-subscriber delivery. Such a callback
+must not invoke the host's clock after the binding is destroyed. The regression
+covers one status delivery destroying a neighboring binding before its queued
+delivery. Destroying the book makes the selector return no quote.
 
 ## Deterministic Quote Selection
 
@@ -142,7 +146,7 @@ active-symbol count is intentionally retained. This benchmark does not measure
 network latency or claim Router-feed throughput.
 
 Local Windows verification: MSVC 19.44 Debug and MinGW GCC 15.2 Release pass
-20 SIM-3, 22 existing core and 13 policy tests, plus both strict C++17
+21 SIM-3, 22 existing core and 13 policy tests, plus both strict C++17
 consumers. Both compilers' Release fixture examples and execution benchmarks
 pass. One machine/load-specific Release measurement, including callbacks:
 

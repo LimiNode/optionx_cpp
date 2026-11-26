@@ -211,6 +211,24 @@ TEST_F(MarketFeed, PendingAcceptanceAfterBindingDestructionOnlyCleansUpRouterRou
     EXPECT_FALSE(book->select("EURUSD", 0).quote);
     EXPECT_EQ(router.subscription_count(), 0u);
 }
+TEST_F(MarketFeed, RetainedStatusDeliveryCannotCallAClockAfterBindingTeardown) {
+    std::unique_ptr<SimulatorMarketDataBinding> first, second;
+    int clocks = 0;
+    first = std::make_unique<SimulatorMarketDataBinding>(router, provider, book,
+        SimulatorMarketDataConfig{md::MarketDataProviderId{1}, "EURUSD.raw", "EURUSD"},
+        [&] { ++clocks; second.reset(); return now; });
+    second = std::make_unique<SimulatorMarketDataBinding>(router, provider, book,
+        SimulatorMarketDataConfig{md::MarketDataProviderId{1}, "EURUSD.raw", "GBPUSD"},
+        [&] { ++clocks; first.reset(); return now; });
+    md::MarketDataStatusUpdate update;
+    update.provider_id = provider->provider_id(); update.type = md::MarketDataType::TICKS;
+    update.symbol = "EURUSD.raw"; update.status = md::MarketDataStreamStatus::READY;
+    // Router retains both subscribers before invoking the first delivery.
+    provider->on_market_data_status()(std::move(update));
+    EXPECT_EQ(clocks, 1);
+    EXPECT_TRUE(static_cast<bool>(first) != static_cast<bool>(second));
+    first.reset(); second.reset();
+}
 TEST_F(MarketFeed, RebindingAllocatesNewGenerationAndOldGenerationCannotFeedIt) {
     bind(); const auto old = binding->generation(); ready(); provider->emit(0, 100);
     binding.reset(); bind(); EXPECT_GT(binding->generation(), old);
