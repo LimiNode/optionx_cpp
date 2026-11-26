@@ -21,6 +21,7 @@
 #include <optionx_cpp/platforms.hpp>
 #include <optionx_cpp/simulator_policy.hpp>
 #include <optionx_cpp/simulator.hpp>
+#include <optionx_cpp/simulator_market_data.hpp>
 #include <optionx_cpp/platforms/IntradeBarPlatform.hpp>
 #include <optionx_cpp/bridges/bot_binary.hpp>
 #include <optionx_cpp/bridges/protocol_v1.hpp>
@@ -55,6 +56,9 @@
 - `simulator.hpp` is the lightweight public entry for the bounded offline SIM-2
   account/execution core and its immutable fixture. It includes policy and
   enums, not live platforms, Router, storage or the future SIM-4 facade.
+- `simulator_market_data.hpp` owns the complete SIM-3 include closure: existing
+  market-data aggregate, simulator core and scoped binding/quote-book leaves.
+  Use this supported aggregate, not the internal SimulatorPlatform leaves.
 - `trading_system.hpp` is the single public entry point for the complete
   trading-system domain. It includes the domain contracts, trading-specific
   MDBX storage, and execution recovery. Consumers that need only the pure

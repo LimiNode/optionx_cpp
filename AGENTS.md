@@ -22,6 +22,8 @@
   SIM-0: независимая paper-trading платформа, правила, котировки и инварианты.
 - [Offline simulator core](guides/simulator-core.md) - SIM-2: bounded manual-clock
   ledger, immutable policy snapshots, fixtures, result queries and examples.
+- [Simulator market data](guides/simulator-market-data.md) - SIM-3: scoped Router
+  binding, owner receive time, strict as-of quotes and unresolved exposure.
 - [Platform API guide](guides/platform-api-guide.md) - практический справочник
   по платформам, модулям, событиям, DTO, storage и bridge API.
 - [API and header contracts](guides/api-and-header-contracts.md) - публичный
