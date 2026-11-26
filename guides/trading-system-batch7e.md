@@ -162,6 +162,13 @@ Current startup is not bounded by outstanding work:
   narrower ownership; it is not a complete unfinished-operation index.
 - OfflinePlatformOwner considers every recovered operation's group, including
   completed history. Avoiding only journal scanning would not fix that cost.
+- `SeriesCheckpoint` in TradingSystemStorage retains receipts, used intent IDs
+  and used idempotency keys. `SeriesProgression::hydrate()` validates/rebuilds
+  those historical maps even when only the current group can still progress.
+- `SyntheticHost::reload_risk()` (test-only composition) loads all reservations,
+  groups by scope/intent and looks up historical intent keys; `RiskAdmission::hydrate()`
+  retains terminal as well as active reservation keys. These costs must not be
+  silently copied into a production bootstrap path.
 
 Propose operation-head index, outstanding work keyed by
 `risk_scope/account/operation`, terminal groups awaiting completion, pending
@@ -170,13 +177,25 @@ canonical keys/revisions. Updates/removal share the canonical UOW; remove a
 group only with logical completion/reservation commit, not its last callback.
 An index never independently authorizes resend or risk release.
 
-With H historical facts and U outstanding items, target ordinary startup
+With H historical facts and U outstanding items, target operation-discovery
 `O(log H + U log H)` point/range reads, bounded pages and O(page + active owner
-state) memory. Scope isolation belongs in keys, not post-load filters. Full
-audits remain explicit maintenance. Define a trusted generation/checkpoint
+state) memory. Scope isolation belongs in keys, not post-load filters. This is
+not yet an end-to-end startup bound: loading/validating C checkpoint bytes and
+retained historical reservation/series keys adds history-dependent cost.
+Full audits remain explicit maintenance. Define a trusted generation/checkpoint
 rule: an isolated latest-head record does not prove a historical revision chain.
 
-Legacy conversion is one explicit O(H) audit/build. Block mutations during
+An end-to-end bounded-startup claim additionally requires a reviewed versioned
+compact owner checkpoint and durable point-lookup deduplication contract for
+old settlements/intents/reservations. Do not simply omit old keys from hydrate,
+reuse reservation IDs, or discard terminal receipts to make the benchmark
+faster. Keep existing pure owner APIs and legacy recovery compatible until that
+migration is approved. If initial 7E-B only bounds work discovery, report that
+limit explicitly and measure owner hydration/serialized checkpoint bytes
+separately. Historical-copy-on-settlement cost is also separate from indexes.
+
+Legacy conversion explicitly visits the full history (H facts; index writes,
+lookups and per-operation chain validation add their own costs). Block mutations during
 migration; either rebuild transactionally at supported small sizes, or
 checkpoint bounded pages into a new generation and atomically publish a
 verified manifest. Crash cannot expose half a generation. Resume/rebuild
@@ -196,6 +215,8 @@ Keep 7E-B separate from 7E-A.
 - Review real TradeRecordDB receipt compatibility separately; a fake consumer
   does not settle this decision.
 - Approve index trust/checkpoint and legacy migration policy before 7E-B.
+- Approve compact owner checkpoints/durable dedup lookup before claiming that
+  complete startup or settlement cost is independent of completed history.
 - Before SIM-4, review versioned run/epoch identity and one-way integer-to-DTO
   money conversion. Do not hash virtual string IDs into supposedly collision-
   free numeric broker IDs or reconstruct authoritative money from `double`.
