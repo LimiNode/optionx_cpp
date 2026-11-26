@@ -17,7 +17,11 @@ Batch 7A merged through PR #193 as `e81a43db85a31d6828fac72422e0fc5d384e718a`.
 [Batch 7C-A](trading-system-batch7c-a.md) merged through PR #195 as
 `b6f293833bd724075767d3ad31738d9ec245fde6`.
 [Batch 7C-B](trading-system-batch7c-b.md) adds bound durable receipts and offline
-known-ID queries in a separate Draft PR; stop there for review. 7D remains gated.
+known-ID queries. [7D-B](trading-system-batch7d-b.md) integrates the offline
+platform owner and existing logical completion; it is not a live runtime.
+The next architecture gate is [7E-0](trading-system-batch7e.md): approve durable
+delivery contracts before the separate outbox (7E-A) and recovery-index (7E-B)
+code PRs. Neither is authorized for automatic merge or production execution.
 Every later stage must
 preserve the existing broker, Router, task and storage contracts; no live
 trading follows automatically from these milestones.
@@ -185,7 +189,8 @@ Every batch requires:
 - a diff review showing that unrelated user changes were preserved.
 
 The separate Batch 5A, 5B, 5C, 7A, 7B and 7C-A review gates are complete. Stop
-after the separate 7C-B Draft PR; do not merge it or start 7D automatically.
+after each independent review. The later offline 7D integration does not waive
+the separate 7E outbox/index review gates or authorize live execution.
 These stages do not include live Polymarket integration, an exchange
 orderbook/position engine, a GUI/graph editor, an FX aggregation engine, or a
 new scheduler/event bus.

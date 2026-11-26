@@ -18,6 +18,8 @@
   минимальные lifecycle, context, branching и risk contracts.
 - [Trading system implementation plan](guides/TRADING_SYSTEM_IMPLEMENTATION_PLAN.md) -
   последовательность небольших PR и первый synthetic vertical slice.
+- [Durable delivery and recovery proposal](guides/trading-system-batch7e.md) -
+  7E-0 audit, outbox review gate and bounded recovery index plan.
 - [SimulatorPlatform contract](guides/simulator-platform-contract.md) -
   SIM-0: независимая paper-trading платформа, правила, котировки и инварианты.
 - [Offline simulator core](guides/simulator-core.md) - SIM-2: bounded manual-clock
