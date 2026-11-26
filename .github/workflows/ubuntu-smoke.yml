@@ -46,6 +46,18 @@ jobs:
       - name: Run simulator policy test
         run: ./build-linux/simulator_policy_test --gtest_brief=1
 
+      - name: Build offline simulator core, C++17 consumer and examples
+        run: >
+          cmake --build build-linux --target simulator_core_test
+          simulator_core_consumer_test simulator_core_example simulator_policy_benchmark -j
+
+      - name: Run offline simulator core, C++17 consumer and examples
+        run: |
+          ./build-linux/simulator_core_test --gtest_brief=1
+          ./build-linux/simulator_core_consumer_test
+          ./build-linux/simulator_core_example
+          ./build-linux/simulator_policy_benchmark
+
       - name: Build trade_record_db_test
         run: cmake --build build-linux --target trade_record_db_test -j
 

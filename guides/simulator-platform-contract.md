@@ -5,6 +5,10 @@ independent paper-trading platform for binary/fixed-outcome contracts. It may
 consume real or replayed quotes, but it never delegates trades to another
 platform. Integration with Trading System is a later, separate test target.
 
+SIM-2's implemented autonomous core and compiling usage are documented in
+[simulator-core.md](simulator-core.md). That bounded offline API is not the
+future platform facade or Router integration sketched below.
+
 ## Existing boundaries and compatibility
 
 - Use `PlatformType::SIMULATOR`; do not add another platform kind.
@@ -117,6 +121,16 @@ numbers of distinct time/expiry intervals. To bound hostile configurations,
 the implementation rejects more than 128 rules, 128 symbols, 256 excluded
 expiries, or 200000 reachable cells. `resolve()` remains fail-closed if a
 mutable policy object becomes invalid after prior validation.
+
+SIM-2 adds `SimulatorPolicySnapshot::create(policy, &error)`: it owns a copy,
+validates it once and sorts its rules. No mutable configuration is exposed.
+`snapshot.resolve(request)` uses the same resolver kernel without revalidation
+or per-request sorting: `O(log S + log X + R)` time, `O(R)` result/scratch space
+(plus copied rule-ID bytes), for `X` excluded expiries. Snapshot creation has
+the existing validation cost plus `O(R log R)` sorting and configuration-copy
+space. Mutable `SimulatorPolicy::resolve()` remains conservative and validates
+every call. Updating configuration means creating a new snapshot; there is no
+global cache or unchecked mutable fast path.
 
 An expiry policy accepts a bounded duration interval in seconds, excludes
 specified durations, and may override fields at duration thresholds. Duration

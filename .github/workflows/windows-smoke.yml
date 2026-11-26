@@ -65,6 +65,23 @@ jobs:
       - name: Run simulator policy test
         run: .\build-windows\Debug\simulator_policy_test.exe --gtest_brief=1
 
+      - name: Build offline simulator core, C++17 consumer and examples
+        run: >
+          cmake --build build-windows --config Debug --target simulator_core_test
+          simulator_core_consumer_test simulator_core_example simulator_policy_benchmark
+
+      - name: Run offline simulator core, C++17 consumer and examples
+        shell: pwsh
+        run: |
+          .\build-windows\Debug\simulator_core_test.exe --gtest_brief=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-windows\Debug\simulator_core_consumer_test.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-windows\Debug\simulator_core_example.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-windows\Debug\simulator_policy_benchmark.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build MetaTrader path discovery test
         run: cmake --build build-windows --config Debug --target metatrader_paths_test
 
