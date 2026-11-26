@@ -16,6 +16,7 @@
 #include <optionx_cpp/optionx.hpp>
 #include <optionx_cpp/data.hpp>
 #include <optionx_cpp/trading_system.hpp>
+#include <optionx_cpp/trading_system_platform.hpp> // Offline platform-owner integration.
 #include <optionx_cpp/market_data.hpp>
 #include <optionx_cpp/platforms.hpp>
 #include <optionx_cpp/simulator_policy.hpp>

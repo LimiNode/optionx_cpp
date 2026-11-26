@@ -23,7 +23,8 @@ enum class ObservationIngress {
     ACCEPTED,
     CLOSED,
     QUEUE_FULL,
-    INVALID_RECEIPT
+    INVALID_RECEIPT,
+    TOO_LARGE
 };
 
 struct ObservationDrainResult {
@@ -42,12 +43,16 @@ struct ObservationDrainResult {
 /// unresolved durable risk remains for restart reconciliation.
 class PlatformObservationHandoff {
 public:
-    using Sink = std::function<ObservationIngress(TradeResult, std::string)>;
+    using Sink = std::function<ObservationIngress(const TradeResult&, const std::string&)>;
+    static constexpr std::size_t max_receipt_bytes = 256;
+    static constexpr std::size_t max_broker_hash_bytes = 256;
+    static constexpr std::size_t max_diagnostic_bytes = 4096;
 
     PlatformObservationHandoff(TradingSystemStorage& storage,
                                ExecutionRecoveryManager& manager,
-                               std::size_t capacity)
-        : m_storage(storage), m_manager(manager), m_state(std::make_shared<State>(capacity)) {}
+                               std::size_t capacity, std::size_t byte_budget = 1024 * 1024)
+        : m_storage(storage), m_manager(manager),
+          m_state(std::make_shared<State>(capacity, byte_budget)) {}
 
     PlatformObservationHandoff(const PlatformObservationHandoff&) = delete;
     PlatformObservationHandoff& operator=(const PlatformObservationHandoff&) = delete;
@@ -69,7 +74,8 @@ public:
         m_operations = recovered.operations;
         std::lock_guard<std::mutex> lock(m_state->mutex);
         if (m_state->closed || m_state->blocked ||
-            m_state->capacity == 0 || m_state->capacity > 4096) {
+            m_state->capacity == 0 || m_state->capacity > 4096 ||
+            m_state->byte_budget == 0 || m_state->byte_budget > 64 * 1024 * 1024) {
             return {RecoveryResultKind::STORAGE_ERROR, {}, {}, "observation ingress is closed"};
         }
         m_state->accepting = true;
@@ -85,11 +91,7 @@ public:
         if (!fact.found() || fact.value->event_type != "EXECUTION_OPERATION") return false;
         try {
             const auto persisted = fact.value->payload.get<ExecutionOperationRecord>();
-            if (persisted.operation_id != operation.operation_id ||
-                persisted.state_revision != operation.state_revision ||
-                persisted.trade_id != operation.trade_id ||
-                persisted.account_id != operation.account_id ||
-                persisted.group_id != operation.group_id) return false;
+            if (nlohmann::json(persisted) != nlohmann::json(operation)) return false;
         } catch (...) {
             return false;
         }
@@ -98,6 +100,7 @@ public:
             if (operation.state_revision != 0) return false;
         } else {
             const auto& prior = existing->second;
+            if (nlohmann::json(prior) == nlohmann::json(operation)) return true;
             if (operation.state_revision <= prior.state_revision ||
                 operation.state_revision - prior.state_revision != 1 ||
                 prior.account_id != operation.account_id ||
@@ -115,22 +118,45 @@ public:
     /// \return A callback safe to invoke after handoff destruction.
     Sink make_sink(platform_receipts::Binding binding) const {
         const std::weak_ptr<State> weak = m_state;
-        return [weak, binding = std::move(binding)](TradeResult result, std::string receipt_id) mutable {
+        const auto sealed = std::make_shared<const platform_receipts::Binding>(std::move(binding));
+        return [weak, sealed](const TradeResult& result, const std::string& receipt_id) {
             const auto state = weak.lock();
             if (!state) return ObservationIngress::CLOSED;
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (!state->accepting || state->closed || state->blocked) return ObservationIngress::CLOSED;
-            if (receipt_id.empty()) {
-                state->blocked = true;
-                return ObservationIngress::INVALID_RECEIPT;
+            const bool too_large = receipt_id.size() > max_receipt_bytes ||
+                result.option_hash.size() > max_broker_hash_bytes ||
+                result.error_desc.size() > max_diagnostic_bytes;
+            const auto bytes = sizeof(Entry) + receipt_id.size() +
+                result.option_hash.size() + result.error_desc.size();
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->accepting || state->closed || state->blocked) return ObservationIngress::CLOSED;
+                if (receipt_id.empty() || too_large) {
+                    state->blocked = true;
+                    return too_large ? ObservationIngress::TOO_LARGE : ObservationIngress::INVALID_RECEIPT;
+                }
+                if (state->queue.size() + state->copying >= state->capacity || bytes > state->byte_budget - state->bytes) {
+                    state->blocked = true;
+                    return ObservationIngress::QUEUE_FULL;
+                }
+                ++state->copying;
+                state->bytes += bytes;
             }
-            if (state->queue.size() >= state->capacity) {
-                state->blocked = true;
-                return ObservationIngress::QUEUE_FULL;
-            }
+            // Bound the DTO first, then copy outside the queue mutex. The sealed
+            // binding is shared instead of copying its JSON for every callback.
             try {
-                state->queue.push_back({binding, std::move(result), std::move(receipt_id)});
+                auto entry = std::make_shared<const Entry>(sealed, result, receipt_id, bytes);
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->accepting || state->closed || state->blocked) {
+                    --state->copying;
+                    state->bytes -= bytes;
+                    return ObservationIngress::CLOSED;
+                }
+                state->queue.push_back(std::move(entry));
+                --state->copying;
             } catch (...) {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                --state->copying;
+                state->bytes -= bytes;
                 state->blocked = true;
                 return ObservationIngress::QUEUE_FULL;
             }
@@ -148,30 +174,26 @@ public:
             output.blocked = true;
             return output;
         }
-        while (true) {
+        std::size_t budget;
+        {
+            std::lock_guard<std::mutex> lock(m_state->mutex);
+            budget = m_state->queue.size();
+        }
+        while (budget-- > 0) {
             std::unique_lock<std::mutex> lock(m_state->mutex);
             if (m_state->queue.empty()) {
                 output.blocked = m_state->blocked;
                 return output;
             }
-            std::optional<Entry> entry;
-            try {
-                entry.emplace(m_state->queue.front());
-            } catch (...) {
-                m_state->blocked = true;
-                output.kind = StorageResultKind::STORAGE_ERROR;
-                output.message = "cannot copy queued platform observation";
-                output.blocked = true;
-                return output;
-            }
+            const auto entry = m_state->queue.front();
             lock.unlock();
 
-            const auto operation = m_operations.find(entry->binding.operation_id());
+            const auto operation = m_operations.find(entry->binding->operation_id());
             if (operation == m_operations.end()) {
                 output.kind = StorageResultKind::INVALID_STATE;
                 output.message = "operation is not tracked by execution owner";
             } else {
-                auto applied = m_manager.apply_platform_receipt(m_storage, entry->binding,
+                auto applied = m_manager.apply_platform_receipt(m_storage, *entry->binding,
                     entry->result, entry->receipt_id, operation->second.state_revision);
                 output.kind = applied.kind;
                 output.message = applied.message;
@@ -187,9 +209,14 @@ public:
                 return output;
             }
             lock.lock();
+            m_state->bytes -= entry->bytes;
             m_state->queue.pop_front();
             ++output.processed;
+            lock.unlock();
         }
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        output.blocked = m_state->blocked;
+        return output;
     }
 
     /// \brief Stops ingress before draining accepted observations.
@@ -214,15 +241,22 @@ public:
 
 private:
     struct Entry {
-        platform_receipts::Binding binding;
+        Entry(std::shared_ptr<const platform_receipts::Binding> sealed,
+              const TradeResult& value, const std::string& receipt, std::size_t size)
+            : binding(std::move(sealed)), result(value), receipt_id(receipt), bytes(size) {}
+        std::shared_ptr<const platform_receipts::Binding> binding;
         TradeResult result;
         std::string receipt_id;
+        std::size_t bytes;
     };
     struct State {
-        explicit State(std::size_t count) : capacity(count) {}
+        State(std::size_t count, std::size_t budget) : capacity(count), byte_budget(budget) {}
         std::mutex mutex;
-        std::deque<Entry> queue;
+        std::deque<std::shared_ptr<const Entry>> queue;
         std::size_t capacity;
+        std::size_t byte_budget;
+        std::size_t bytes = 0;
+        std::size_t copying = 0;
         bool accepting = false;
         bool blocked = false;
         bool closed = false;
