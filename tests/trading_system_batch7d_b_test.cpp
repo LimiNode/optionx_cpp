@@ -46,9 +46,14 @@ public:
     TradeState query_state = TradeState::WIN;
     int sends = 0;
     int queries = 0;
+    int runs = 0;
     std::int64_t broker_id = 91;
     bool accept = true;
     optionx::PlatformType platform_type() const override { return optionx::PlatformType::INTRADE_BAR; }
+    void run(bool start_worker_thread = true) override {
+        ++runs;
+        BaseTradingPlatform::run(start_worker_thread);
+    }
     bool place_trade(std::unique_ptr<optionx::TradeRequest> value) override {
         ++sends; request = std::move(value);
         if (during_call) during_call();
@@ -186,6 +191,56 @@ TEST_F(Batch7DB, PartialMultiAccountGroupDoesNotAdvanceUntilLastTerminal) {
     ASSERT_TRUE(owner->process().succeeded());
     EXPECT_EQ(completions, 1);
     EXPECT_TRUE(host->mm_state().payload.at("after_loss").get<bool>());
+}
+
+TEST_F(Batch7DB, SharedPlatformInstanceAcrossAccountsFailsBeforeLifecycleOrDurableChanges) {
+    setup(true);
+    const auto before = host->storage().journal_events();
+    ASSERT_TRUE(before.succeeded());
+    const auto series = host->series();
+    const auto mm = host->mm_state();
+    auto platform = std::make_shared<FakePlatform>();
+    std::vector<detail::OfflinePlatformOwner::Endpoint> endpoints;
+    for (const auto& operation : operations)
+        endpoints.push_back({platform, support::read(host->storage().account(operation.account_id))});
+    owner = std::make_unique<detail::OfflinePlatformOwner>(host->storage(), manager, std::move(endpoints),
+        [this](auto group) { ++completions; return host->complete(group); });
+    EXPECT_FALSE(owner->start().succeeded());
+    EXPECT_FALSE(owner->ready());
+    EXPECT_EQ(platform->runs, 0);
+    EXPECT_FALSE(owner->submit(operations[0], bindings[0]).succeeded());
+    EXPECT_FALSE(owner->submit(operations[1], bindings[1]).succeeded());
+    platform->process();
+    EXPECT_EQ(platform->sends, 0);
+    EXPECT_EQ(platform->queries, 0);
+    const auto after = host->storage().journal_events();
+    ASSERT_TRUE(after.succeeded());
+    ASSERT_EQ(after.values.size(), before.values.size());
+    for (std::size_t i = 0; i < before.values.size(); ++i) {
+        EXPECT_EQ(after.values[i].event_id, before.values[i].event_id);
+        EXPECT_EQ(after.values[i].payload, before.values[i].payload);
+        EXPECT_EQ(after.values[i].state_revision, before.values[i].state_revision);
+    }
+    EXPECT_EQ(host->series().current_group_id, series.current_group_id);
+    EXPECT_EQ(host->mm_state().state_revision, mm.state_revision);
+    EXPECT_EQ(host->mm_state().payload, mm.payload);
+    EXPECT_EQ(risk(0), ts::RiskReservationState::RESERVED);
+    EXPECT_EQ(risk(1), ts::RiskReservationState::RESERVED);
+    EXPECT_EQ(completions, 0);
+}
+
+TEST_F(Batch7DB, DuplicateAccountWithDistinctPlatformInstancesStillFailsBeforeRun) {
+    setup();
+    const auto account = support::read(host->storage().account(operations[0].account_id));
+    auto first = std::make_shared<FakePlatform>();
+    auto second = std::make_shared<FakePlatform>();
+    owner = std::make_unique<detail::OfflinePlatformOwner>(host->storage(), manager,
+        std::vector<detail::OfflinePlatformOwner::Endpoint>{{first, account}, {second, account}},
+        [this](auto group) { return host->complete(group); });
+    EXPECT_FALSE(owner->start().succeeded());
+    EXPECT_EQ(first->runs, 0);
+    EXPECT_EQ(second->runs, 0);
+    EXPECT_EQ(risk(), ts::RiskReservationState::RESERVED);
 }
 
 TEST_F(Batch7DB, AcceptedTaskCancelledAtShutdownRemainsUncertainAndNeverResends) {

@@ -15,6 +15,10 @@ thread. Platform callbacks can arrive on other threads, but they only enqueue
 owned DTO values. The host supplies endpoint metadata and owns storage,
 `ExecutionRecoveryManager`, and the idempotent group-completion policy for the
 entire owner lifetime. A wrong endpoint identity/realm fails before dispatch.
+Each endpoint requires a distinct platform object as well as a distinct account
+ID: one BaseTradingPlatform represents one session. Reusing the same instance
+for different accounts is rejected before lifecycle startup or any durable
+change. Multi-session platform routing would require a separate explicit contract.
 
 ## Execution And Recovery
 
@@ -93,7 +97,9 @@ outbox, bounded long-history recovery indexes, TradeRecordDB mirror replay,
 account configuration management, or production scheduling. Those remain
 separate reviewed work; SIM-3/4 are unrelated gates.
 
-Local MSVC verification: 19/19 focused tests, 10/10 7D-A tests, 283/283
+Local MSVC and MinGW verification: 21/21 focused tests, including duplicate
+platform-instance/account rejection before run or journal changes. MSVC also
+passed 10/10 7D-A tests and 283/283
 Batch 1--7C-B regressions, and aggregate-only consumer build/run. Both full
 platform targets pass: Intrade responses 111/111 and result queries 12/12.
 The local prebuilt dependency bundle requires the matching static Debug CRT:

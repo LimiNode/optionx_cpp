@@ -45,10 +45,12 @@ public:
         if (m_started || !m_complete) return invalid("owner already started or missing completion contract");
         m_thread = std::this_thread::get_id();
         std::set<std::uint64_t> accounts;
+        std::set<const platforms::BaseTradingPlatform*> instances;
         for (const auto& endpoint : m_endpoints) {
             const auto stored = m_storage.account(endpoint.account.account_id);
             if (!endpoint.platform || !stored.found() || !endpoint.account.active ||
                 !stored.value->active || !accounts.insert(endpoint.account.account_id).second ||
+                !instances.insert(endpoint.platform.get()).second ||
                 endpoint.platform->platform_type() != PlatformType::INTRADE_BAR ||
                 endpoint.account.platform_type != "IntradeBar" ||
                 platform_receipts::account_identity(endpoint.account) !=
