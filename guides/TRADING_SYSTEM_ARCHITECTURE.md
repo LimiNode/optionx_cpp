@@ -9,6 +9,9 @@ extended by durable local storage, simulated recovery and an offline synthetic
 composition. The durable boundary is specified in [Batch 5A](trading-system-batch5a.md)
 and implemented by [5B](trading-system-batch5b.md), [5C](trading-system-batch5c.md)
 and [6](trading-system-batch6.md). This does not authorize a production runtime.
+The [7E-0 proposal](trading-system-batch7e.md) audits durable delivery and startup
+recovery gaps after offline platform integration; outbox and recovery indexes
+remain separately reviewed stages.
 [Batch 7A](trading-system-batch7a.md) proposes integration with the existing
 platform API, without changing its broker semantics.
 
