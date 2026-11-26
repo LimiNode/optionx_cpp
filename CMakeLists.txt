@@ -202,6 +202,20 @@ optionx_link_existing_dependencies(optionx_cpp
     simple-websocket-server
 )
 
+option(OPTIONX_BUILD_SIMULATOR_EXAMPLES "Build offline simulator examples only" OFF)
+if(OPTIONX_BUILD_EXAMPLES OR OPTIONX_BUILD_SIMULATOR_EXAMPLES)
+    foreach(simulator_example simulator_core_example simulator_policy_benchmark)
+        add_executable(${simulator_example} examples/${simulator_example}.cpp)
+        set_target_properties(${simulator_example} PROPERTIES
+            CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+        target_include_directories(${simulator_example} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include ${OPTIONX_DEPS_OUTPUT_DIR}/include)
+        if(OPTIONX_BUILD_DEPS AND TARGET nlohmann_json::nlohmann_json)
+            target_link_libraries(${simulator_example} PRIVATE nlohmann_json::nlohmann_json)
+        endif()
+    endforeach()
+endif()
+
 if(WIN32)
     target_link_libraries(optionx_cpp INTERFACE ${OPTIONX_WINDOWS_SYSTEM_LIBS})
 endif()
@@ -1116,6 +1130,8 @@ if(OPTIONX_BUILD_TESTS)
         market_data_tick_continuity_test
         intrade_observed_tick_history_test
         simulator_policy_test
+        simulator_core_test
+        simulator_core_consumer_test
     )
     if(OPTIONX_LIGHTWEIGHT_BRIDGE_SMOKE_TESTS)
         list(APPEND OPTIONX_LIGHTWEIGHT_TESTS
@@ -1190,9 +1206,14 @@ if(OPTIONX_BUILD_TESTS)
 
         add_executable(${test_name} ${test_src})
         target_compile_features(${test_name} PRIVATE cxx_std_17)
-        if(MSVC AND test_name STREQUAL "simulator_policy_test")
+        if(MSVC AND test_name MATCHES "^simulator_.*test$")
             set_target_properties(${test_name} PROPERTIES
                 MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        endif()
+        if(test_name STREQUAL "simulator_core_consumer_test")
+            set_target_properties(${test_name} PROPERTIES
+                CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+            target_sources(${test_name} PRIVATE tests/simulator/simulator_core_consumer_companion.cc)
         endif()
         if(test_name STREQUAL "trading_system_batch3_consumer_test")
             set_target_properties(${test_name} PROPERTIES

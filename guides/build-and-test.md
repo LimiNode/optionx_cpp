@@ -12,6 +12,7 @@
 | `OPTIONX_BUILD_DEPS` | `OFF` | Собрать зависимости из `external/` |
 | `OPTIONX_BUILD_EXAMPLES` | `OFF` | Включить examples, если они поддержаны CMake |
 | `OPTIONX_BUILD_TESTS` | `OFF` | Собрать tests из `tests/*.cpp` |
+| `OPTIONX_BUILD_SIMULATOR_EXAMPLES` | `OFF` | Только offline SIM-2 example и policy benchmark |
 | `OPTIONX_DEPS_BUILD_DIR` | empty | Путь к уже собранным зависимостям, когда `OPTIONX_BUILD_DEPS=OFF` |
 | `LOGIT_BASE_PATH` | source dir | Base path для LOGIT logs |
 
@@ -79,6 +80,12 @@ Target naming:
 если он использует существующую схему include/link.
 
 Полезные текущие targets:
+
+- `simulator_policy_test`, `simulator_core_test`, `simulator_core_consumer_test` -
+  deterministic SIM-1/2, integer money, fixtures, lifecycle and strict two-TU C++17.
+- `simulator_core_example`, `simulator_policy_benchmark` - offline ledger example
+  and reference-versus-snapshot performance measurement; see
+  [simulator-core.md](simulator-core.md).
 
 - `intrade_bar_api_response_test` - parser/typed-result fixtures Intrade Bar.
 - `intrade_bar_auth_smoke_test` - guarded online auth smoke; требует proxy.
@@ -204,6 +211,9 @@ targets.
 ## Examples
 
 Текущие examples:
+
+- `examples/simulator_core_example.cpp`
+- `examples/simulator_policy_benchmark.cpp`
 
 - `examples/event_mediator_test.cpp`
 - `examples/intrade_bar_api_example.cpp`

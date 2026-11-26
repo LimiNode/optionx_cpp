@@ -20,6 +20,7 @@
 #include <optionx_cpp/market_data.hpp>
 #include <optionx_cpp/platforms.hpp>
 #include <optionx_cpp/simulator_policy.hpp>
+#include <optionx_cpp/simulator.hpp>
 #include <optionx_cpp/platforms/IntradeBarPlatform.hpp>
 #include <optionx_cpp/bridges/bot_binary.hpp>
 #include <optionx_cpp/bridges/protocol_v1.hpp>
@@ -51,6 +52,9 @@
   `SimulatorPolicy` resolver. `platforms.hpp` also exposes it, but pulls in
   platform/network dependencies. The leaf under `platforms/SimulatorPlatform/`
   is not a standalone include target.
+- `simulator.hpp` is the lightweight public entry for the bounded offline SIM-2
+  account/execution core and its immutable fixture. It includes policy and
+  enums, not live platforms, Router, storage or the future SIM-4 facade.
 - `trading_system.hpp` is the single public entry point for the complete
   trading-system domain. It includes the domain contracts, trading-specific
   MDBX storage, and execution recovery. Consumers that need only the pure
